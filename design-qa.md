@@ -11,8 +11,9 @@
 - Copy-button combined comparison: `C:\Users\user\AppData\Local\Temp\msbt-copy-qa-DROUtp\compare-copy-button.png`
 - Final interaction rerun: `C:\Users\user\AppData\Local\Temp\msbt-copy-qa-Jbs9XS` (same visual implementation plus the non-visual live-region announcement)
 - Stability/progress fixture: `C:\Users\user\Pictures\Saved Pictures\d79afbd80e767f7033fc631f1b942c7e_720.png` (814,296 bytes, PNG)
-- Lossy v3 fixture results for the same image: clear 63,826 ciphertext characters, balanced 49,461, and extreme 26,673
-- Animated-image fixture: generated two-frame 2 × 2 GIF (111 bytes), used to verify animation detection and frame-preserving default behavior
+- Replacement background: `C:\Users\user\Downloads\CEC610FAF2DA8457BC0B0323E45D9735.jpg` (3424 × 2422, 1,354,600 bytes), embedded byte-for-byte with SHA-256 `742807F8331C790CC92E679FF270202A614B733FB14CEEF9D5922D3EB6977505`
+- Current JPG v3 fixture results for the same image: clear 106,755 ciphertext characters, balanced 83,327, and extreme 40,454
+- Animated-image fixture: generated two-frame 2 × 2 GIF (111 bytes), used to verify animation detection and explicit first-frame JPG output
 - Stability/progress evidence: `C:\Users\user\AppData\Local\Temp\msbt-progress-regression-4NZEAi\encoding-progress.png` and `encoding-complete.png`
 - Memory regression evidence: pre-fix `C:\Users\user\AppData\Local\Temp\msbt-memory-diag-cyVgDj`; post-fix `C:\Users\user\AppData\Local\Temp\msbt-memory-diag-WLtBae`
 - Desktop viewport and captures: 1440 × 900 CSS px and PNG px; device scale factor 1
@@ -27,14 +28,14 @@ The original page is the visual baseline for typography, spacing, colors, imager
 - Fonts and typography: title, labels, text areas, buttons, metadata, hints, status messages, and responsive wrapping remain consistent with the source hierarchy.
 - Spacing and layout rhythm: the 800 px desktop card, 20 px outer inset, 16 px radius, shadows, and button spacing are preserved. The tab control and image cards use the same spacing scale. The text cipher retains its aligned 40 × 40 px copy action; the image workflow now uses a dedicated TXT file card with download and upload actions. At 390 px the card remains 350 px wide and document scroll width remains exactly 390 px.
 - Colors and tokens: tabs, upload control, dashed boundary, image cards, success/error text, download action, and copy action reuse the existing pink palette and surface colors. Successful copying temporarily uses the existing semantic green.
-- Image quality and asset fidelity: the embedded source background is unchanged. Uploaded and decoded previews use intrinsic sizing with `max-width`/`max-height`, preserve aspect ratio, and avoid upscaling small images. The copy glyph is the official Google Material `content_copy` icon, embedded as a PNG data URL so offline use remains intact.
+- Image quality and asset fidelity: the requested 3424 × 2422 JPG now replaces the former background and remains embedded for offline use with full-screen centered `cover` cropping. Uploaded and decoded previews use intrinsic sizing with `max-width`/`max-height`, preserve aspect ratio, and avoid upscaling small images. The copy glyph is the official Google Material `content_copy` icon, embedded as a PNG data URL so offline use remains intact.
 - Copy and content: the image page names all six supported formats, states the 15 MiB limit, and makes local-only processing explicit. Text copy retains its concise label and `已复制` confirmation. Image ciphertext is no longer inserted into the page or clipboard; it is exported as UTF-8 TXT and imported through a TXT file picker.
 
 ## Focused comparisons
 
 - Desktop decoded-result evidence: `image-result-desktop.png` confirms the encoded field, action buttons, success message, restored preview, file metadata, and download action in one state.
 - Mobile decoded-result evidence: `image-result-mobile.png` confirms the same core journey at 390 × 844 without horizontal clipping.
-- `compare-text.png` confirms that the original text controls, copy, background crop, and visual tokens remain intact; the vertical shift is the intentional tab insertion.
+- `compare-text.png` remains historical evidence for the text controls and visual tokens before the requested background replacement; the current background was verified by exact embedded-byte hash and live Chrome rendering.
 - `compare-copy-button.png` places the user's annotated 687 × 540 source beside the 689 × 540 implementation. The requested right-side placement is present, the icon remains outside the text area, and the success feedback does not cover the field label or cipher text.
 - `image-copy-mobile.png` is retained as historical evidence for the superseded image-copy control. Current 390 × 844 runtime inspection confirms the TXT download/upload card has no horizontal overflow.
 - `encoding-progress.png` captures the provided 1280 × 720 PNG at a genuinely intermediate 78% state: controls are disabled, the bar is partially filled, and the status text matches the bar. `encoding-complete.png` captures the same state at green 100% with the full cipher present.
@@ -42,7 +43,7 @@ The original page is the visual baseline for typography, spacing, colors, imager
 ## Interaction and runtime checks
 
 - Text regression passed for empty text, ASCII, Chinese, emoji, mixed text, odd length, illegal characters, and non-fatal UTF-8 replacement behavior.
-- PNG, JPEG, animated GIF, WebP, BMP, and AVIF each passed signature detection, encoding, decoding, browser preview, original filename restoration, MIME restoration, and byte-exact CRC comparison.
+- PNG, JPEG, animated GIF, WebP, BMP, and AVIF each passed signature detection and CRC validation. Legacy payload bytes remain validated before the new final JPG conversion step.
 - Versioned payload validation passed for odd length, illegal characters, wrong magic, unsupported version, truncation, CRC corruption, invalid metadata, and MIME/signature mismatch. Failures preserved the previous successful preview and download.
 - A misleading `.jpg` filename containing PNG bytes was identified from its PNG signature rather than its extension.
 - Repeated selection and decoding revoked prior Blob URLs; tab mouse and keyboard switching passed.
@@ -58,15 +59,16 @@ The original page is the visual baseline for typography, spacing, colors, imager
 - Six-format PNG/JPEG/GIF/WebP/BMP/AVIF round trips and text fixtures (`A`, Chinese, emoji, mixed text) passed after the streaming change.
 - At the 15 MiB boundary, two consecutive pre-fix encodes reached approximately 162.7 MiB and 316.7 MiB heap. The post-fix streaming path reached approximately 93.2 MiB and 94.2 MiB, while producing all progress values from 1% to 100%.
 - Browser console warnings/errors: 0.
-- The v3 compact pipeline passed in real Chrome with the provided 1280 × 720 PNG. Clear mode produced a 62.0 KiB WebP and 63,826 ciphertext characters; balanced produced a 47.9 KiB WebP and 49,461 characters; extreme produced a 25.7 KiB 960 × 540 WebP and 26,673 characters.
-- Balanced mode reduced the provided image bytes by 94.0% and ciphertext length by approximately 97.0% compared with the legacy 1,628,802-character v1 output.
-- The v3 payload decoded to a valid WebP preview and restored the `-compressed.webp` download name, compression label, MIME type, and CRC32-protected bytes.
+- The current v3 JPG pipeline passed in real Chrome with the provided 1280 × 720 PNG. Clear mode produced a 103.9 KiB JPG and 106,755 ciphertext characters; balanced produced an 81.0 KiB JPG and 83,327 characters; extreme produced a 39.2 KiB 960 × 540 JPG and 40,454 characters.
+- Balanced mode reduced the provided image bytes by 89.8% and ciphertext length by approximately 94.9% compared with the legacy 1,628,802-character v1 output.
+- The v3 payload contains a valid JPEG, decodes directly to a JPG preview/download, restores the `-compressed.jpg` name and compression label, and retains CRC32 validation.
 - Compact v2 compatibility passed by decoding a v2 payload through the same 256-character family; the supplied 45,530-character v1 attachment also decoded to its original 22.1 KiB PNG and filename.
-- A generated two-frame GIF was detected as animated, exposed the explicit first-frame option, and preserved all frames and original GIF bytes when that option remained off.
+- A generated two-frame GIF was detected as animated and routed through the intentional first-frame JPG path; the page explains this conversion when the file is selected.
 - The compression UI completed three consecutive mode changes and encodes without a reload. Observed painted progress states included 0%, 13%, 75%, 97%, 98%, and 100%, corresponding to validation/compression, CRC, character mapping, field write, and completion.
 - At 390 × 844 the document and viewport widths both remained 390 px, the card remained 350 px wide, and the three compression choices collapsed to one column without horizontal overflow.
-- The balanced v3 result exported as `d79afbd80e767f7033fc631f1b942c7e_720-msbt-v3.txt`: 49,461 ciphertext characters and 148,208 UTF-8 bytes (144.7 KiB), with no BOM added.
-- Re-importing that TXT with a deliberately added UTF-8 BOM and trailing CRLF restored the 47.9 KiB WebP successfully. The importer strips only the leading BOM and surrounding whitespace, validates the code prefix and character limit, and keeps malformed/non-TXT files out of the decoder.
+- The balanced JPG v3 result exported as `d79afbd80e767f7033fc631f1b942c7e_720-msbt-v3.txt`: 83,327 ciphertext characters and approximately 243.8 KiB of UTF-8 text, with no BOM added.
+- Re-importing that TXT restored the 81.0 KiB JPG successfully. The importer strips only the leading BOM and surrounding whitespace, validates the code prefix and character limit, and keeps malformed/non-TXT files out of the decoder.
+- The supplied legacy v1 PNG TXT decoded to `微信图片_20251226100358_162_4.jpg` (10.7 KiB), and a synthesized legacy v3 WebP payload decoded to `old-v3.jpg` (137.4 KiB). All current and legacy downloads began with the JPEG `FF D8 FF` signature.
 - The image page contains no image-cipher copy button and no large ciphertext textarea. This avoids clipboard limits and removes the browser cost of painting tens of thousands of cipher characters.
 
 ## Findings
@@ -80,11 +82,12 @@ No actionable P0, P1, or P2 issues remain.
 - Pass 2: desktop and mobile captures with a 640 × 360 image confirmed correct aspect ratio, sharpness, and no overflow. The 15 MiB copy and boundary behavior were also revalidated.
 - Pass 3: the requested copy controls were implemented on both cipher fields. The source annotation and implementation were compared side by side; desktop and mobile captures confirmed right-edge alignment, a clear disabled/active/success state, a 40 px target, and zero horizontal overflow. Clipboard equality and console checks passed with no P0–P2 findings.
 - Pass 4: user-reported P1 intermittent renderer crashes and P2 fake progress were reproduced. The old 1 MiB chunk made the provided 814,296-byte image report only 100%, and repeated 15 MiB encoding doubled live heap to about 317 MiB. The encoder now clears stale output before work, computes CRC in painted 128 KiB chunks, writes the versioned payload from separate prefix/image segments without a full payload copy, and uses bounded UTF-16 buffers instead of million-entry string arrays. Post-fix captures show 78% and 100% states, repeated encoding remains stable, and no P0–P2 finding remains.
-- Pass 5: image output moved to a v3 lossy pipeline with clear, balanced, and extreme WebP presets, up to five adaptive quality/size passes, a 256-character one-byte codebook, animation-aware behavior, compact v2 and legacy v1 decode compatibility, and a 40-megapixel decode guard. Real Chrome exercised all three presets, v1/v2/v3 decode paths, animation preservation, progress, output activation, and the 390 px mobile layout with zero console errors.
+- Pass 5: image output originally moved to a v3 lossy WebP pipeline with clear, balanced, and extreme presets, up to five adaptive quality/size passes, a 256-character one-byte codebook, compact v2 and legacy v1 decode compatibility, and a 40-megapixel decode guard. This historical WebP output was superseded in Pass 7.
 - Pass 6: removed the image ciphertext textarea and image-copy action. Encoding now creates an offline UTF-8 TXT Blob and activates only the download action; decoding requires a selected TXT file. Real Chrome completed encode → TXT download → BOM/CRLF-tolerant TXT import → image decode, then repeated the import path with the supplied legacy v1 ciphertext. Mobile width remained exact and console errors remained zero.
+- Pass 7: replaced the embedded background byte-for-byte with the user-supplied 3424 × 2422 JPG. New image payloads now use adaptive JPEG compression, white-fill transparency, and first-frame animation conversion. TXT decoding always exposes a `.jpg` preview/download; real Chrome verified direct v3 JPEG, legacy v1 PNG, and legacy v3 WebP inputs with valid JPEG signatures and zero console errors.
 
 ## Follow-up polish
 
-- P3: an animated image kept in its original format, or a static image that is already smaller than every WebP candidate, can still produce a comparatively long compact ciphertext. The explicit first-frame option trades animation for a much shorter result when desired.
+- P3: JPG improves QQ album compatibility but can produce a larger ciphertext than WebP for the same visual quality. Transparent images are composited onto white, and animated inputs intentionally export only their first frame because JPG cannot preserve transparency or animation.
 
 final result: passed
