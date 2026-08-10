@@ -43,8 +43,14 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.util.ArrayList;
+import java.util.Map;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.Semaphore;
 
 public final class MainActivity extends ComponentActivity {
     private static final String APP_URL = "https://appassets.androidplatform.net/assets/index.html";
@@ -143,7 +149,7 @@ public final class MainActivity extends ComponentActivity {
                     @NonNull RenderProcessGoneDetail detail
             ) {
                 fileBridge.abortCurrentDownload(false);
-                fileBridge.abortCurrentHeicDecode();
+                fileBridge.abortAllHeicDecodes();
                 rootView.removeView(view);
                 view.destroy();
                 Toast.makeText(MainActivity.this, R.string.webview_crashed, Toast.LENGTH_LONG).show();
@@ -355,7 +361,7 @@ public final class MainActivity extends ComponentActivity {
             fileChooserCallback = null;
         }
         fileBridge.abortCurrentDownload(false);
-        fileBridge.abortCurrentHeicDecode();
+        fileBridge.shutdownHeicDecodes();
         if (webView != null) {
             rootView.removeView(webView);
             webView.removeJavascriptInterface("AndroidFileBridge");
@@ -438,12 +444,9 @@ public final class MainActivity extends ComponentActivity {
     }
 
     public final class FileBridge {
-        private FileOutputStream heicInputStream;
-        private File heicInputFile;
-        private File heicOutputFile;
-        private String heicInputToken;
-        private String heicOutputToken;
-        private long heicInputBytes;
+        private final Map<String, HeicTask> heicTasks = new ConcurrentHashMap<>();
+        private final ExecutorService heicExecutor = Executors.newFixedThreadPool(2);
+        private final Semaphore fullSizeDecodeSlot = new Semaphore(1, true);
 
         @JavascriptInterface
         public boolean beginDownload(String name, String mimeType, String blobUrl) {
@@ -523,6 +526,31 @@ public final class MainActivity extends ComponentActivity {
             }
         }
 
+        private final class HeicTask {
+            private final String token;
+            private final File inputFile;
+            private final File outputFile;
+            private FileOutputStream inputStream;
+            private Future<?> future;
+            private long inputBytes;
+            private int maxDimension;
+            private int width;
+            private int height;
+            private int sourceWidth;
+            private int sourceHeight;
+            private long outputSize;
+            private String state = "writing";
+            private String error = "";
+            private boolean cancelled;
+
+            private HeicTask(String token, File inputFile, File outputFile, FileOutputStream inputStream) {
+                this.token = token;
+                this.inputFile = inputFile;
+                this.outputFile = outputFile;
+                this.inputStream = inputStream;
+            }
+        }
+
         @JavascriptInterface
         public boolean isHeicDecodeSupported() {
             return true;
@@ -530,160 +558,242 @@ public final class MainActivity extends ComponentActivity {
 
         @JavascriptInterface
         public synchronized String beginHeicDecode(String ignoredName) {
-            abortCurrentHeicDecode();
+            if (heicTasks.size() >= 2 || heicExecutor.isShutdown()) {
+                return "";
+            }
             String token = UUID.randomUUID().toString();
             File input = new File(getCacheDir(), HEIC_CACHE_PREFIX + token + ".input");
+            File output = new File(getCacheDir(), HEIC_CACHE_PREFIX + token + ".png");
             try {
-                heicInputStream = new FileOutputStream(input, false);
-                heicInputFile = input;
-                heicInputToken = token;
-                heicInputBytes = 0;
+                HeicTask task = new HeicTask(token, input, output, new FileOutputStream(input, false));
+                heicTasks.put(token, task);
                 return token;
             } catch (IOException | SecurityException error) {
-                abortCurrentHeicDecode();
+                input.delete();
+                output.delete();
                 return "";
             }
         }
 
         @JavascriptInterface
-        public synchronized boolean writeHeicChunk(String token, String base64Data) {
-            if (heicInputStream == null || heicInputToken == null || !heicInputToken.equals(token)) {
+        public boolean writeHeicChunk(String token, String base64Data) {
+            HeicTask task = heicTasks.get(token);
+            if (task == null) {
                 return false;
             }
             try {
                 byte[] bytes = Base64.decode(base64Data, Base64.NO_WRAP);
-                if (bytes.length > MAX_NATIVE_CHUNK_BYTES || heicInputBytes + bytes.length > MAX_NATIVE_INPUT_BYTES) {
-                    abortCurrentHeicDecode();
-                    return false;
+                synchronized (task) {
+                    if (!"writing".equals(task.state) || task.inputStream == null || task.cancelled
+                            || bytes.length > MAX_NATIVE_CHUNK_BYTES
+                            || task.inputBytes + bytes.length > MAX_NATIVE_INPUT_BYTES) {
+                        throw new IOException("HEIC/HEIF 临时文件写入失败");
+                    }
+                    task.inputStream.write(bytes);
+                    task.inputBytes += bytes.length;
                 }
-                heicInputStream.write(bytes);
-                heicInputBytes += bytes.length;
                 return true;
             } catch (IOException | IllegalArgumentException error) {
-                abortCurrentHeicDecode();
+                abortHeicDecode(token);
                 return false;
             }
         }
 
         @JavascriptInterface
-        public synchronized String finishHeicDecode(String token, int maxDimension) {
-            JSONObject result = new JSONObject();
-            Bitmap bitmap = null;
+        public boolean commitHeicDecode(String token, int maxDimension) {
+            HeicTask task = heicTasks.get(token);
+            if (task == null) {
+                return false;
+            }
             try {
-                if (heicInputStream == null || heicInputToken == null || !heicInputToken.equals(token)) {
-                    throw new IOException("HEIC/HEIF 解码任务已失效");
+                synchronized (task) {
+                    if (!"writing".equals(task.state) || task.inputStream == null || task.cancelled) {
+                        return false;
+                    }
+                    task.inputStream.flush();
+                    task.inputStream.close();
+                    task.inputStream = null;
+                    task.maxDimension = Math.max(0, Math.min(4096, maxDimension));
+                    task.state = "queued";
+                    task.future = heicExecutor.submit(() -> processHeicTask(task));
                 }
-                heicInputStream.flush();
-                heicInputStream.close();
-                heicInputStream = null;
+                return true;
+            } catch (IOException | RuntimeException error) {
+                abortHeicDecode(token);
+                return false;
+            }
+        }
+
+        private void processHeicTask(HeicTask task) {
+            Bitmap bitmap = null;
+            boolean ownsFullSizeSlot = false;
+            try {
+                if (task.maxDimension == 0) {
+                    fullSizeDecodeSlot.acquire();
+                    ownsFullSizeSlot = true;
+                }
+                synchronized (task) {
+                    if (task.cancelled || Thread.currentThread().isInterrupted()) {
+                        throw new InterruptedException("HEIC/HEIF 解码已取消");
+                    }
+                    task.state = "processing";
+                }
                 int[] sourceSize = new int[2];
-                bitmap = decodeHeicBitmap(heicInputFile, Math.max(0, maxDimension), sourceSize);
-                String outputToken = UUID.randomUUID().toString();
-                File output = new File(getCacheDir(), HEIC_CACHE_PREFIX + outputToken + ".png");
-                try (FileOutputStream stream = new FileOutputStream(output, false)) {
+                bitmap = decodeHeicBitmap(task.inputFile, task.maxDimension, sourceSize);
+                if (task.cancelled || Thread.currentThread().isInterrupted()) {
+                    throw new InterruptedException("HEIC/HEIF 解码已取消");
+                }
+                try (FileOutputStream stream = new FileOutputStream(task.outputFile, false)) {
                     if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)) {
                         throw new IOException("HEIC/HEIF 转换 PNG 失败");
                     }
                     stream.flush();
                 }
-                if (heicInputFile != null) {
-                    heicInputFile.delete();
+                synchronized (task) {
+                    if (task.cancelled || Thread.currentThread().isInterrupted()) {
+                        throw new InterruptedException("HEIC/HEIF 解码已取消");
+                    }
+                    task.outputSize = task.outputFile.length();
+                    task.width = bitmap.getWidth();
+                    task.height = bitmap.getHeight();
+                    task.sourceWidth = sourceSize[0];
+                    task.sourceHeight = sourceSize[1];
+                    task.state = "ready";
                 }
-                heicInputFile = null;
-                heicInputToken = null;
-                heicInputBytes = 0;
-                heicOutputFile = output;
-                heicOutputToken = outputToken;
-                result.put("ok", true);
-                result.put("token", outputToken);
-                result.put("size", output.length());
-                result.put("width", bitmap.getWidth());
-                result.put("height", bitmap.getHeight());
-                result.put("sourceWidth", sourceSize[0]);
-                result.put("sourceHeight", sourceSize[1]);
             } catch (OutOfMemoryError error) {
-                abortCurrentHeicDecode();
-                try {
-                    result.put("ok", false);
-                    result.put("error", "设备内存不足，无法解码这张 HEIC/HEIF 图片");
-                } catch (Exception ignored) {
-                    return "{\"ok\":false,\"error\":\"HEIC/HEIF 解码失败\"}";
+                failHeicTask(task, "设备内存不足，无法解码这张 HEIC/HEIF 图片");
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                synchronized (task) {
+                    task.cancelled = true;
+                    task.state = "cancelled";
                 }
             } catch (Exception error) {
-                abortCurrentHeicDecode();
-                try {
-                    result.put("ok", false);
-                    result.put("error", error.getMessage() == null ? "HEIC/HEIF 解码失败" : error.getMessage());
-                } catch (Exception ignored) {
-                    return "{\"ok\":false,\"error\":\"HEIC/HEIF 解码失败\"}";
-                }
+                failHeicTask(task, error.getMessage() == null ? "HEIC/HEIF 解码失败" : error.getMessage());
             } finally {
+                task.inputFile.delete();
+                synchronized (task) {
+                    if (!"ready".equals(task.state)) {
+                        task.outputFile.delete();
+                    }
+                }
                 if (bitmap != null && !bitmap.isRecycled()) {
                     bitmap.recycle();
                 }
-            }
-            return result.toString();
-        }
-
-        @JavascriptInterface
-        public synchronized String readHeicChunk(String token, long offset, int requestedLength) {
-            if (heicOutputFile == null || heicOutputToken == null || !heicOutputToken.equals(token)
-                    || offset < 0 || requestedLength <= 0 || requestedLength > MAX_NATIVE_CHUNK_BYTES) {
-                return "";
-            }
-            int length = (int) Math.min(requestedLength, Math.max(0, heicOutputFile.length() - offset));
-            if (length <= 0) {
-                return "";
-            }
-            byte[] bytes = new byte[length];
-            try (RandomAccessFile input = new RandomAccessFile(heicOutputFile, "r")) {
-                input.seek(offset);
-                input.readFully(bytes);
-                return Base64.encodeToString(bytes, Base64.NO_WRAP);
-            } catch (IOException | SecurityException error) {
-                return "";
-            }
-        }
-
-        @JavascriptInterface
-        public synchronized void releaseHeicDecode(String token) {
-            if (heicOutputToken != null && heicOutputToken.equals(token)) {
-                if (heicOutputFile != null) {
-                    heicOutputFile.delete();
-                }
-                heicOutputFile = null;
-                heicOutputToken = null;
-            }
-        }
-
-        @JavascriptInterface
-        public synchronized void abortHeicDecode(String token) {
-            if ((heicInputToken != null && heicInputToken.equals(token))
-                    || (heicOutputToken != null && heicOutputToken.equals(token))) {
-                abortCurrentHeicDecode();
-            }
-        }
-
-        private synchronized void abortCurrentHeicDecode() {
-            if (heicInputStream != null) {
-                try {
-                    heicInputStream.close();
-                } catch (IOException ignored) {
-                    // Best-effort cleanup.
+                if (ownsFullSizeSlot) {
+                    fullSizeDecodeSlot.release();
                 }
             }
-            if (heicInputFile != null) {
-                heicInputFile.delete();
+        }
+
+        private void failHeicTask(HeicTask task, String message) {
+            synchronized (task) {
+                if (!task.cancelled) {
+                    task.error = message;
+                    task.state = "error";
+                }
             }
-            if (heicOutputFile != null) {
-                heicOutputFile.delete();
+        }
+
+        @JavascriptInterface
+        public String getHeicDecodeStatus(String token) {
+            HeicTask task = heicTasks.get(token);
+            JSONObject result = new JSONObject();
+            try {
+                if (task == null) {
+                    result.put("state", "cancelled");
+                    result.put("error", "HEIC/HEIF 解码任务已失效");
+                    return result.toString();
+                }
+                synchronized (task) {
+                    result.put("state", task.state);
+                    if (!task.error.isEmpty()) {
+                        result.put("error", task.error);
+                    }
+                    if ("ready".equals(task.state)) {
+                        result.put("size", task.outputSize);
+                        result.put("width", task.width);
+                        result.put("height", task.height);
+                        result.put("sourceWidth", task.sourceWidth);
+                        result.put("sourceHeight", task.sourceHeight);
+                    }
+                }
+                return result.toString();
+            } catch (Exception error) {
+                return "{\"state\":\"error\",\"error\":\"HEIC/HEIF 状态读取失败\"}";
             }
-            heicInputStream = null;
-            heicInputFile = null;
-            heicOutputFile = null;
-            heicInputToken = null;
-            heicOutputToken = null;
-            heicInputBytes = 0;
+        }
+
+        @JavascriptInterface
+        public String readHeicChunk(String token, long offset, int requestedLength) {
+            HeicTask task = heicTasks.get(token);
+            if (task == null || offset < 0 || requestedLength <= 0 || requestedLength > MAX_NATIVE_CHUNK_BYTES) {
+                return "";
+            }
+            synchronized (task) {
+                if (!"ready".equals(task.state) || !task.outputFile.exists()) {
+                    return "";
+                }
+                int length = (int) Math.min(requestedLength, Math.max(0, task.outputFile.length() - offset));
+                if (length <= 0) {
+                    return "";
+                }
+                byte[] bytes = new byte[length];
+                try (RandomAccessFile input = new RandomAccessFile(task.outputFile, "r")) {
+                    input.seek(offset);
+                    input.readFully(bytes);
+                    return Base64.encodeToString(bytes, Base64.NO_WRAP);
+                } catch (IOException | SecurityException error) {
+                    return "";
+                }
+            }
+        }
+
+        @JavascriptInterface
+        public void releaseHeicDecode(String token) {
+            HeicTask task = heicTasks.remove(token);
+            if (task != null) {
+                cleanupHeicTask(task);
+            }
+        }
+
+        @JavascriptInterface
+        public void abortHeicDecode(String token) {
+            HeicTask task = heicTasks.remove(token);
+            if (task != null) {
+                cleanupHeicTask(task);
+            }
+        }
+
+        private void cleanupHeicTask(HeicTask task) {
+            synchronized (task) {
+                task.cancelled = true;
+                task.state = "cancelled";
+                if (task.future != null) {
+                    task.future.cancel(true);
+                }
+                if (task.inputStream != null) {
+                    try {
+                        task.inputStream.close();
+                    } catch (IOException ignored) {
+                        // Best-effort cleanup.
+                    }
+                    task.inputStream = null;
+                }
+                task.inputFile.delete();
+                task.outputFile.delete();
+            }
+        }
+
+        private void abortAllHeicDecodes() {
+            for (String token : new ArrayList<>(heicTasks.keySet())) {
+                abortHeicDecode(token);
+            }
+        }
+
+        private void shutdownHeicDecodes() {
+            abortAllHeicDecodes();
+            heicExecutor.shutdownNow();
         }
 
         private synchronized void abortCurrentDownload(boolean notifyUser) {

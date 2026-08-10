@@ -291,3 +291,35 @@ final result: passed
 No Android device was connected, so system-picker selection and native HEIC decoding still require a final physical-device smoke test. Build, packaging, signature detection, Java bridge wiring, and real-file format validation passed.
 
 final result: passed with device coverage gap
+
+## Internal long-image storage and explicit export verification
+
+- Date: 2026-08-10. Automatic comic processing now writes the generated PNG to persistent shelf application data. It does not create a browser or Android download; the `.ecomic` archive remains the only immediately available archive download.
+- The history record stores a validated `png.entryName` that points to a non-temporary OPFS/IndexedDB entry. Replacing or deleting a book also removes its former long-image entry.
+- The reader header now contains only the reading description and `关闭阅读`; generation and download controls, long-press download handling, and hidden long-image anchors were removed.
+- A real HTTP Edge run imported `assets/icon-192.png`, encrypted one page, and completed shelf persistence with zero files in the download directory. The stored PNG entry was 2,217 bytes and remained addressable from OPFS by its history key.
+- The same run switched to the shelf and clicked `导出长图`. Exactly one `internal-long-qa-long.png` file was downloaded. This is now the sole long-image download path in both the web application and APK wrapper.
+- Automated JavaScript tests passed 25/25. APK release 1.0.4 (code 5) is built from the same web assets, passed Gradle build/lint and APK Signature Scheme v2 verification, and has SHA-256 `6C8076626978529AE4E668630A7711EC39E95885A6F522755F3DE937848DFD6E`.
+
+**Findings**
+
+Existing shelf records created before persistent PNG keys were introduced remain readable but do not show the export action until re-imported. No automatic long-image download path remains.
+
+final result: passed
+
+## Immersive reader and bounded parallel pipeline verification
+
+- Date: 2026-08-10. The reader header now defaults to collapsed at a 390 × 844 mobile viewport and expanded at 1280 × 800. Manual state persisted across reloads; rotation-sized metric changes did not overwrite it.
+- The collapsed header measured 0 px high with no horizontal overflow. Both floating controls retained 44 × 44 px hit areas with 32 px visual pills. A real stored portrait page remained decoded after the viewport changed, and the page/within-page position ratio was identical before and after collapse (difference 0).
+- Evidence: `D:\Android\temp\ecryptees-cdp\reader-mobile-collapsed.png`, `reader-mobile-expanded.png`, `reader-desktop-expanded.png`, and `reader-mobile-real-page.png`.
+- HTTP Chrome testing encrypted a real image, wrote the original page and long PNG directly to generation-specific shelf entries, opened it from the shelf, and rendered it in the reader with zero console errors. Direct `file:///D:/DevFiles/Ecryptees/index.html` also encrypted the image through the compatible local pipeline, exposed the `.ecomic`, and committed one shelf book with an 864 × 1920 PNG without automatically downloading that PNG.
+- AES input buffers are transferred rather than copied. A real 96 MiB archive benchmark measured 2,157 ms at one lane, 2,176 ms at two lanes, and 1,584 ms at four lanes: four lanes were 26.6% faster, while no tested mode exceeded the single-lane time by 10%.
+- Node tests passed 26/26, including byte-exact archive round trips at parallelism 1, 2, and 4 with deliberately out-of-order chunk completion. JavaScript syntax checks and `git diff --check` passed.
+- Android HEIC/HEIF conversion now uses a two-thread token task table. Full-size work is serialized by a decode slot; input, polling, output reads, cancellation, release, and application shutdown all address one token. Gradle release build and lint passed.
+- `apksigner` verified APK Signature Scheme v2. `aapt2` confirmed `com.ecryptees.offline`, version 1.0.5 (code 6), minSdk 26, and targetSdk 36. Final APK: `dist/Ecryptees.apk`; SHA-256 `84B3D06E6F09CB1F58BFC28099B93FFA812233300C068AF045458048B7F4A7A4`.
+
+**Findings**
+
+No actionable browser, archive-ordering, storage-commit, build, lint, or signing issue remains. A physical Android device was not connected, so simultaneous native HEIC decoding, cancellation during native decode, and a real near-500 MiB phone memory run remain device-level acceptance items.
+
+final result: passed with device coverage gap

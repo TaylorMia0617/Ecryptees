@@ -157,10 +157,14 @@ test('static entry point references ordered external files without inline handle
     assert.doesNotMatch(index, /<script(?![^>]*\bsrc=)/);
     assert.doesNotMatch(index, /onclick\s*=/);
     assert.match(index, /<dialog[\s\S]*id="comicReaderDialog"/);
-    assert.match(index, /id="comicReaderHint">长按任意图片可生成并下载整本单文件长图（PNG，动画取首帧）/);
+    assert.match(index, /id="comicReaderHint">整本 PNG 长图保存在书架应用数据中，不会自动下载到设备/);
     assert.match(index, /最多 80 张 · 500 MiB · 原图无损封装/);
-    assert.match(index, /id="exportComicLongImageButton"/);
-    assert.match(index, /id="downloadComicLongImage"/);
+    assert.doesNotMatch(index, /id="exportComicLongImageButton"/);
+    assert.doesNotMatch(index, /id="downloadComicLongImage"/);
+    assert.match(index, /id="collapseComicReaderHeaderButton"[^>]*aria-expanded="true"/);
+    assert.match(index, /id="expandComicReaderHeaderButton"[^>]*aria-expanded="false"/);
+    assert.match(index, /id="closeComicReaderButton"[^>]*aria-label="关闭阅读"/);
+    assert.match(index, /id="closeCollapsedComicReaderButton"[^>]*aria-label="关闭阅读"/);
     assert.match(index, /id="historyTab"[\s\S]*data-mode="history"/);
     assert.match(index, /id="historyPanel"/);
     assert.match(index, /id="selectHistoryDirectoryButton"/);
@@ -171,10 +175,26 @@ test('static entry point references ordered external files without inline handle
     assert.doesNotMatch(index, /id="comicReaderSection"/);
     assert.match(comicWorker, /new self\.CompressionStream\('deflate'\)/);
     assert.match(comicWorker, /new self\.OffscreenCanvas/);
+    assert.match(comicWorker, /class CodecTaskPool/);
+    assert.match(comicWorker, /'encryptChunk'/);
+    assert.match(comicWorker, /'decryptChunk'/);
+    assert.match(comicWorker, /'inspectImage'/);
+    assert.match(comicWorker, /normalizeParallelism\(value\)/);
+    assert.match(comicWorker, /Math\.min\(4, Math\.trunc/);
+    assert.match(comicWorker, /runBounded\(session\.manifest\.pages\.length, parallelism/);
     assert.match(comicWorker, /name: `\$\{baseName\}-long\.png`/);
     assert.doesNotMatch(comicWorker, /-long\.svg/);
     const comicApp = fs.readFileSync(path.join(repositoryRoot, 'js', 'comic-app.js'), 'utf8');
-    assert.match(comicApp, /exportLongImage\(true, true\)/);
+    assert.match(comicApp, /saveLongImageToShelf\(\)/);
+    assert.match(comicApp, /createHistoryButton\('导出长图', 'export'/);
+    assert.match(comicApp, /historyLongImageReady/);
+    assert.match(comicApp, /function getComicParallelism\(\)/);
+    assert.match(comicApp, /READER_HEADER_STORAGE_KEY/);
+    assert.match(comicApp, /setReaderHeaderCollapsed\(readReaderHeaderPreference\(\), false, false\)/);
+    assert.match(comicApp, /header\.inert = readerHeaderCollapsed/);
+    assert.doesNotMatch(comicApp, /downloadComicLongImage|autoDownloadLongImage/);
+    assert.match(comicWorker, /opfsName: saveHistory \? '' : entryName/);
+    assert.match(comicWorker, /generatedAt: now,\s*entryName/);
     assert.match(comicApp, /historyAction === 'rename'/);
     assert.match(comicApp, /showDirectoryPicker/);
     assert.match(comicApp, /ecryptees-directory-v1/);
@@ -242,12 +262,19 @@ test('Android wrapper loads local HTTPS assets and streams downloads through SAF
     assert.match(activity, /ImageDecoder\.decodeBitmap/);
     assert.match(activity, /beginHeicDecode\(String ignoredName\)/);
     assert.match(activity, /writeHeicChunk\(String token, String base64Data\)/);
+    assert.match(activity, /commitHeicDecode\(String token, int maxDimension\)/);
+    assert.match(activity, /getHeicDecodeStatus\(String token\)/);
     assert.match(activity, /readHeicChunk\(String token, long offset, int requestedLength\)/);
+    assert.match(activity, /Executors\.newFixedThreadPool\(2\)/);
+    assert.match(activity, /new Semaphore\(1, true\)/);
     assert.match(activity, /Bitmap\.CompressFormat\.PNG/);
     assert.match(bridge, /response\.body\.getReader\(\)/);
     assert.match(bridge, /bridge\.writeChunk\(token, encodeBase64\(value\)\)/);
     assert.match(bridge, /EcrypteesAndroidMedia/);
-    assert.match(bridge, /bridge\.finishHeicDecode\(token, maxDimension\)/);
+    assert.match(bridge, /bridge\.commitHeicDecode\(token, maxDimension\)/);
+    assert.match(bridge, /bridge\.getHeicDecodeStatus\(token\)/);
+    assert.match(bridge, /activeMediaTasks < 2/);
+    assert.doesNotMatch(bridge, /mediaQueue|queueMediaTask|finishHeicDecode/);
     assert.doesNotMatch(bridge, /await response\.arrayBuffer\(\)|await response\.blob\(\)/);
     assert.match(appBuild, /include 'js\/\*\*'/);
     assert.match(appBuild, /androidx\.webkit:webkit:1\.16\.0/);
@@ -279,9 +306,9 @@ test('JPG and JPEG remain selectable in browsers and Android document providers'
 
     assert.match(activity, /params\.getAcceptTypes\(\)/);
     assert.match(activity, /createImageDocumentIntent\(params\)/);
-    assert.match(appBuild, /versionCode 4/);
-    assert.match(appBuild, /versionName '1\.0\.3'/);
-    assert.match(serviceWorker, /const CACHE_NAME = 'ecryptees-app-v3'/);
+    assert.match(appBuild, /versionCode 6/);
+    assert.match(appBuild, /versionName '1\.0\.5'/);
+    assert.match(serviceWorker, /const CACHE_NAME = 'ecryptees-app-v5'/);
 });
 
 test('Android comic picker returns every readable document without trusting provider MIME metadata', () => {
@@ -297,6 +324,6 @@ test('Android comic picker returns every readable document without trusting prov
     assert.match(activity, /data\.getClipData\(\)/);
     assert.match(activity, /getContentResolver\(\)\.openFileDescriptor\(uri, "r"\)/);
     assert.match(activity, /parseImageDocumentResult\(resultCode, data\)/);
-    assert.match(appBuild, /versionCode 4/);
-    assert.match(appBuild, /versionName '1\.0\.3'/);
+    assert.match(appBuild, /versionCode 6/);
+    assert.match(appBuild, /versionName '1\.0\.5'/);
 });

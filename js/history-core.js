@@ -83,6 +83,10 @@
         if (totalSize !== record.totalSize || totalSize > comic.format.MAX_TOTAL_BYTES) {
             throw new TypeError('漫画历史大小无效');
         }
+        const pngEntryName = String(record.png?.entryName || '');
+        if (pngEntryName && !pngEntryName.startsWith(HISTORY_PREFIX)) {
+            throw new TypeError('漫画历史长图存储信息无效');
+        }
         return Object.freeze({
             schemaVersion: SCHEMA_VERSION,
             bookId: record.bookId,
@@ -99,7 +103,8 @@
                 width: Math.max(1, Math.trunc(Number(record.png?.width) || 1)),
                 height: Math.max(1, Math.trunc(Number(record.png?.height) || 1)),
                 size: Math.max(0, Math.trunc(Number(record.png?.size) || 0)),
-                generatedAt: Math.max(0, Math.trunc(Number(record.png?.generatedAt) || Date.now()))
+                generatedAt: Math.max(0, Math.trunc(Number(record.png?.generatedAt) || Date.now())),
+                entryName: pngEntryName
             }),
             progress: Object.freeze(normalizeProgress(record.progress, pages.length)),
             createdAt: Math.max(0, Math.trunc(Number(record.createdAt) || Date.now())),

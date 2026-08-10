@@ -285,14 +285,25 @@
                 <div class="comic-reader-heading">
                     <strong id="comicReaderTitle">连续阅读</strong>
                     <span class="comic-reader-meta" id="comicReaderMeta"></span>
-                    <span class="comic-reader-hint" id="comicReaderHint">长按任意图片可生成并下载整本单文件长图（PNG，动画取首帧）</span>
+                    <span class="comic-reader-hint" id="comicReaderHint">整本 PNG 长图保存在书架应用数据中，不会自动下载到设备</span>
                 </div>
                 <div class="comic-reader-actions">
-                    <button id="exportComicLongImageButton" type="button">重新生成并下载 PNG</button>
-                    <a class="download-button" id="downloadComicLongImage" href="#" aria-disabled="true" hidden>下载整本长图</a>
-                    <button class="secondary-button comic-reader-close" id="closeComicReaderButton" type="button">关闭阅读</button>
+                    <button class="reader-icon-button" id="collapseComicReaderHeaderButton" type="button" aria-label="收起阅读器顶部栏" aria-expanded="true" title="收起顶部栏">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6.7 14.7 5.3-5.3 5.3 5.3-1.4 1.4-3.9-3.9-3.9 3.9-1.4-1.4Z"/></svg>
+                    </button>
+                    <button class="reader-icon-button comic-reader-close" id="closeComicReaderButton" type="button" aria-label="关闭阅读" title="关闭阅读">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6.4 5 5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/></svg>
+                    </button>
                 </div>
             </header>
+            <div class="comic-reader-collapsed-actions" id="comicReaderCollapsedActions">
+                <button class="reader-icon-button" id="expandComicReaderHeaderButton" type="button" aria-label="展开阅读器顶部栏" aria-expanded="false" title="展开顶部栏">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6.7 9.3 1.4-1.4 3.9 3.9 3.9-3.9 1.4 1.4-5.3 5.3-5.3-5.3Z"/></svg>
+                </button>
+                <button class="reader-icon-button comic-reader-close" id="closeCollapsedComicReaderButton" type="button" aria-label="关闭阅读" title="关闭阅读">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6.4 5 5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/></svg>
+                </button>
+            </div>
             <p class="comic-reader-notice" id="comicReaderNotice" role="status" aria-live="polite" hidden></p>
             <div class="comic-reader" id="comicReader" tabindex="0" aria-label="漫画连续阅读区域"></div>
         </div>

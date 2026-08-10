@@ -17,6 +17,316 @@ let nativeDecodeSequence = 0;
 let messageSink = message => self.postMessage(message);
 let storageBackendPromise = null;
 let historyDatabasePromise = null;
+let codecTaskPool = null;
+
+const CODEC_WORKER_SOURCE = `
+'use strict';
+function nonce(prefix, counter) {
+    const value = new Uint8Array(12);
+    value.set(prefix, 0);
+    new DataView(value.buffer).setUint32(8, counter, false);
+    return value;
+}
+function aad(header, counter, plainLength) {
+    const value = new Uint8Array(header.length + 8);
+    value.set(header, 0);
+    const view = new DataView(value.buffer);
+    view.setUint32(header.length, counter, false);
+    view.setUint32(header.length + 4, plainLength, false);
+    return value;
+}
+self.onmessage = async event => {
+    const task = event.data || {};
+    try {
+        if (task.operation === 'inspectImage') {
+            const bitmap = await createImageBitmap(task.file);
+            const result = { width: bitmap.width, height: bitmap.height };
+            bitmap.close();
+            self.postMessage({ taskId: task.taskId, result });
+            return;
+        }
+        const bytes = new Uint8Array(task.bytes);
+        const algorithm = {
+            name: 'AES-GCM',
+            iv: nonce(task.noncePrefix, task.counter),
+            additionalData: aad(task.header, task.counter, task.plainLength),
+            tagLength: 128
+        };
+        const output = task.operation === 'encryptChunk'
+            ? await crypto.subtle.encrypt(algorithm, task.key, bytes)
+            : await crypto.subtle.decrypt(algorithm, task.key, bytes);
+        self.postMessage({ taskId: task.taskId, result: { bytes: output } }, [output]);
+    } catch (error) {
+        self.postMessage({
+            taskId: task.taskId,
+            error: { name: error && error.name || 'Error', message: error && error.message || '并行任务失败' }
+        });
+    }
+};
+`;
+
+function normalizeParallelism(value) {
+    return Math.max(1, Math.min(4, Math.trunc(Number(value) || 1)));
+}
+
+function cancelledTaskError() {
+    return new ComicError('CANCELLED', '操作已取消');
+}
+
+async function runLocalCodecTask(operation, payload) {
+    if (operation === 'inspectImage') {
+        const bitmap = await self.createImageBitmap(payload.file);
+        try {
+            return { width: bitmap.width, height: bitmap.height };
+        } finally {
+            bitmap.close();
+        }
+    }
+    if (operation === 'encryptChunk') {
+        return {
+            bytes: (await comicCrypto.encryptChunk(
+                payload.key,
+                payload.header,
+                payload.noncePrefix,
+                payload.counter,
+                new Uint8Array(payload.bytes)
+            )).buffer
+        };
+    }
+    return {
+        bytes: (await comicCrypto.decryptChunk(
+            payload.key,
+            payload.header,
+            payload.noncePrefix,
+            payload.counter,
+            new Uint8Array(payload.bytes),
+            payload.plainLength
+        )).buffer
+    };
+}
+
+class CodecTaskPool {
+    constructor(size) {
+        this.size = normalizeParallelism(size);
+        this.sequence = 0;
+        this.queue = [];
+        this.slots = [];
+        this.workerUrl = '';
+        if (typeof self.Worker === 'function' && typeof self.Blob === 'function'
+            && self.URL && typeof self.URL.createObjectURL === 'function') {
+            try {
+                this.workerUrl = self.URL.createObjectURL(new self.Blob([CODEC_WORKER_SOURCE], { type: 'text/javascript' }));
+                for (let index = 0; index < this.size; index++) {
+                    this.slots.push(this.createSlot());
+                }
+            } catch (error) {
+                this.closeWorkers();
+            }
+        }
+    }
+
+    createSlot() {
+        const slot = { worker: new self.Worker(this.workerUrl), task: null };
+        slot.worker.addEventListener('message', event => {
+            const task = slot.task;
+            if (!task || event.data?.taskId !== task.taskId) {
+                return;
+            }
+            slot.task = null;
+            if (event.data.error) {
+                task.reject(new Error(event.data.error.message || '并行任务失败'));
+            } else {
+                task.resolve(event.data.result);
+            }
+            this.dispatch();
+        });
+        slot.worker.addEventListener('error', event => {
+            this.fallbackToLocal(slot.task, new Error(event.message || '并行工作线程意外停止'));
+        });
+        return slot;
+    }
+
+    run(jobId, operation, payload) {
+        if (!this.slots.length) {
+            return runLocalCodecTask(operation, payload);
+        }
+        return new Promise((resolve, reject) => {
+            this.queue.push({
+                taskId: `codec-${++this.sequence}`,
+                jobId,
+                operation,
+                payload,
+                resolve,
+                reject
+            });
+            this.dispatch();
+        });
+    }
+
+    dispatch() {
+        for (const slot of this.slots) {
+            if (slot.task || !this.queue.length) {
+                continue;
+            }
+            const task = this.queue.shift();
+            slot.task = task;
+            const data = { taskId: task.taskId, operation: task.operation, ...task.payload };
+            try {
+                const transfer = task.operation === 'inspectImage' ? [] : [data.bytes];
+                slot.worker.postMessage(data, transfer);
+            } catch (error) {
+                slot.task = null;
+                this.fallbackToLocal(task, error);
+            }
+        }
+    }
+
+    fallbackToLocal(extraTask = null, failure = null) {
+        const tasks = [];
+        if (extraTask) {
+            tasks.push(extraTask);
+        }
+        tasks.push(...this.queue);
+        this.queue = [];
+        for (const slot of this.slots) {
+            if (slot.task && slot.task !== extraTask) {
+                tasks.push(slot.task);
+            }
+            slot.task = null;
+            slot.worker.terminate();
+        }
+        this.slots = [];
+        if (this.workerUrl) {
+            self.URL.revokeObjectURL(this.workerUrl);
+            this.workerUrl = '';
+        }
+        for (const task of tasks) {
+            const canRetry = task.operation === 'inspectImage'
+                || !(task.payload.bytes instanceof ArrayBuffer)
+                || task.payload.bytes.byteLength > 0;
+            if (canRetry) {
+                runLocalCodecTask(task.operation, task.payload).then(task.resolve, task.reject);
+            } else {
+                task.reject(failure || new Error('并行工作线程意外停止'));
+            }
+        }
+    }
+
+    cancelJob(jobId) {
+        const retained = [];
+        for (const task of this.queue) {
+            if (task.jobId === jobId) {
+                task.reject(cancelledTaskError());
+            } else {
+                retained.push(task);
+            }
+        }
+        this.queue = retained;
+        for (let index = 0; index < this.slots.length; index++) {
+            const slot = this.slots[index];
+            if (slot.task?.jobId !== jobId) {
+                continue;
+            }
+            slot.task.reject(cancelledTaskError());
+            slot.worker.terminate();
+            this.slots[index] = this.createSlot();
+        }
+        this.dispatch();
+    }
+
+    isIdle() {
+        return this.queue.length === 0 && this.slots.every(slot => !slot.task);
+    }
+
+    closeWorkers() {
+        for (const task of this.queue) {
+            task.reject(new Error('并行工作线程不可用'));
+        }
+        this.queue = [];
+        for (const slot of this.slots) {
+            slot.task?.reject(new Error('并行工作线程不可用'));
+            slot.worker.terminate();
+        }
+        this.slots = [];
+        if (this.workerUrl) {
+            self.URL.revokeObjectURL(this.workerUrl);
+            this.workerUrl = '';
+        }
+    }
+}
+
+function getCodecTaskPool(parallelism) {
+    const size = normalizeParallelism(parallelism);
+    if (codecTaskPool && codecTaskPool.size !== size && codecTaskPool.isIdle()) {
+        codecTaskPool.closeWorkers();
+        codecTaskPool = null;
+    }
+    if (!codecTaskPool) {
+        codecTaskPool = new CodecTaskPool(size);
+    }
+    return codecTaskPool;
+}
+
+async function runBounded(count, parallelism, operation) {
+    const results = new Array(count);
+    let nextIndex = 0;
+    let firstError = null;
+    async function lane() {
+        while (!firstError) {
+            const index = nextIndex++;
+            if (index >= count) {
+                return;
+            }
+            try {
+                results[index] = await operation(index);
+            } catch (error) {
+                firstError ||= error;
+            }
+        }
+    }
+    await Promise.all(Array.from({ length: Math.min(count, normalizeParallelism(parallelism)) }, lane));
+    if (firstError) {
+        throw firstError;
+    }
+    return results;
+}
+
+async function encryptChunkWithPool(jobId, pool, key, header, noncePrefix, counter, bytes) {
+    const source = bytes instanceof ArrayBuffer
+        ? bytes
+        : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    const result = await pool.run(jobId, 'encryptChunk', {
+        key,
+        header,
+        noncePrefix,
+        counter,
+        plainLength: source.byteLength,
+        bytes: source
+    });
+    return new Uint8Array(result.bytes);
+}
+
+async function decryptChunkWithPool(jobId, pool, key, header, noncePrefix, counter, bytes, plainLength) {
+    const source = bytes instanceof ArrayBuffer
+        ? bytes
+        : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    try {
+        const result = await pool.run(jobId, 'decryptChunk', {
+            key,
+            header,
+            noncePrefix,
+            counter,
+            plainLength,
+            bytes: source
+        });
+        return new Uint8Array(result.bytes);
+    } catch (error) {
+        if (error?.code === 'CANCELLED') {
+            throw error;
+        }
+        throw new ComicError('AUTHENTICATION_FAILED', '漫画归档校验失败，文件可能已损坏或被篡改');
+    }
+}
 
 function post(type, jobId, payload = {}) {
     messageSink({ type, jobId, ...payload });
@@ -205,6 +515,12 @@ async function createIndexedDbBackend() {
             transaction.objectStore('entries').delete(name);
             await transactionToPromise(transaction);
         },
+        async listNames() {
+            const transaction = database.transaction('entries', 'readonly');
+            const keys = await requestToPromise(transaction.objectStore('entries').getAllKeys());
+            await transactionToPromise(transaction);
+            return keys.map(String);
+        },
         async cleanup(cutoff) {
             const transaction = database.transaction('entries', 'readonly');
             const store = transaction.objectStore('entries');
@@ -240,6 +556,15 @@ async function createOpfsBackend() {
         },
         async remove(name) {
             await root.removeEntry(name);
+        },
+        async listNames() {
+            const names = [];
+            for await (const [name, handle] of root.entries()) {
+                if (handle.kind === 'file') {
+                    names.push(name);
+                }
+            }
+            return names;
         },
         async cleanup(cutoff) {
             for await (const [name, handle] of root.entries()) {
@@ -300,6 +625,20 @@ async function removeEntryQuietly(storage, name) {
 async function cleanupStaleEntries() {
     const storage = await getStorageBackend();
     await storage.cleanup(Date.now() - 24 * 60 * 60 * 1000);
+    const referenced = new Set();
+    const records = await listHistoryRecords();
+    for (const record of records) {
+        referenced.add(record.coverEntryName);
+        referenced.add(record.png?.entryName);
+        for (const page of record.pages) {
+            referenced.add(page.entryName);
+        }
+    }
+    for (const name of await storage.listNames()) {
+        if (name.startsWith(history.config.HISTORY_PREFIX) && !referenced.has(name)) {
+            await removeEntryQuietly(storage, name);
+        }
+    }
 }
 
 async function detectFileRecord(file) {
@@ -349,12 +688,13 @@ async function encryptArchive(jobId, payload) {
     assertNotCancelled(jobId);
 
     const key = await comicCrypto.deriveBuiltinKey(salt);
-    const encryptedManifest = await comicCrypto.encryptChunk(
-        key,
-        headerBytes,
-        noncePrefix,
-        0,
-        manifestBytes
+    const requestedParallelism = normalizeParallelism(payload.parallelism);
+    const parallelism = manifest.totalSize < format.CHUNK_SIZE * 16
+        ? Math.min(2, requestedParallelism)
+        : requestedParallelism;
+    const pool = getCodecTaskPool(parallelism);
+    const encryptedManifest = await encryptChunkWithPool(
+        jobId, pool, key, headerBytes, noncePrefix, 0, manifestBytes
     );
     const storage = await getStorageBackend();
     const entryName = `${TEMP_PREFIX}${jobId}.ecomic`;
@@ -367,29 +707,57 @@ async function encryptArchive(jobId, payload) {
         await writable.write(headerBytes);
         await writable.write(encryptedManifest);
 
-        let processed = 0;
+        const chunks = [];
         let counter = 1;
         for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
             const file = files[fileIndex];
             for (let offset = 0; offset < file.size; offset += format.CHUNK_SIZE) {
+                counter += 1;
+                chunks.push({
+                    file,
+                    fileIndex,
+                    offset,
+                    plainLength: Math.min(format.CHUNK_SIZE, file.size - offset),
+                    counter: counter - 1
+                });
+            }
+        }
+
+        const pending = new Array(chunks.length);
+        const startChunk = index => {
+            const chunk = chunks[index];
+            pending[index] = (async () => {
                 assertNotCancelled(jobId);
-                const plain = new Uint8Array(await file.slice(offset, offset + format.CHUNK_SIZE).arrayBuffer());
-                const encrypted = await comicCrypto.encryptChunk(
+                const plain = await chunk.file.slice(chunk.offset, chunk.offset + chunk.plainLength).arrayBuffer();
+                const encrypted = await encryptChunkWithPool(
+                    jobId,
+                    pool,
                     key,
                     header.bytes,
                     header.noncePrefix,
-                    counter,
+                    chunk.counter,
                     plain
                 );
-                await writable.write(encrypted);
-                processed += plain.length;
-                counter += 1;
-                post('progress', jobId, {
-                    processed: Math.round(processed / manifest.totalSize * 500),
-                    total: 1000,
-                    message: `正在封装第 ${fileIndex + 1}/${files.length} 页`
-                });
+                return { encrypted, plainLength: chunk.plainLength, fileIndex: chunk.fileIndex };
+            })();
+        };
+        for (let index = 0; index < Math.min(parallelism, chunks.length); index++) {
+            startChunk(index);
+        }
+        let processed = 0;
+        for (let index = 0; index < chunks.length; index++) {
+            assertNotCancelled(jobId);
+            const result = await pending[index];
+            await writable.write(result.encrypted);
+            processed += result.plainLength;
+            if (index + parallelism < chunks.length) {
+                startChunk(index + parallelism);
             }
+            post('progress', jobId, {
+                processed: Math.round(processed / manifest.totalSize * 500),
+                total: 1000,
+                message: `正在封装第 ${result.fileIndex + 1}/${files.length} 页`
+            });
         }
 
         await writable.close();
@@ -430,6 +798,7 @@ async function encryptArchive(jobId, payload) {
                 outputName,
                 sourceName: `${outputName}.${format.EXTENSION}`,
                 saveHistory: true,
+                parallelism,
                 progressRange: { start: 500, end: 1000, total: 1000 }
             });
         } finally {
@@ -468,13 +837,9 @@ async function openArchive(jobId, payload) {
     const key = await comicCrypto.deriveBuiltinKey(header.salt);
     const manifestCipher = new Uint8Array(await file.slice(format.HEADER_SIZE, header.dataOffset).arrayBuffer());
     const manifestPlainLength = header.manifestCipherLength - format.AUTH_TAG_SIZE;
-    const manifestBytes = await comicCrypto.decryptChunk(
-        key,
-        header.bytes,
-        header.noncePrefix,
-        0,
-        manifestCipher,
-        manifestPlainLength
+    const pool = getCodecTaskPool(1);
+    const manifestBytes = await decryptChunkWithPool(
+        jobId, pool, key, header.bytes, header.noncePrefix, 0, manifestCipher, manifestPlainLength
     );
     const manifest = format.validateManifest(format.decodeManifest(manifestBytes), header, file.size);
     const sessionId = `${jobId}-${self.crypto.getRandomValues(new Uint32Array(1))[0].toString(16)}`;
@@ -515,6 +880,7 @@ async function decryptPage(jobId, payload) {
     }
     await ensureStorage(page.size);
     const storage = await getStorageBackend();
+    const pool = getCodecTaskPool(payload.parallelism);
     const oldEntry = session.pageEntries.get(index);
     if (oldEntry) {
         await removeEntryQuietly(storage, oldEntry);
@@ -532,7 +898,9 @@ async function decryptPage(jobId, payload) {
             const encrypted = new Uint8Array(await session.file
                 .slice(cipherOffset, cipherOffset + plainLength + format.AUTH_TAG_SIZE)
                 .arrayBuffer());
-            const plain = await comicCrypto.decryptChunk(
+            const plain = await decryptChunkWithPool(
+                jobId,
+                pool,
                 session.key,
                 session.header.bytes,
                 session.header.noncePrefix,
@@ -662,13 +1030,15 @@ function uniqueZipName(name, usedNames) {
     return candidate;
 }
 
-async function decryptPageChunk(session, page, localIndex) {
+async function decryptPageChunk(jobId, pool, session, page, localIndex) {
     const plainLength = format.getPageChunkPlainLength(page, localIndex);
     const cipherOffset = format.getPageChunkCipherOffset(session.header, page, localIndex);
     const encrypted = new Uint8Array(await session.file
         .slice(cipherOffset, cipherOffset + plainLength + format.AUTH_TAG_SIZE)
         .arrayBuffer());
-    return comicCrypto.decryptChunk(
+    return decryptChunkWithPool(
+        jobId,
+        pool,
         session.key,
         session.header.bytes,
         session.header.noncePrefix,
@@ -745,7 +1115,26 @@ async function createPageBitmap(file, pageName, mime) {
     }
 }
 
-async function getExportPageFile(jobId, session, sessionId, pageIndex) {
+async function inspectPageWithPool(jobId, pool, file, pageName, mime) {
+    try {
+        const result = await pool.run(jobId, 'inspectImage', { file });
+        if (result.width > 0 && result.height > 0) {
+            return result;
+        }
+    } catch (error) {
+        if (error?.code === 'CANCELLED') {
+            throw error;
+        }
+    }
+    const bitmap = await createPageBitmap(file, pageName, mime);
+    try {
+        return { width: bitmap.width, height: bitmap.height };
+    } finally {
+        bitmap.close();
+    }
+}
+
+async function getExportPageFile(jobId, pool, session, sessionId, pageIndex) {
     const storage = await getStorageBackend();
     if (session.kind === 'history') {
         const page = session.manifest.pages[pageIndex];
@@ -768,7 +1157,7 @@ async function getExportPageFile(jobId, session, sessionId, pageIndex) {
         writable = (await createWritableEntry(storage, entryName)).writable;
         for (let localIndex = 0; localIndex < page.chunkCount; localIndex++) {
             assertNotCancelled(jobId);
-            await writable.write(await decryptPageChunk(session, page, localIndex));
+            await writable.write(await decryptPageChunk(jobId, pool, session, page, localIndex));
         }
         await writable.close();
         writable = null;
@@ -832,7 +1221,7 @@ function createIdatWriter(writable) {
     };
 }
 
-async function writeArchivePageToEntry(jobId, session, pageIndex, storage, entryName) {
+async function writeArchivePageToEntry(jobId, pool, session, pageIndex, storage, entryName) {
     const page = session.manifest.pages[pageIndex];
     if (session.kind === 'uploads') {
         await copyStorageFile(jobId, storage, session.files[pageIndex], entryName);
@@ -843,7 +1232,7 @@ async function writeArchivePageToEntry(jobId, session, pageIndex, storage, entry
         writable = (await createWritableEntry(storage, entryName)).writable;
         for (let localIndex = 0; localIndex < page.chunkCount; localIndex++) {
             assertNotCancelled(jobId);
-            await writable.write(await decryptPageChunk(session, page, localIndex));
+            await writable.write(await decryptPageChunk(jobId, pool, session, page, localIndex));
         }
         await writable.close();
         writable = null;
@@ -959,64 +1348,77 @@ async function exportLongImage(jobId, payload) {
     const saveHistory = payload.saveHistory !== false
         && (session.kind === 'archive' || session.kind === 'uploads');
     const storage = await getStorageBackend();
-    const stagingReferences = [];
-    const promotedEntryNames = [];
+    const parallelism = Math.min(
+        normalizeParallelism(payload.parallelism),
+        session.manifest.pages.length
+    );
+    const pool = getCodecTaskPool(parallelism);
+    const pageReferences = new Array(session.manifest.pages.length);
+    const newEntryNames = [];
     let historyCommitted = false;
     let bookId = '';
     let existingRecord = null;
+    let generation = '';
     if (saveHistory) {
         bookId = await history.createBookId(session.header.bytes, session.file.size);
         existingRecord = await getHistoryRecord(bookId);
+        generation = `${Date.now().toString(36)}-${jobId.replace(/[^a-z0-9-]/gi, '')}`;
         try {
             await ensureStorage(session.manifest.totalSize);
         } catch (error) {
             if (error && error.code === 'INSUFFICIENT_STORAGE') {
-                throw new ComicError('INSUFFICIENT_HISTORY_STORAGE', '空间不足，无法同时保存书架历史；可以改为仅生成 PNG');
+                throw new ComicError('INSUFFICIENT_HISTORY_STORAGE', '空间不足，无法把漫画和长图写入书架应用数据');
             }
             throw error;
         }
     }
 
-    const dimensions = [];
+    const dimensions = new Array(session.manifest.pages.length);
     let outputWidth = 0;
     let outputHeight = 0;
     try {
-        for (let index = 0; index < session.manifest.pages.length; index++) {
+        let analyzedPages = 0;
+        await runBounded(session.manifest.pages.length, parallelism, async index => {
             assertNotCancelled(jobId);
-            let reference;
-            let bitmap;
+            const page = session.manifest.pages[index];
+            let reference = null;
             try {
                 if (saveHistory) {
-                    const entryName = `${history.config.STAGING_PREFIX}${bookId}-${jobId}-page-${String(index).padStart(4, '0')}`;
-                    const file = await writeArchivePageToEntry(jobId, session, index, storage, entryName);
-                    reference = { file, storage, entryName, temporary: false, staging: true };
-                    stagingReferences.push(reference);
+                    const pageEntryName = `${history.config.HISTORY_PREFIX}${bookId}-${generation}-page-${String(index).padStart(4, '0')}`;
+                    newEntryNames.push(pageEntryName);
+                    const file = await writeArchivePageToEntry(jobId, pool, session, index, storage, pageEntryName);
+                    reference = { file, storage, entryName: pageEntryName, temporary: false };
+                    pageReferences[index] = reference;
                 } else {
-                    reference = await getExportPageFile(jobId, session, payload.sessionId, index);
+                    reference = await getExportPageFile(jobId, pool, session, payload.sessionId, index);
                 }
-                bitmap = await createPageBitmap(
+                const size = await inspectPageWithPool(
+                    jobId,
+                    pool,
                     reference.file,
-                    session.manifest.pages[index].name,
-                    session.manifest.pages[index].type
+                    page.name,
+                    page.type
                 );
-                if (!bitmap.width || !bitmap.height) {
-                    throw new ComicError('DIMENSIONS_UNAVAILABLE', `无法读取图片“${session.manifest.pages[index].name}”的尺寸`);
+                if (!size.width || !size.height) {
+                    throw new ComicError('DIMENSIONS_UNAVAILABLE', `无法读取图片“${page.name}”的尺寸`);
                 }
-                dimensions.push({ width: bitmap.width, height: bitmap.height });
-                outputWidth = Math.max(outputWidth, bitmap.width);
-                outputHeight += bitmap.height;
+                dimensions[index] = size;
+                analyzedPages += 1;
                 postLongImageProgress(
                     jobId,
                     payload,
-                    Math.round((index + 1) / session.manifest.pages.length * 200),
-                    `正在分析第 ${index + 1}/${session.manifest.pages.length} 页`
+                    Math.round(analyzedPages / session.manifest.pages.length * 200),
+                    `正在并行分析 ${analyzedPages}/${session.manifest.pages.length} 页`
                 );
             } finally {
-                bitmap?.close();
                 if (!saveHistory) {
                     await releaseExportPage(reference);
                 }
             }
+        });
+        for (const size of dimensions) {
+            outputWidth = Math.max(outputWidth, size.width);
+            outputHeight += size.height;
         }
         const rowBytes = 1 + outputWidth * 4;
         const rawSize = rowBytes * outputHeight;
@@ -1026,16 +1428,22 @@ async function exportLongImage(jobId, payload) {
         const largestPage = Math.max(...session.manifest.pages.map(page => page.size));
         await ensureStorage(estimatePngStorage(session, rawSize) + (saveHistory ? 0 : largestPage));
     } catch (error) {
-        for (const reference of stagingReferences) {
-            await removeEntryQuietly(storage, reference.entryName);
+        for (const name of newEntryNames) {
+            await removeEntryQuietly(storage, name);
         }
         throw error;
     }
     const rowBytes = 1 + outputWidth * 4;
-    const entryName = `${TEMP_PREFIX}${jobId}.png`;
+    const entryName = saveHistory
+        ? `${history.config.HISTORY_PREFIX}${bookId}-${generation}-long.png`
+        : `${TEMP_PREFIX}${jobId}.png`;
+    if (saveHistory) {
+        newEntryNames.push(entryName);
+    }
     let writable;
     let compressionWriter;
     let compressionPump;
+    let preparedPage = null;
 
     try {
         const entry = await createWritableEntry(storage, entryName);
@@ -1061,17 +1469,43 @@ async function exportLongImage(jobId, payload) {
         const previousRow = new Uint8Array(outputWidth * 4);
         const currentRow = new Uint8Array(outputWidth * 4);
         let processedRows = 0;
+        const preparePage = async pageIndex => {
+            const page = session.manifest.pages[pageIndex];
+            const reference = saveHistory
+                ? pageReferences[pageIndex]
+                : await getExportPageFile(jobId, pool, session, payload.sessionId, pageIndex);
+            try {
+                const bitmap = await createPageBitmap(reference.file, page.name, page.type);
+                return { reference, bitmap };
+            } catch (error) {
+                if (!saveHistory) {
+                    await releaseExportPage(reference);
+                }
+                throw error;
+            }
+        };
+        const preparePageResult = async pageIndex => {
+            try {
+                return { prepared: await preparePage(pageIndex), error: null };
+            } catch (error) {
+                return { prepared: null, error };
+            }
+        };
+        preparedPage = preparePageResult(0);
         for (let pageIndex = 0; pageIndex < session.manifest.pages.length; pageIndex++) {
             assertNotCancelled(jobId);
             const page = session.manifest.pages[pageIndex];
             const size = dimensions[pageIndex];
-            let reference;
-            let bitmap;
+            const preparedResult = await preparedPage;
+            if (preparedResult.error) {
+                throw preparedResult.error;
+            }
+            const prepared = preparedResult.prepared;
+            preparedPage = pageIndex + 1 < session.manifest.pages.length
+                ? preparePageResult(pageIndex + 1)
+                : null;
             try {
-                reference = saveHistory
-                    ? stagingReferences[pageIndex]
-                    : await getExportPageFile(jobId, session, payload.sessionId, pageIndex);
-                bitmap = await createPageBitmap(reference.file, page.name, page.type);
+                const bitmap = prepared.bitmap;
                 if (bitmap.width !== size.width || bitmap.height !== size.height) {
                     throw new ComicError('IMAGE_SIZE_CHANGED', `图片“${page.name}”的尺寸读取不一致`);
                 }
@@ -1116,9 +1550,9 @@ async function exportLongImage(jobId, payload) {
                     );
                 }
             } finally {
-                bitmap?.close();
+                prepared.bitmap.close();
                 if (!saveHistory) {
-                    await releaseExportPage(reference);
+                    await releaseExportPage(prepared.reference);
                 }
             }
         }
@@ -1136,34 +1570,27 @@ async function exportLongImage(jobId, payload) {
         let coverFile = null;
         if (saveHistory) {
             postLongImageProgress(jobId, payload, 995, '正在保存到漫画书架');
-            const generation = `${Date.now().toString(36)}-${jobId.replace(/[^a-z0-9-]/gi, '')}`;
-            const pages = [];
-            for (let index = 0; index < session.manifest.pages.length; index++) {
-                const source = stagingReferences[index].file;
-                const destinationName = `${history.config.HISTORY_PREFIX}${bookId}-${generation}-page-${String(index).padStart(4, '0')}`;
-                await copyStorageFile(jobId, storage, source, destinationName);
-                promotedEntryNames.push(destinationName);
-                const sourcePage = session.manifest.pages[index];
-                pages.push({
+            const pages = session.manifest.pages.map((sourcePage, index) => {
+                return {
                     name: sourcePage.name,
                     type: sourcePage.type,
                     size: sourcePage.size,
                     width: dimensions[index].width,
                     height: dimensions[index].height,
                     lastModified: sourcePage.lastModified,
-                    entryName: destinationName
-                });
-            }
+                    entryName: pageReferences[index].entryName
+                };
+            });
             const coverEntryName = `${history.config.HISTORY_PREFIX}${bookId}-${generation}-cover.jpg`;
+            newEntryNames.push(coverEntryName);
             await createHistoryCover(
                 jobId,
                 storage,
-                stagingReferences[0].file,
+                pageReferences[0].file,
                 coverEntryName,
                 pages[0].name,
                 pages[0].type
             );
-            promotedEntryNames.push(coverEntryName);
             coverFile = await storage.getFile(coverEntryName);
             const now = Date.now();
             const record = await putHistoryRecord({
@@ -1181,7 +1608,8 @@ async function exportLongImage(jobId, payload) {
                     width: outputWidth,
                     height: outputHeight,
                     size: file.size,
-                    generatedAt: now
+                    generatedAt: now,
+                    entryName
                 },
                 progress: existingRecord?.progress || { pageIndex: 0, pageRatio: 0 },
                 createdAt: existingRecord?.createdAt || now,
@@ -1190,21 +1618,19 @@ async function exportLongImage(jobId, payload) {
             });
             historyCommitted = true;
             await requestPersistentStorage();
-            for (const reference of stagingReferences) {
-                await removeEntryQuietly(storage, reference.entryName);
-            }
             if (existingRecord) {
                 for (const page of existingRecord.pages) {
                     await removeEntryQuietly(storage, page.entryName);
                 }
                 await removeEntryQuietly(storage, existingRecord.coverEntryName);
+                await removeEntryQuietly(storage, existingRecord.png?.entryName);
             }
             book = history.summarizeRecord(record);
         }
         post('complete', jobId, {
             kind: 'longImage',
             file,
-            opfsName: entryName,
+            opfsName: saveHistory ? '' : entryName,
             storageKind: storage.kind,
             name: `${baseName}-long.png`,
             size: file.size,
@@ -1213,9 +1639,24 @@ async function exportLongImage(jobId, payload) {
             height: outputHeight,
             bookId: bookId || String(payload.bookId || ''),
             book,
-            coverFile
+            coverFile,
+            persisted: saveHistory
         });
     } catch (error) {
+        if (preparedPage) {
+            try {
+                const preparedResult = await preparedPage;
+                if (preparedResult.prepared) {
+                    preparedResult.prepared.bitmap.close();
+                    if (!saveHistory) {
+                        await releaseExportPage(preparedResult.prepared.reference);
+                    }
+                }
+            } catch (prepareError) {
+                // Preserve the original failure.
+            }
+            preparedPage = null;
+        }
         if (compressionWriter) {
             try {
                 await compressionWriter.abort(error);
@@ -1237,12 +1678,11 @@ async function exportLongImage(jobId, payload) {
                 // Ignore cleanup failures and report the original error.
             }
         }
-        await removeEntryQuietly(storage, entryName);
-        for (const reference of stagingReferences) {
-            await removeEntryQuietly(storage, reference.entryName);
+        if (!historyCommitted) {
+            await removeEntryQuietly(storage, entryName);
         }
         if (!historyCommitted) {
-            for (const name of promotedEntryNames) {
+            for (const name of newEntryNames) {
                 await removeEntryQuietly(storage, name);
             }
         }
@@ -1432,6 +1872,7 @@ async function deleteOneHistoryBook(record, storage) {
         await removeEntryQuietly(storage, page.entryName);
     }
     await removeEntryQuietly(storage, record.coverEntryName);
+    await removeEntryQuietly(storage, record.png?.entryName);
     for (const [sessionId, session] of sessions) {
         if (session.bookId === record.bookId) {
             sessions.delete(sessionId);
@@ -1473,23 +1914,27 @@ async function historyStorage(jobId) {
     post('historyStorage', jobId, { quota, usage, persisted });
 }
 
-async function historyRedownload(jobId, payload) {
+async function historyExportLongImage(jobId, payload) {
     const record = await getHistoryRecord(String(payload.bookId || ''));
     if (!record) {
         throw new ComicError('HISTORY_NOT_FOUND', '这本漫画已不在书架中');
     }
-    const sessionId = `${jobId}-redownload-${record.bookId}`;
-    createHistorySession(record, sessionId);
-    try {
-        await exportLongImage(jobId, {
-            sessionId,
-            outputName: record.title,
-            saveHistory: false,
-            bookId: record.bookId
-        });
-    } finally {
-        sessions.delete(sessionId);
+    if (!record.png?.entryName) {
+        throw new ComicError('HISTORY_PNG_NOT_FOUND', '这本漫画还没有保存在应用数据中的长图');
     }
+    const storage = await getStorageBackend();
+    let file;
+    try {
+        file = await storage.getFile(record.png.entryName);
+    } catch (error) {
+        throw new ComicError('HISTORY_PNG_NOT_FOUND', '应用数据中的长图已丢失，请重新导入原归档');
+    }
+    post('historyLongImageReady', jobId, {
+        file,
+        name: record.png.name,
+        title: record.title,
+        size: file.size
+    });
 }
 
 async function historyArchive(jobId, payload) {
@@ -1507,7 +1952,8 @@ async function historyArchive(jobId, payload) {
     await encryptArchive(jobId, {
         files,
         outputName: record.title,
-        addToShelf: false
+        addToShelf: false,
+        parallelism: payload.parallelism
     });
 }
 
@@ -1558,6 +2004,7 @@ async function handleComicCommand(data, sink = messageSink) {
     }
     if (type === 'cancel') {
         cancelledJobs.add(jobId);
+        codecTaskPool?.cancelJob(jobId);
         return;
     }
 
@@ -1587,8 +2034,8 @@ async function handleComicCommand(data, sink = messageSink) {
             await historyRename(jobId, payload);
         } else if (type === 'historyStorage') {
             await historyStorage(jobId);
-        } else if (type === 'historyRedownload') {
-            await historyRedownload(jobId, payload);
+        } else if (type === 'historyExportLongImage') {
+            await historyExportLongImage(jobId, payload);
         } else if (type === 'historyArchive') {
             await historyArchive(jobId, payload);
         } else if (type === 'releasePage') {

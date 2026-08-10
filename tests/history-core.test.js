@@ -33,7 +33,14 @@ function makeRecord(pageCount = 2, overrides = {}) {
         coverMime: 'image/jpeg',
         totalSize: pages.reduce((sum, page) => sum + page.size, 0),
         pages,
-        png: { name: 'test-long.png', width: 100, height: 400, size: 1234, generatedAt: 1700000000000 },
+        png: {
+            name: 'test-long.png',
+            width: 100,
+            height: 400,
+            size: 1234,
+            generatedAt: 1700000000000,
+            entryName: `${history.config.HISTORY_PREFIX}fixture-long.png`
+        },
         progress: { pageIndex: 1, pageRatio: 0.5 },
         createdAt: 1700000000000,
         updatedAt: 1700000001000,
@@ -79,18 +86,28 @@ test('history validation rejects invalid storage keys and totals over 500 MiB', 
     huge.pages[0].size = comic.format.MAX_TOTAL_BYTES + 1;
     huge.totalSize = huge.pages[0].size;
     assert.throws(() => history.validateRecord(huge), /大小无效/);
+
+    const wrongPngKey = makeRecord(1);
+    wrongPngKey.png.entryName = 'temporary-long.png';
+    assert.throws(() => history.validateRecord(wrongPngKey), /长图存储信息无效/);
 });
 
 test('worker exposes staging cleanup, shelf migration, and all history commands', () => {
     const source = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'js', 'comic-worker.js'), 'utf8');
-    for (const command of ['historyList', 'historyOpen', 'historyDelete', 'historyProgress', 'historyRename', 'historyStorage', 'historyRedownload', 'historyArchive']) {
+    for (const command of ['historyList', 'historyOpen', 'historyDelete', 'historyProgress', 'historyRename', 'historyStorage', 'historyExportLongImage', 'historyArchive']) {
         assert.match(source, new RegExp(`type === '${command}'`));
     }
     assert.match(source, /STAGING_PREFIX/);
     assert.match(source, /historyCommitted/);
+    assert.match(source, /storage\.listNames\(\)/);
+    assert.match(source, /name\.startsWith\(history\.config\.HISTORY_PREFIX\) && !referenced\.has\(name\)/);
+    assert.match(source, /pageEntryName = `\$\{history\.config\.HISTORY_PREFIX\}/);
+    assert.doesNotMatch(source, /stagingReferences|promotedEntryNames/);
     assert.match(source, /kind: 'uploads'/);
     assert.match(source, /post\('archiveReady'/);
     assert.match(source, /post\('portableArchive'/);
     assert.match(source, /addToShelf: false/);
     assert.match(source, /progressRange: \{ start: 500, end: 1000, total: 1000 \}/);
+    assert.match(source, /HISTORY_PNG_NOT_FOUND/);
+    assert.match(source, /removeEntryQuietly\(storage, record\.png\?\.entryName\)/);
 });

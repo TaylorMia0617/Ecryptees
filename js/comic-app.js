@@ -28,6 +28,7 @@
     const DIRECTORY_HANDLE_STORE = 'handles';
     const DIRECTORY_HANDLE_KEY = 'library';
     const DIRECTORY_SCHEMA_VERSION = 1;
+    const READER_HEADER_STORAGE_KEY = 'ecryptees-reader-header-collapsed-v1';
     const runtimeSupported = !!root.crypto?.subtle
         && !!root.indexedDB
         && typeof root.Ecryptees.LocalComicWorker === 'function';
@@ -45,8 +46,9 @@
     let readerCenter = 0;
     let readerObserver = null;
     let readerNoticeTimer = 0;
+    let readerHeaderRestoreTimer = 0;
     let readerReturnFocus = null;
-    let autoDownloadLongImage = false;
+    let readerHeaderCollapsed = false;
     let historyBooks = [];
     let browserHistoryBooks = [];
     let directoryBooks = [];
@@ -54,7 +56,6 @@
     let directoryPermissionGranted = false;
     let pendingArchiveForDirectory = null;
     let openingDirectoryBookId = '';
-    let pendingDirectoryExport = false;
     let migrationQueue = [];
     let migrationCurrentBook = null;
     let pendingDirectoryDeletion = null;
@@ -63,14 +64,13 @@
     let readerProgressTimer = 0;
     let readerRestoreProgress = null;
     let readerMemoryBytes = 0;
-    let pendingHistoryFallback = null;
     let recoveringWorker = false;
     const historyCoverUrls = new Map();
     const directoryMetadataTasks = new Map();
     const pageJobs = new Map();
     const outputState = {
         archive: { url: '', opfsName: '' },
-        longImage: { url: '', opfsName: '' }
+        longExport: { url: '', opfsName: '' }
     };
 
     function isHeifMime(mime) {
@@ -113,7 +113,6 @@
         document.getElementById('encryptComicButton').disabled = busy || !runtimeSupported || items.length === 0;
         document.getElementById('clearComicFilesButton').disabled = busy || items.length === 0;
         document.getElementById('openComicButton').disabled = busy || !runtimeSupported || !selectedArchive;
-        document.getElementById('exportComicLongImageButton').disabled = busy || !sessionId;
         document.getElementById('cancelComicButton').hidden = !busy;
         document.getElementById('clearHistoryButton').disabled = busy || historyBooks.length === 0;
         document.getElementById('historySearch').disabled = busy;
@@ -136,11 +135,11 @@
         }
     }
 
-    function showDownload(kind, message) {
-        releaseOutput(kind);
-        const output = outputState[kind];
+    function showArchiveDownload(message) {
+        releaseOutput('archive');
+        const output = outputState.archive;
         const outputBlob = new Blob([message.file], {
-            type: kind === 'archive' ? 'application/octet-stream' : 'image/png'
+            type: 'application/octet-stream'
         });
         output.url = URL.createObjectURL(outputBlob);
         output.opfsName = message.opfsName;
@@ -152,16 +151,12 @@
             });
             output.opfsName = '';
         }
-        const link = kind === 'archive'
-            ? document.getElementById('downloadComicArchive')
-            : document.getElementById('downloadComicLongImage');
+        const link = document.getElementById('downloadComicArchive');
         link.href = output.url;
-        link.download = sanitizeDownloadName(message.name, kind === 'archive' ? format.EXTENSION : 'png');
+        link.download = sanitizeDownloadName(message.name, format.EXTENSION);
         link.setAttribute('aria-disabled', 'false');
         link.hidden = false;
-        if (kind === 'archive') {
-            document.getElementById('comicArchiveDownloadRow').hidden = false;
-        }
+        document.getElementById('comicArchiveDownloadRow').hidden = false;
     }
 
     function setHistoryStatus(message, kind = 'info') {
@@ -598,10 +593,12 @@
             actions.className = 'history-card-actions';
             actions.append(
                 createHistoryButton('继续阅读', 'open', book.bookId, 'history-open'),
-                createHistoryButton('从头阅读', 'restart', book.bookId),
-                createHistoryButton('重新生成并下载 PNG', 'download', book.bookId),
-                createHistoryButton('删除', 'delete', book.bookId, 'secondary-button history-delete')
+                createHistoryButton('从头阅读', 'restart', book.bookId)
             );
+            if (book.longFile || book.png?.entryName) {
+                actions.append(createHistoryButton('导出长图', 'export', book.bookId));
+            }
+            actions.append(createHistoryButton('删除', 'delete', book.bookId, 'secondary-button history-delete'));
             body.append(cardHeader, meta, time, track, actions);
             card.append(cover, body);
             historyGrid.append(card);
@@ -917,7 +914,7 @@
 
     async function handleFilesSelected() {
         const selected = Array.from(comicFilesInput.files || []);
-        const validated = [];
+        const prepared = new Array(selected.length);
         comicFilesInput.value = '';
         if (selected.length === 0) {
             return;
@@ -932,17 +929,34 @@
                 throw new Error('漫画原图总体积不能超过 500 MiB');
             }
 
-            for (const file of selected) {
-                const detected = await validateSelectedFile(file);
-                validated.push(await prepareComicItem(file, detected));
+            let nextIndex = 0;
+            let firstError = null;
+            async function prepareLane() {
+                while (!firstError) {
+                    const index = nextIndex++;
+                    if (index >= selected.length) {
+                        return;
+                    }
+                    try {
+                        const detected = await validateSelectedFile(selected[index]);
+                        prepared[index] = await prepareComicItem(selected[index], detected);
+                    } catch (error) {
+                        firstError = error;
+                    }
+                }
             }
-            items.push(...validated);
+            const laneCount = Math.min(selected.length, getComicParallelism());
+            await Promise.all(Array.from({ length: laneCount }, prepareLane));
+            if (firstError) {
+                throw firstError;
+            }
+            items.push(...prepared);
             renderFileList();
             updateSelectionSummary();
             resetProgress();
             setStatus(`已加入 ${selected.length} 张图片，请拖动或使用箭头确认页面顺序。`, 'success');
         } catch (error) {
-            validated.forEach(revokeItem);
+            prepared.filter(Boolean).forEach(revokeItem);
             setStatus(error.message || '图片导入失败', 'error');
         }
     }
@@ -955,7 +969,23 @@
         setBusy(type);
         setProgress(0, 1);
         setStatus(message);
-        worker.postMessage({ type, jobId: activeJobId, payload });
+        worker.postMessage({
+            type,
+            jobId: activeJobId,
+            payload: { ...payload, parallelism: getComicParallelism() }
+        });
+    }
+
+    function getComicParallelism() {
+        const cores = Math.max(1, Math.trunc(Number(root.navigator.hardwareConcurrency) || 2));
+        return Math.max(1, Math.min(isMobileRuntime() ? 2 : 4, cores));
+    }
+
+    function isMobileRuntime() {
+        const narrow = root.matchMedia?.('(max-width: 720px)').matches === true;
+        const compactTouch = root.matchMedia?.('(pointer: coarse)').matches === true
+            && root.matchMedia?.('(max-width: 1024px)').matches === true;
+        return narrow || compactTouch;
     }
 
     function encryptComic() {
@@ -1030,8 +1060,6 @@
         readerPages = [];
         reader.replaceChildren();
         document.getElementById('openComicButton').textContent = '解密、转存并阅读';
-        releaseOutput('longImage');
-        document.getElementById('downloadComicLongImage').hidden = true;
     }
 
     function openComic() {
@@ -1065,19 +1093,33 @@
         startJob('historyOpen', '正在从本地书架打开漫画…', { bookId });
     }
 
-    function redownloadHistoryBook(bookId) {
+    function downloadLongImageFile(file, name) {
+        releaseOutput('longExport');
+        const output = outputState.longExport;
+        output.url = URL.createObjectURL(new Blob([file], { type: 'image/png' }));
+        const link = document.createElement('a');
+        link.href = output.url;
+        link.download = sanitizeDownloadName(name, 'comic-long.png');
+        link.hidden = true;
+        document.body.append(link);
+        link.click();
+        link.remove();
+    }
+
+    function exportHistoryLongImage(bookId) {
         if (!bookId || activeJobType) {
             return;
         }
         const book = historyBooks.find(item => item.bookId === bookId);
-        if (book?.directoryOnly && book.archiveFile) {
-            pendingDirectoryExport = true;
-            openHistoryBook(bookId, false);
+        if (!book) {
             return;
         }
-        autoDownloadLongImage = true;
-        releaseOutput('longImage');
-        startJob('historyRedownload', '正在从书架重新生成 PNG…', { bookId });
+        if (book.longFile) {
+            downloadLongImageFile(book.longFile, book.png?.name || `${book.title}-long.png`);
+            setHistoryStatus(`正在导出《${book.title}》长图…`, 'success');
+            return;
+        }
+        startJob('historyExportLongImage', '正在从应用数据读取长图…', { bookId });
     }
 
     async function renameHistoryBook(bookId) {
@@ -1180,6 +1222,70 @@
         }, 2600);
     }
 
+    function defaultReaderHeaderCollapsed() {
+        return isMobileRuntime();
+    }
+
+    function readReaderHeaderPreference() {
+        try {
+            const stored = root.localStorage.getItem(READER_HEADER_STORAGE_KEY);
+            if (stored === 'true' || stored === 'false') {
+                return stored === 'true';
+            }
+        } catch (error) {
+            // Opaque file origins may reject localStorage; keep the responsive default.
+        }
+        return defaultReaderHeaderCollapsed();
+    }
+
+    function restoreReaderViewport(position) {
+        if (!position || !readerPages.length) {
+            return;
+        }
+        const index = Math.max(0, Math.min(readerPages.length - 1, position.pageIndex));
+        const target = reader.querySelector(`[data-reader-index="${index}"]`);
+        if (target) {
+            const targetTop = target.offsetTop - reader.offsetTop;
+            reader.scrollTop = targetTop + target.offsetHeight * position.pageRatio;
+            updateReaderWindow(index);
+        }
+    }
+
+    function setReaderHeaderCollapsed(collapsed, persist = false, preservePosition = true) {
+        const position = preservePosition && readerPages.length ? getReaderProgress() : null;
+        clearTimeout(readerHeaderRestoreTimer);
+        readerHeaderCollapsed = !!collapsed;
+        readerDialog.dataset.headerCollapsed = String(readerHeaderCollapsed);
+        const header = readerDialog.querySelector('.comic-reader-header');
+        const collapsedActions = document.getElementById('comicReaderCollapsedActions');
+        const collapseButton = document.getElementById('collapseComicReaderHeaderButton');
+        const expandedCloseButton = document.getElementById('closeComicReaderButton');
+        const expandButton = document.getElementById('expandComicReaderHeaderButton');
+        const collapsedCloseButton = document.getElementById('closeCollapsedComicReaderButton');
+        collapseButton.setAttribute('aria-expanded', String(!readerHeaderCollapsed));
+        expandButton.setAttribute('aria-expanded', String(!readerHeaderCollapsed));
+        header.setAttribute('aria-hidden', String(readerHeaderCollapsed));
+        collapsedActions.setAttribute('aria-hidden', String(!readerHeaderCollapsed));
+        header.inert = readerHeaderCollapsed;
+        collapseButton.tabIndex = readerHeaderCollapsed ? -1 : 0;
+        expandedCloseButton.tabIndex = readerHeaderCollapsed ? -1 : 0;
+        expandButton.tabIndex = readerHeaderCollapsed ? 0 : -1;
+        collapsedCloseButton.tabIndex = readerHeaderCollapsed ? 0 : -1;
+        if (persist) {
+            try {
+                root.localStorage.setItem(READER_HEADER_STORAGE_KEY, String(readerHeaderCollapsed));
+            } catch (error) {
+                // The UI state still applies for this session when storage is unavailable.
+            }
+        }
+        if (position) {
+            readerHeaderRestoreTimer = root.setTimeout(() => {
+                readerHeaderRestoreTimer = 0;
+                requestAnimationFrame(() => restoreReaderViewport(position));
+            }, 210);
+        }
+    }
+
     function openReaderDialog() {
         if (!sessionId || readerDialog.open) {
             return;
@@ -1191,10 +1297,15 @@
         } else {
             readerDialog.setAttribute('open', '');
         }
-        document.getElementById('closeComicReaderButton').focus({ preventScroll: true });
+        const focusTarget = readerHeaderCollapsed
+            ? document.getElementById('closeCollapsedComicReaderButton')
+            : document.getElementById('closeComicReaderButton');
+        focusTarget.focus({ preventScroll: true });
     }
 
     function closeReaderDialog(restoreFocus = true) {
+        clearTimeout(readerHeaderRestoreTimer);
+        readerHeaderRestoreTimer = 0;
         saveReaderProgressNow();
         if (readerDialog.open) {
             if (typeof readerDialog.close === 'function') {
@@ -1221,7 +1332,11 @@
         const jobId = nextJobId(`page-${index}`);
         page.jobId = jobId;
         pageJobs.set(jobId, index);
-        worker.postMessage({ type: 'page', jobId, payload: { sessionId, index } });
+        worker.postMessage({
+            type: 'page',
+            jobId,
+            payload: { sessionId, index, parallelism: getComicParallelism() }
+        });
     }
 
     function getReaderMemoryBudget() {
@@ -1309,82 +1424,24 @@
         });
     }
 
-    function exportLongImage(automaticDownload = true, saveHistory = true) {
+    function saveLongImageToShelf() {
         if (!sessionId) {
-            return;
-        }
-        const link = document.getElementById('downloadComicLongImage');
-        if (outputState.longImage.url && link.getAttribute('aria-disabled') === 'false') {
-            link.click();
-            showReaderNotice('已开始下载整本单文件长图');
             return;
         }
         if (activeJobType) {
             showReaderNotice('当前任务尚未完成，请稍候。');
             return;
         }
-        autoDownloadLongImage = automaticDownload;
-        releaseOutput('longImage');
-        link.hidden = true;
-        link.setAttribute('aria-disabled', 'true');
         const historyBook = historyBooks.find(book => book.bookId === currentHistoryBookId);
-        const effectiveSaveHistory = historyBook?.directoryOnly ? false : saveHistory;
         const outputName = (historyBook?.title || selectedArchive?.name || 'comic').replace(/\.ecomic$/i, '');
-        pendingHistoryFallback = effectiveSaveHistory ? { sessionId, outputName, sourceName: selectedArchive?.name || '' } : null;
         startJob('exportLongImage', '正在生成整本无损长图…', {
             sessionId,
             outputName,
             sourceName: selectedArchive?.name || '',
-            saveHistory: effectiveSaveHistory,
+            saveHistory: true,
             bookId: currentHistoryBookId
         });
-        showReaderNotice('正在逐页合并整本漫画，完成后会提供一个 PNG 长图文件。');
-    }
-
-    function attachPageDownloadGesture(image, index) {
-        let timer = 0;
-        let startX = 0;
-        let startY = 0;
-
-        const cancelPress = () => {
-            clearTimeout(timer);
-            timer = 0;
-            image.dataset.longPress = 'false';
-        };
-
-        image.tabIndex = 0;
-        image.title = '长按下载整本长图';
-        image.setAttribute('aria-label', `${image.alt}，长按或按回车下载整本长图`);
-        image.addEventListener('pointerdown', event => {
-            if (event.button !== 0) {
-                return;
-            }
-            startX = event.clientX;
-            startY = event.clientY;
-            image.dataset.longPress = 'true';
-            timer = root.setTimeout(() => {
-                timer = 0;
-                image.dataset.longPress = 'false';
-                exportLongImage(true);
-            }, 650);
-        });
-        image.addEventListener('pointermove', event => {
-            if (Math.hypot(event.clientX - startX, event.clientY - startY) > 12) {
-                cancelPress();
-            }
-        });
-        image.addEventListener('pointerup', cancelPress);
-        image.addEventListener('pointercancel', cancelPress);
-        image.addEventListener('pointerleave', cancelPress);
-        image.addEventListener('contextmenu', event => {
-            event.preventDefault();
-        });
-        image.addEventListener('keydown', event => {
-            if (event.key === 'Enter' || event.key === ' ') {
-                event.preventDefault();
-                exportLongImage(true);
-            }
-        });
+        showReaderNotice('正在逐页合并整本漫画；完成后只保存到书架应用数据，不会下载到设备。');
     }
 
     async function showReaderPage(message) {
@@ -1417,7 +1474,6 @@
         image.src = pageUrl;
         image.alt = `第 ${index + 1} 页：${page.meta.name}`;
         image.decoding = 'async';
-        attachPageDownloadGesture(image, index);
         try {
             await image.decode();
         } catch (error) {
@@ -1451,15 +1507,17 @@
         const top = reader.scrollTop;
         let selected = reader.querySelector(`[data-reader-index="${readerCenter}"]`);
         for (const section of reader.querySelectorAll('.comic-reader-page')) {
-            if (section.offsetTop <= top + 2) {
+            const sectionTop = section.offsetTop - reader.offsetTop;
+            if (sectionTop <= top + 2) {
                 selected = section;
             } else {
                 break;
             }
         }
         const pageIndex = Number(selected?.dataset.readerIndex) || 0;
+        const selectedTop = selected ? selected.offsetTop - reader.offsetTop : 0;
         const pageRatio = selected?.offsetHeight
-            ? Math.max(0, Math.min(1, (top - selected.offsetTop) / selected.offsetHeight))
+            ? Math.max(0, Math.min(1, (top - selectedTop) / selected.offsetHeight))
             : 0;
         return { pageIndex, pageRatio };
     }
@@ -1531,6 +1589,13 @@
             document.getElementById('historyStorageSummary').textContent = `浏览器存储：${used} / ${quota} · ${persistence}`;
             return;
         }
+        if (message.type === 'historyLongImageReady' && message.jobId === activeJobId) {
+            activeJobId = '';
+            setBusy('');
+            downloadLongImageFile(message.file, message.name);
+            setHistoryStatus(`正在导出《${message.title}》长图…`, 'success');
+            return;
+        }
         if (message.type === 'historyProgressed') {
             const book = historyBooks.find(item => item.bookId === message.bookId);
             if (book) {
@@ -1592,7 +1657,7 @@
             return;
         }
         if (message.type === 'archiveReady' && message.jobId === activeJobId) {
-            showDownload('archive', message);
+            showArchiveDownload(message);
             pendingArchiveForDirectory = { file: message.file, name: message.name };
             setStatus(`漫画归档已生成：${message.pages} 页 · ${formatBytes(message.size)}。正在生成 PNG 并加入书架…`, 'success');
             setHistoryStatus('正在把本次上传的图片加入书架…');
@@ -1655,25 +1720,17 @@
             activeJobId = '';
             setBusy('');
             if (shouldConvertArchive) {
-                exportLongImage(true, true);
-            } else if (directoryBookId && pendingDirectoryExport) {
-                pendingDirectoryExport = false;
-                exportLongImage(true, false);
+                saveLongImageToShelf();
             }
             return;
         }
         if (message.type === 'complete' && message.jobId === activeJobId) {
-            showDownload(message.kind, message);
             setProgress(1, 1, 'success');
             const label = message.kind === 'archive' ? '漫画归档' : '整本长图';
             const dimensions = message.kind === 'longImage' ? ` · ${message.width}×${message.height}` : '';
-            setStatus(`${label}已生成：${message.pages} 页 · ${formatBytes(message.size)}${dimensions}。请点击下载。`, 'success');
+            setStatus(`${label}已写入书架应用数据：${message.pages} 页 · ${formatBytes(message.size)}${dimensions}。`, 'success');
             if (message.kind === 'longImage') {
-                const link = document.getElementById('downloadComicLongImage');
-                link.click();
-                showReaderNotice('PNG 已生成；若浏览器拦截下载，请点击下载按钮。');
-                autoDownloadLongImage = false;
-                pendingHistoryFallback = null;
+                showReaderNotice('PNG 已保存到书架应用数据，不会自动下载到设备。');
                 const existingDirectoryBook = directoryBooks.find(book => book.bookId === message.bookId);
                 const directoryBook = message.book
                     || historyBooks.find(book => book.bookId === message.bookId)
@@ -1719,9 +1776,7 @@
                 const archiveWasCreated = activeJobType === 'encrypt' && !!outputState.archive.url;
                 const cancelledType = activeJobType;
                 activeJobId = '';
-                autoDownloadLongImage = false;
                 openingDirectoryBookId = '';
-                pendingDirectoryExport = false;
                 pendingArchiveForDirectory = null;
                 pendingDirectoryDeletion = null;
                 if (cancelledType === 'historyArchive') {
@@ -1756,14 +1811,8 @@
             if (message.jobId === activeJobId) {
                 const archiveWasCreated = activeJobType === 'encrypt' && !!outputState.archive.url;
                 const failedType = activeJobType;
-                const fallback = pendingHistoryFallback;
-                const shouldFallback = message.code === 'INSUFFICIENT_HISTORY_STORAGE'
-                    && fallback
-                    && root.confirm('本地空间不足，无法加入书架。是否改为仅生成并下载 PNG？');
                 activeJobId = '';
-                autoDownloadLongImage = false;
                 openingDirectoryBookId = '';
-                pendingDirectoryExport = false;
                 pendingArchiveForDirectory = null;
                 pendingDirectoryDeletion = null;
                 if (failedType === 'historyArchive') {
@@ -1776,11 +1825,6 @@
                 setStatus(archiveWasCreated
                     ? `漫画归档已生成，但加入书架失败：${message.message || '未知错误'}。仍可下载 .ecomic。`
                     : (message.message || '漫画处理失败'), 'error');
-                if (shouldFallback) {
-                    pendingHistoryFallback = null;
-                    autoDownloadLongImage = true;
-                    startJob('exportLongImage', '正在仅生成 PNG…', { ...fallback, saveHistory: false });
-                }
             }
         }
     }
@@ -1817,7 +1861,6 @@
             activeJobId = '';
             activeJobType = '';
             openingDirectoryBookId = '';
-            pendingDirectoryExport = false;
             pendingArchiveForDirectory = null;
             pendingDirectoryDeletion = null;
             migrationQueue = [];
@@ -1853,6 +1896,7 @@
 
         startWorker();
         restoreLibraryDirectory();
+        setReaderHeaderCollapsed(readReaderHeaderPreference(), false, false);
         setStatus(location.protocol === 'file:'
             ? '本地漫画模式已就绪。图片将按列表顺序无损封装。'
             : '漫画模式已就绪。图片将按列表顺序无损封装。');
@@ -1866,8 +1910,16 @@
     document.getElementById('encryptComicButton').addEventListener('click', encryptComic);
     document.getElementById('clearComicFilesButton').addEventListener('click', clearItems);
     document.getElementById('openComicButton').addEventListener('click', openComic);
-    document.getElementById('exportComicLongImageButton').addEventListener('click', () => exportLongImage(true, true));
     document.getElementById('closeComicReaderButton').addEventListener('click', () => closeReaderDialog());
+    document.getElementById('closeCollapsedComicReaderButton').addEventListener('click', () => closeReaderDialog());
+    document.getElementById('collapseComicReaderHeaderButton').addEventListener('click', () => {
+        setReaderHeaderCollapsed(true, true);
+        document.getElementById('expandComicReaderHeaderButton').focus({ preventScroll: true });
+    });
+    document.getElementById('expandComicReaderHeaderButton').addEventListener('click', () => {
+        setReaderHeaderCollapsed(false, true);
+        document.getElementById('collapseComicReaderHeaderButton').focus({ preventScroll: true });
+    });
     readerDialog.addEventListener('cancel', event => {
         event.preventDefault();
         closeReaderDialog();
@@ -1902,8 +1954,8 @@
             openHistoryBook(bookId, false);
         } else if (historyAction === 'restart') {
             openHistoryBook(bookId, true);
-        } else if (historyAction === 'download') {
-            redownloadHistoryBook(bookId);
+        } else if (historyAction === 'export') {
+            exportHistoryLongImage(bookId);
         } else if (historyAction === 'rename') {
             renameHistoryBook(bookId);
         } else if (historyAction === 'delete') {

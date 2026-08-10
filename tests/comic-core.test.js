@@ -18,7 +18,7 @@ function concatBytes(parts) {
     return output;
 }
 
-async function buildFixture(files) {
+async function buildFixture(files, parallelism = 1) {
     const records = files.map(file => ({
         name: file.name,
         type: file.type,
@@ -44,14 +44,41 @@ async function buildFixture(files) {
         await comicCrypto.encryptChunk(key, headerBytes, noncePrefix, 0, manifestBytes)
     ];
     let counter = 1;
+    const chunkJobs = [];
     for (const file of files) {
         for (let offset = 0; offset < file.bytes.length; offset += format.CHUNK_SIZE) {
             const plain = file.bytes.slice(offset, offset + format.CHUNK_SIZE);
-            parts.push(await comicCrypto.encryptChunk(key, headerBytes, noncePrefix, counter, plain));
+            chunkJobs.push({ counter, plain });
             counter += 1;
         }
     }
-    return { bytes: concatBytes(parts), header, key, manifest, files };
+    const encryptedChunks = new Array(chunkJobs.length);
+    const completionOrder = [];
+    let nextIndex = 0;
+    async function lane() {
+        while (true) {
+            const index = nextIndex++;
+            if (index >= chunkJobs.length) return;
+            if (parallelism > 1 && index === 0) {
+                await new Promise(resolve => setTimeout(resolve, 15));
+            }
+            const job = chunkJobs[index];
+            encryptedChunks[index] = await comicCrypto.encryptChunk(
+                key,
+                headerBytes,
+                noncePrefix,
+                job.counter,
+                job.plain
+            );
+            completionOrder.push(index);
+        }
+    }
+    await Promise.all(Array.from(
+        { length: Math.max(1, Math.min(4, parallelism, chunkJobs.length)) },
+        lane
+    ));
+    parts.push(...encryptedChunks);
+    return { bytes: concatBytes(parts), header, key, manifest, files, completionOrder };
 }
 
 async function readFixture(archiveBytes) {
@@ -169,6 +196,21 @@ test('multi-page archive round-trips exact bytes across a chunk boundary', async
     assert.equal(restored.manifest.pages[0].name, '第一话.png');
     assert.deepEqual(restored.files[0], large);
     assert.deepEqual(restored.files[1], small);
+});
+
+test('parallelism 1, 2, and 4 preserves ordered archive bytes after out-of-order completion', async () => {
+    const pages = [
+        { name: 'one.png', type: 'image/png', bytes: new Uint8Array(format.CHUNK_SIZE + 7).fill(0x31) },
+        { name: 'two.jpg', type: 'image/jpeg', bytes: new Uint8Array(257).fill(0x72) }
+    ];
+    for (const parallelism of [1, 2, 4]) {
+        const fixture = await buildFixture(pages, parallelism);
+        const restored = await readFixture(fixture.bytes);
+        assert.deepEqual(restored.files, pages.map(page => page.bytes));
+        if (parallelism > 1) {
+            assert.notDeepEqual(fixture.completionOrder, [...fixture.completionOrder].sort((a, b) => a - b));
+        }
+    }
 });
 
 test('header validation rejects bad magic, version, key mode, and reserved flags', async () => {
