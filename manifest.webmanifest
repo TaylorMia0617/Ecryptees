@@ -1,0 +1,30 @@
+{
+    "id": "./",
+    "name": "Ecryptees 本地加密与漫画阅读",
+    "short_name": "Ecryptees",
+    "description": "在设备本地进行文本、图片和漫画归档处理与阅读。",
+    "lang": "zh-CN",
+    "start_url": "./index.html",
+    "scope": "./",
+    "display": "standalone",
+    "display_override": ["window-controls-overlay", "standalone"],
+    "orientation": "any",
+    "background_color": "#fce4ec",
+    "theme_color": "#ff4081",
+    "categories": ["utilities", "books"],
+    "prefer_related_applications": false,
+    "icons": [
+        {
+            "src": "assets/icon-192.png",
+            "sizes": "192x192",
+            "type": "image/png",
+            "purpose": "any maskable"
+        },
+        {
+            "src": "assets/icon-512.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "any maskable"
+        }
+    ]
+}

@@ -57,6 +57,20 @@ test('CRC32 matches the standard check value', () => {
     assert.equal(codec.calculateCrc32(input), 0xCBF43926);
 });
 
+test('image signature detection distinguishes AVIF, HEIC, and generic HEIF containers', () => {
+    const makeFtyp = brand => {
+        const bytes = new Uint8Array(32);
+        bytes.set([0x00, 0x00, 0x00, 0x20]);
+        bytes.set(new TextEncoder().encode('ftyp'), 4);
+        bytes.set(new TextEncoder().encode(brand), 8);
+        return bytes;
+    };
+
+    assert.equal(globalThis.Ecryptees.core.image.sniffImageType(makeFtyp('avif')).mime, 'image/avif');
+    assert.equal(globalThis.Ecryptees.core.image.sniffImageType(makeFtyp('heic')).mime, 'image/heic');
+    assert.equal(globalThis.Ecryptees.core.image.sniffImageType(makeFtyp('mif1')).mime, 'image/heif');
+});
+
 test('v1, v2, and v3 image ciphertext remains decodable', async () => {
     const versions = [
         [config.LEGACY_IMAGE_VERSION, 'legacy'],
@@ -116,15 +130,19 @@ test('static entry point references ordered external files without inline handle
     const appPosition = index.indexOf('src="js/app.js"');
     const comicWorkerPosition = index.indexOf('src="js/comic-worker.js"');
     const comicAppPosition = index.indexOf('src="js/comic-app.js"');
+    const pwaPosition = index.indexOf('src="js/pwa.js"');
+    const androidBridgePosition = index.indexOf('src="js/android-bridge.js"');
 
     assert.ok(
         corePosition >= 0
             && comicCorePosition > corePosition
             && historyCorePosition > comicCorePosition
-            && appPosition > historyCorePosition
+            && androidBridgePosition > historyCorePosition
+            && appPosition > androidBridgePosition
             && comicWorkerPosition > appPosition
-            && comicAppPosition > comicWorkerPosition,
-        'scripts must load in core, comic-core, history-core, app, comic-worker, comic-app order'
+            && comicAppPosition > comicWorkerPosition
+            && pwaPosition > comicAppPosition,
+        'scripts must load in core, comic-core, history-core, android-bridge, app, comic-worker, comic-app, pwa order'
     );
     assert.match(index, /href="css\/styles\.css"/);
     assert.match(index, /<script src="js\/core\.js" defer><\/script>/);
@@ -133,12 +151,14 @@ test('static entry point references ordered external files without inline handle
     assert.match(index, /<script src="js\/app\.js" defer><\/script>/);
     assert.match(index, /<script src="js\/comic-worker\.js" defer><\/script>/);
     assert.match(index, /<script src="js\/comic-app\.js" defer><\/script>/);
+    assert.match(index, /<script src="js\/pwa\.js" defer><\/script>/);
+    assert.match(index, /<script src="js\/android-bridge\.js" defer><\/script>/);
     assert.doesNotMatch(index, /<style\b/);
     assert.doesNotMatch(index, /<script(?![^>]*\bsrc=)/);
     assert.doesNotMatch(index, /onclick\s*=/);
     assert.match(index, /<dialog[\s\S]*id="comicReaderDialog"/);
     assert.match(index, /id="comicReaderHint">长按任意图片可生成并下载整本单文件长图（PNG，动画取首帧）/);
-    assert.match(index, /最多 80 张，导入原图总体积不超过 500 MiB/);
+    assert.match(index, /最多 80 张 · 500 MiB · 原图无损封装/);
     assert.match(index, /id="exportComicLongImageButton"/);
     assert.match(index, /id="downloadComicLongImage"/);
     assert.match(index, /id="historyTab"[\s\S]*data-mode="history"/);
@@ -171,4 +191,112 @@ test('static entry point references ordered external files without inline handle
         crypto.createHash('sha256').update(background).digest('hex'),
         '742807f8331c790cc92e679ff270202a614b733fb14ceef9d5922d3eb6977505'
     );
+});
+
+test('PWA entry point is installable and caches only the application shell', () => {
+    const index = fs.readFileSync(path.join(repositoryRoot, 'index.html'), 'utf8');
+    const manifest = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'manifest.webmanifest'), 'utf8'));
+    const serviceWorker = fs.readFileSync(path.join(repositoryRoot, 'service-worker.js'), 'utf8');
+    const pwa = fs.readFileSync(path.join(repositoryRoot, 'js', 'pwa.js'), 'utf8');
+
+    assert.equal(manifest.start_url, './index.html');
+    assert.equal(manifest.scope, './');
+    assert.equal(manifest.display, 'standalone');
+    assert.equal(manifest.theme_color, '#ff4081');
+    assert.ok(manifest.icons.some(icon => icon.sizes === '192x192' && icon.purpose.includes('maskable')));
+    assert.ok(manifest.icons.some(icon => icon.sizes === '512x512' && icon.purpose.includes('maskable')));
+    for (const icon of manifest.icons) {
+        assert.ok(fs.statSync(path.join(repositoryRoot, icon.src)).size > 0);
+    }
+
+    assert.match(index, /rel="manifest" href="manifest\.webmanifest"/);
+    assert.match(index, /id="installAppButton"[^>]*>安装到桌面</);
+    assert.match(pwa, /beforeinstallprompt/);
+    assert.match(pwa, /navigator\.serviceWorker\.register\('\.\/service-worker\.js'\)/);
+    assert.match(pwa, /supportedProtocol && !isAndroidAssetHost && window\.isSecureContext/);
+    assert.match(serviceWorker, /const APP_SHELL = \[/);
+    assert.match(serviceWorker, /'\.\/js\/comic-worker\.js'/);
+    assert.match(serviceWorker, /'\.\/js\/android-bridge\.js'/);
+    assert.doesNotMatch(serviceWorker, /\.ecomic|long\.png|blob:/);
+});
+
+test('Android wrapper loads local HTTPS assets and streams downloads through SAF', () => {
+    const manifest = fs.readFileSync(
+        path.join(repositoryRoot, 'android-app', 'app', 'src', 'main', 'AndroidManifest.xml'),
+        'utf8'
+    );
+    const activity = fs.readFileSync(
+        path.join(repositoryRoot, 'android-app', 'app', 'src', 'main', 'java', 'com', 'ecryptees', 'offline', 'MainActivity.java'),
+        'utf8'
+    );
+    const bridge = fs.readFileSync(path.join(repositoryRoot, 'js', 'android-bridge.js'), 'utf8');
+    const appBuild = fs.readFileSync(path.join(repositoryRoot, 'android-app', 'app', 'build.gradle'), 'utf8');
+
+    assert.doesNotMatch(manifest, /android\.permission\.INTERNET/);
+    assert.match(manifest, /android:allowBackup="false"/);
+    assert.match(activity, /WebViewAssetLoader\.AssetsPathHandler/);
+    assert.match(activity, /https:\/\/appassets\.androidplatform\.net\/assets\/index\.html/);
+    assert.match(activity, /Intent\.ACTION_CREATE_DOCUMENT/);
+    assert.match(activity, /Intent\.ACTION_OPEN_DOCUMENT|params\.createIntent\(\)/);
+    assert.match(activity, /writeChunk\(String token, String base64Data\)/);
+    assert.match(activity, /ImageDecoder\.decodeBitmap/);
+    assert.match(activity, /beginHeicDecode\(String ignoredName\)/);
+    assert.match(activity, /writeHeicChunk\(String token, String base64Data\)/);
+    assert.match(activity, /readHeicChunk\(String token, long offset, int requestedLength\)/);
+    assert.match(activity, /Bitmap\.CompressFormat\.PNG/);
+    assert.match(bridge, /response\.body\.getReader\(\)/);
+    assert.match(bridge, /bridge\.writeChunk\(token, encodeBase64\(value\)\)/);
+    assert.match(bridge, /EcrypteesAndroidMedia/);
+    assert.match(bridge, /bridge\.finishHeicDecode\(token, maxDimension\)/);
+    assert.doesNotMatch(bridge, /await response\.arrayBuffer\(\)|await response\.blob\(\)/);
+    assert.match(appBuild, /include 'js\/\*\*'/);
+    assert.match(appBuild, /androidx\.webkit:webkit:1\.16\.0/);
+});
+
+test('JPG and JPEG remain selectable in browsers and Android document providers', () => {
+    const index = fs.readFileSync(path.join(repositoryRoot, 'index.html'), 'utf8');
+    const activity = fs.readFileSync(
+        path.join(repositoryRoot, 'android-app', 'app', 'src', 'main', 'java', 'com', 'ecryptees', 'offline', 'MainActivity.java'),
+        'utf8'
+    );
+    const appBuild = fs.readFileSync(path.join(repositoryRoot, 'android-app', 'app', 'build.gradle'), 'utf8');
+    const serviceWorker = fs.readFileSync(path.join(repositoryRoot, 'service-worker.js'), 'utf8');
+    const imageInput = index.match(/<input[\s\S]*?\bid="imageFile"[\s\S]*?>/)?.[0] || '';
+    const comicInput = index.match(/<input[\s\S]*?\bid="comicFiles"[\s\S]*?>/)?.[0] || '';
+    const jpegBytes = fs.readFileSync(path.join(repositoryRoot, 'assets', 'background.jpg'));
+
+    assert.equal(globalThis.Ecryptees.core.image.sniffImageType(jpegBytes).mime, 'image/jpeg');
+
+    for (const input of [imageInput, comicInput]) {
+        assert.match(input, /accept="[^"]*\.jpg(?:,|")/);
+        assert.match(input, /accept="[^"]*\.jpeg(?:,|")/);
+        assert.match(input, /accept="[^"]*image\/jpeg(?:,|")/);
+        assert.match(input, /accept="[^"]*\.heic(?:,|")/);
+        assert.match(input, /accept="[^"]*\.heif(?:,|")/);
+        assert.match(input, /accept="[^"]*image\/heic(?:,|")/);
+        assert.match(input, /accept="[^"]*image\/heif(?:,|")/);
+    }
+
+    assert.match(activity, /params\.getAcceptTypes\(\)/);
+    assert.match(activity, /createImageDocumentIntent\(params\)/);
+    assert.match(appBuild, /versionCode 4/);
+    assert.match(appBuild, /versionName '1\.0\.3'/);
+    assert.match(serviceWorker, /const CACHE_NAME = 'ecryptees-app-v3'/);
+});
+
+test('Android comic picker returns every readable document without trusting provider MIME metadata', () => {
+    const activity = fs.readFileSync(
+        path.join(repositoryRoot, 'android-app', 'app', 'src', 'main', 'java', 'com', 'ecryptees', 'offline', 'MainActivity.java'),
+        'utf8'
+    );
+    const appBuild = fs.readFileSync(path.join(repositoryRoot, 'android-app', 'app', 'build.gradle'), 'utf8');
+
+    assert.match(activity, /new Intent\(Intent\.ACTION_OPEN_DOCUMENT\)/);
+    assert.match(activity, /intent\.setType\("\*\/\*"\)/);
+    assert.match(activity, /Intent\.EXTRA_ALLOW_MULTIPLE/);
+    assert.match(activity, /data\.getClipData\(\)/);
+    assert.match(activity, /getContentResolver\(\)\.openFileDescriptor\(uri, "r"\)/);
+    assert.match(activity, /parseImageDocumentResult\(resultCode, data\)/);
+    assert.match(appBuild, /versionCode 4/);
+    assert.match(appBuild, /versionName '1\.0\.3'/);
 });

@@ -1,0 +1,76 @@
+plugins {
+    id 'com.android.application'
+}
+
+def signingProperties = new Properties()
+def signingPropertiesFile = file('D:/Android/signing/ecryptees-signing.properties')
+if (signingPropertiesFile.exists()) {
+    signingPropertiesFile.withInputStream { signingProperties.load(it) }
+}
+
+android {
+    namespace 'com.ecryptees.offline'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'com.ecryptees.offline'
+        minSdk 26
+        targetSdk 36
+        versionCode 4
+        versionName '1.0.3'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    signingConfigs {
+        release {
+            if (signingPropertiesFile.exists()) {
+                storeFile file(signingProperties['storeFile'])
+                storePassword signingProperties['storePassword']
+                keyAlias signingProperties['keyAlias']
+                keyPassword signingProperties['keyPassword']
+            }
+        }
+    }
+
+    buildTypes.release.signingConfig signingConfigs.release
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    sourceSets {
+        main.assets.srcDir "$buildDir/generated/webAssets"
+    }
+
+    lint {
+        abortOnError true
+        checkReleaseBuilds true
+    }
+}
+
+def syncWebAssets = tasks.register('syncWebAssets', Sync) {
+    from(rootProject.projectDir.parentFile) {
+        include 'index.html'
+        include 'manifest.webmanifest'
+        include 'service-worker.js'
+        include 'css/**'
+        include 'js/**'
+        include 'assets/**'
+    }
+    into layout.buildDirectory.dir('generated/webAssets')
+}
+
+tasks.named('preBuild').configure {
+    dependsOn syncWebAssets
+}
+
+dependencies {
+    implementation 'androidx.activity:activity:1.13.0'
+    implementation 'androidx.webkit:webkit:1.16.0'
+}

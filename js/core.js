@@ -80,7 +80,9 @@
         'image/gif': { label: 'GIF', extension: 'gif' },
         'image/webp': { label: 'WebP', extension: 'webp' },
         'image/bmp': { label: 'BMP', extension: 'bmp' },
-        'image/avif': { label: 'AVIF', extension: 'avif' }
+        'image/avif': { label: 'AVIF', extension: 'avif' },
+        'image/heic': { label: 'HEIC', extension: 'heic' },
+        'image/heif': { label: 'HEIF', extension: 'heif' }
     };
 
     codebookCodeMap.fill(0xFF);
@@ -396,6 +398,12 @@
             const brandArea = readAscii(bytes, 8, Math.min(32, Math.max(0, bytes.length - 8)));
             if (brandArea.includes('avif') || brandArea.includes('avis')) {
                 return { mime: 'image/avif', ...IMAGE_FORMATS['image/avif'] };
+            }
+            if (['heic', 'heix', 'hevc', 'hevx', 'heim', 'heis'].some(brand => brandArea.includes(brand))) {
+                return { mime: 'image/heic', ...IMAGE_FORMATS['image/heic'] };
+            }
+            if (brandArea.includes('mif1') || brandArea.includes('msf1')) {
+                return { mime: 'image/heif', ...IMAGE_FORMATS['image/heif'] };
             }
         }
 

@@ -131,6 +131,22 @@ No actionable P0, P1, or P2 issues remain. The browser may still discard decoded
 
 final result: passed
 
+## Android PWA/WebAPK readiness verification
+
+- Date: 2026-08-10. Android delivery now targets an installable HTTPS PWA/WebAPK; the former `content://` single-file compatibility package is intentionally not part of the release.
+- The web app manifest passed Chrome's manifest parser with zero errors. It supplies standalone display, theme/background colors, relative scope/start URL, and 192 px/512 px maskable PNG icons.
+- The install action remains hidden until `beforeinstallprompt` confirms browser eligibility. Installed standalone sessions do not show the action again.
+- The root Service Worker precaches only the application shell: HTML, manifest, styles, background, icons, and seven runtime scripts. It never caches `.ecomic`, generated PNG, Blob URLs, or shelf files.
+- Chrome at a 390 × 844 Android viewport registered and controlled the page, loaded all four panels, completed text encoding, and rendered the intended responsive styling.
+- With network access disabled and the HTTP cache bypassed, a hard reload still restored the page title, external styling, legacy core, comic core, and PWA controller. Evidence: `C:\Users\user\AppData\Local\Temp\ecryptees-webapk-offline.png`.
+- `node --test tests/*.test.js`, JavaScript syntax checks, and `git diff --check` passed. HTTPS deployment remains required before Android browsers can mint the installed WebAPK.
+
+**Findings**
+
+No actionable P0, P1, or P2 issues remain. WebAPK creation is performed by the Android browser after visiting the HTTPS deployment; this repository deliberately does not produce or maintain a sideloaded APK.
+
+final result: passed
+
 ## Local comic shelf and history reader verification
 
 - Date: 2026-08-10. A fourth `书架` tab now stores decrypted original pages, a generated cover, PNG metadata, and reading progress in browser-local IndexedDB/OPFS. The interface explicitly warns that shelf pages are plaintext, origin/device-bound browser data.
@@ -233,3 +249,45 @@ final result: passed
 No actionable P0, P1, or P2 issues remain. Saving a book requires space for the encrypted archive, original shelf pages, and generated PNG; if shelf storage is exhausted, the already completed `.ecomic` remains downloadable.
 
 final result: passed
+
+## Offline Android APK verification
+
+- Date: 2026-08-10. The Android wrapper embeds the split web project and loads it from `https://appassets.androidplatform.net/assets/index.html`; no public host or runtime network connection is required.
+- The manifest targets Android 16/API 36 with a minimum of Android 8.0/API 26. It declares no `INTERNET` or broad storage permission, disables application backup, and uses Storage Access Framework destinations selected by the user.
+- File inputs are handled by Android's system chooser. Blob downloads are intercepted in `js/android-bridge.js`, read as a stream, converted one browser chunk at a time, and written by the native bridge. No whole-file `arrayBuffer()`, Blob-to-Base64 conversion, or native byte accumulation is used.
+- A browser bridge smoke test streamed 8,388,731 deterministic bytes across five calls. The received byte count and 32-bit checksum matched exactly, the completion state rendered at 390 × 844, and no runtime exception was reported. Evidence: `D:\Android\temp\ecryptees-android-bridge-smoke.png`.
+- Gradle `assembleRelease` and `lintRelease` passed. `apksigner` verified APK Signature Scheme v2 with the dedicated 4096-bit release certificate (`CN=Ecryptees`); `aapt2` confirmed package `com.ecryptees.offline`, version 1.0.0, minSdk 26, targetSdk 36, and no Internet permission.
+- The 3.23 MiB release APK contains `index.html`, CSS, background, all eight ordered scripts, Worker, manifest, and Service Worker. SHA-256: `97A87958E839FAB1246DB374A84006FDB27FD897E18BE091DDE32AE9AD90DC90`.
+
+**Findings**
+
+No actionable build, lint, packaging, signing, or chunk-transfer issue remains. No Android device was connected, so installation, system picker behavior, WebView OPFS availability, and a real 500 MiB phone stress run remain device-level acceptance items.
+
+final result: passed with device coverage gap
+
+## Mobile comic import UI verification
+
+- Date: 2026-08-10. The 390 x 844 layout now uses a compact import area, places the archive title before the page list, and lets the document scroll naturally instead of trapping the list in a short inner scroller.
+- Long filenames are limited to two lines with ellipsis. Reorder and delete controls retain at least 44 px touch targets, and encryption/clear actions stay in a single bottom action row after files are selected.
+- Four synthetic pages were injected through the real file-input flow in headless Edge. The page remained 390 px wide with no horizontal clipping; cards, thumbnails, metadata, title field, and bottom actions remained usable.
+- Evidence: `D:\Temp\Ecryptees-QA-20260810\comic-mobile-2.png`.
+
+**Findings**
+
+No actionable P0, P1, or P2 mobile layout issue remains.
+
+final result: passed
+
+## Android HEIC and HEIF verification
+
+- Date: 2026-08-10. Android image and comic inputs now accept `.heic` and `.heif`. The native bridge decodes these formats for previews, compression, shelf covers, continuous reading, and whole-comic PNG generation.
+- Comic archives continue to preserve each imported HEIC/HEIF file byte-for-byte. The derived PNG is used only where a browser-displayable bitmap is required; it does not replace the encrypted source page.
+- Native transfers use 768 KiB chunks rather than one whole-file Base64 value. Decoding is limited to 40 million pixels and reports unsupported/corrupt files, allocation failures, and incomplete transfers explicitly.
+- A real Nokia HEIF sample (`crowd.heic`, 130,358 bytes) was recognized as HEIC by the project signature detector and decoded to a valid 1,728,110-byte PNG by an independent HEIF decoder. Automated tests passed 25/25, including AVIF/HEIC/HEIF brand ordering, MIME preservation, accepted picker types, bridge wiring, and packaged script order.
+- Gradle `assembleRelease` and `lintRelease` passed. `apksigner` verified APK Signature Scheme v2; `aapt2` confirmed package `com.ecryptees.offline`, version 1.0.3 (code 4), minSdk 26, and targetSdk 36. Release SHA-256: `05AB5B9B4F6DF930EAD606AAD8DAABBFC03347B5F0E2EFA70DC4328DD13978C0`.
+
+**Findings**
+
+No Android device was connected, so system-picker selection and native HEIC decoding still require a final physical-device smoke test. Build, packaging, signature detection, Java bridge wiring, and real-file format validation passed.
+
+final result: passed with device coverage gap

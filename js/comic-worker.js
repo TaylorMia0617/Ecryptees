@@ -12,6 +12,8 @@ const { format, crypto: comicCrypto, ComicError } = comic;
 const TEMP_PREFIX = 'ecryptees-temp-';
 const sessions = new Map();
 const cancelledJobs = new Set();
+const nativeDecodeRequests = new Map();
+let nativeDecodeSequence = 0;
 let messageSink = message => self.postMessage(message);
 let storageBackendPromise = null;
 let historyDatabasePromise = null;
@@ -707,7 +709,20 @@ function createPngHeader(width, height) {
     return createPngChunk(PNG_CHUNK_TYPES.IHDR, data);
 }
 
-async function createPageBitmap(file, pageName) {
+function isHeifMime(mime) {
+    return mime === 'image/heic' || mime === 'image/heif';
+}
+
+function requestNativeDecode(file, pageName) {
+    nativeDecodeSequence += 1;
+    const requestId = `native-${Date.now().toString(36)}-${nativeDecodeSequence}`;
+    return new Promise((resolve, reject) => {
+        nativeDecodeRequests.set(requestId, { resolve, reject });
+        post('nativeDecodeRequest', requestId, { requestId, file, name: pageName });
+    });
+}
+
+async function createPageBitmap(file, pageName, mime) {
     if (typeof self.createImageBitmap !== 'function') {
         throw new ComicError('PNG_UNSUPPORTED', '当前浏览器不支持生成 PNG 长图');
     }
@@ -718,7 +733,15 @@ async function createPageBitmap(file, pageName) {
             return await self.createImageBitmap(file);
         }
     } catch (error) {
-        throw new ComicError('IMAGE_DECODE_FAILED', `无法解码图片“${pageName}”`);
+        if (!isHeifMime(mime)) {
+            throw new ComicError('IMAGE_DECODE_FAILED', `无法解码图片“${pageName}”`);
+        }
+        try {
+            const decoded = await requestNativeDecode(file, pageName);
+            return await self.createImageBitmap(decoded);
+        } catch (nativeError) {
+            throw new ComicError('IMAGE_DECODE_FAILED', nativeError.message || `无法解码 HEIC/HEIF 图片“${pageName}”`);
+        }
     }
 }
 
@@ -863,8 +886,8 @@ async function copyStorageFile(jobId, storage, sourceFile, destinationName) {
     }
 }
 
-async function createHistoryCover(jobId, storage, sourceFile, entryName, pageName) {
-    const bitmap = await createPageBitmap(sourceFile, pageName);
+async function createHistoryCover(jobId, storage, sourceFile, entryName, pageName, mime) {
+    const bitmap = await createPageBitmap(sourceFile, pageName, mime);
     try {
         const scale = Math.min(
             1,
@@ -971,7 +994,11 @@ async function exportLongImage(jobId, payload) {
                 } else {
                     reference = await getExportPageFile(jobId, session, payload.sessionId, index);
                 }
-                bitmap = await createPageBitmap(reference.file, session.manifest.pages[index].name);
+                bitmap = await createPageBitmap(
+                    reference.file,
+                    session.manifest.pages[index].name,
+                    session.manifest.pages[index].type
+                );
                 if (!bitmap.width || !bitmap.height) {
                     throw new ComicError('DIMENSIONS_UNAVAILABLE', `无法读取图片“${session.manifest.pages[index].name}”的尺寸`);
                 }
@@ -1044,7 +1071,7 @@ async function exportLongImage(jobId, payload) {
                 reference = saveHistory
                     ? stagingReferences[pageIndex]
                     : await getExportPageFile(jobId, session, payload.sessionId, pageIndex);
-                bitmap = await createPageBitmap(reference.file, page.name);
+                bitmap = await createPageBitmap(reference.file, page.name, page.type);
                 if (bitmap.width !== size.width || bitmap.height !== size.height) {
                     throw new ComicError('IMAGE_SIZE_CHANGED', `图片“${page.name}”的尺寸读取不一致`);
                 }
@@ -1128,7 +1155,14 @@ async function exportLongImage(jobId, payload) {
                 });
             }
             const coverEntryName = `${history.config.HISTORY_PREFIX}${bookId}-${generation}-cover.jpg`;
-            await createHistoryCover(jobId, storage, stagingReferences[0].file, coverEntryName, pages[0].name);
+            await createHistoryCover(
+                jobId,
+                storage,
+                stagingReferences[0].file,
+                coverEntryName,
+                pages[0].name,
+                pages[0].type
+            );
             promotedEntryNames.push(coverEntryName);
             coverFile = await storage.getFile(coverEntryName);
             const now = Date.now();
@@ -1508,6 +1542,20 @@ async function releaseOutput(payload) {
 async function handleComicCommand(data, sink = messageSink) {
     messageSink = sink;
     const { type, jobId, payload = {} } = data || {};
+    if (type === 'nativeDecodeResult') {
+        const request = nativeDecodeRequests.get(payload.requestId);
+        if (request) {
+            nativeDecodeRequests.delete(payload.requestId);
+            if (payload.error) {
+                request.reject(new Error(payload.error));
+            } else if (payload.file instanceof Blob) {
+                request.resolve(payload.file);
+            } else {
+                request.reject(new Error('Android HEIC/HEIF 解码结果无效'));
+            }
+        }
+        return;
+    }
     if (type === 'cancel') {
         cancelledJobs.add(jobId);
         return;

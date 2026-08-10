@@ -24,6 +24,7 @@
         optimizeImage
     } = image;
     const { makeJpegDownloadName, formatBytes, sanitizeDownloadName } = utils;
+    const androidMedia = root.EcrypteesAndroidMedia;
     const {
         LEGACY_IMAGE_VERSION,
         COMPACT_IMAGE_VERSION,
@@ -42,6 +43,10 @@
     let compressedImageUrl = '';
     let cipherTextDownloadUrl = '';
     let decodedImageUrl = '';
+
+    function isHeifFormat(format) {
+        return format?.mime === 'image/heic' || format?.mime === 'image/heif';
+    }
     let importedImageCode = '';
     let imageBusy = false;
 
@@ -244,30 +249,37 @@
             const format = sniffImageType(bytes);
 
             if (!format) {
-                throw new Error('不支持该图片格式，请选择 PNG、JPEG、GIF、WebP、BMP 或 AVIF');
+                throw new Error('不支持该图片格式，请选择 PNG、JPEG、GIF、WebP、BMP、AVIF、HEIC 或 HEIF');
             }
 
             const animated = isAnimatedImage(bytes, format);
-            selectedImage = { file, bytes, format, animated };
+            let processingFile = file;
+            let nativeImage = null;
+            if (isHeifFormat(format) && androidMedia?.isHeicSupported()) {
+                setImageStatus('正在使用 Android 系统解码 HEIC/HEIF…');
+                nativeImage = await androidMedia.decodeHeic(file, { name: file.name });
+                processingFile = nativeImage.file;
+            }
 
             if (sourceImageUrl) {
                 URL.revokeObjectURL(sourceImageUrl);
             }
 
-            sourceImageUrl = URL.createObjectURL(file);
+            sourceImageUrl = URL.createObjectURL(processingFile);
             const preview = document.getElementById('sourceImagePreview');
-            preview.onload = () => {
-                if (!selectedImage || selectedImage.file !== file) {
-                    return;
-                }
-
-                selectedImage.width = preview.naturalWidth;
-                selectedImage.height = preview.naturalHeight;
-                const dimensions = preview.naturalWidth && preview.naturalHeight ? ` · ${preview.naturalWidth}×${preview.naturalHeight}` : '';
-                document.getElementById('sourceImageMeta').textContent = `${file.name} · ${format.label} · ${formatBytes(file.size)}${dimensions}${animated ? ' · 动画' : ''}`;
-            };
             preview.src = sourceImageUrl;
-            document.getElementById('sourceImageMeta').textContent = `${file.name} · ${format.label} · ${formatBytes(file.size)}${animated ? ' · 动画' : ''}`;
+            try {
+                await preview.decode();
+            } catch (error) {
+                throw new Error(isHeifFormat(format)
+                    ? '当前浏览器无法解码 HEIC/HEIF；请使用 Android APK 或 Safari 17 以上版本'
+                    : '浏览器无法解码该图片');
+            }
+            const width = nativeImage?.sourceWidth || preview.naturalWidth;
+            const height = nativeImage?.sourceHeight || preview.naturalHeight;
+            selectedImage = { file: processingFile, sourceFile: file, bytes, format, animated, width, height };
+            const dimensions = width && height ? ` · ${width}×${height}` : '';
+            document.getElementById('sourceImageMeta').textContent = `${file.name} · ${format.label} · ${formatBytes(file.size)}${dimensions}${animated ? ' · 动画' : ''}`;
             document.getElementById('sourceImageCard').hidden = false;
             importedImageCode = '';
             document.getElementById('imageCodeFile').value = '';
@@ -401,7 +413,7 @@
             setImageProgress(98);
             setImageStatus('正在生成密文 TXT 文件… 98%');
             await waitForNextFrame();
-            const textFile = createCipherTextDownload(encoded, selectedImage.file.name);
+            const textFile = createCipherTextDownload(encoded, selectedImage.sourceFile?.name || selectedImage.file.name);
             showCompressedPreview(processedImage);
             setImageProgress(100, 'success');
             const reduction = Math.max(0, (1 - processedImage.bytes.length / selectedImage.bytes.length) * 100);

@@ -3,13 +3,23 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#ff4081">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <title>呃嗯！呼～❤呃啊～哼！！呃嗯哈嗯～啊</title>
     <link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAQAAAD9CzEMAAAAj0lEQVRYw+3XUQqAIBAE0LlHF/KiXszQr+6wfQVhBI7sUtSMv7oPxI8RUN6eBRkNNrAaMhZ+/DY0/FgbS2RqvMGQOaDSQOWA45j3XgH3SVixIsUBBQZDiQP6TQIECBAgQMA3APfi1QPu1bEH3Mvv9R6d6/tUO4tqcj8F2Hd/7rFBX6YS++mjAebdT12R8kR2TT9PMmO++fcAAAAASUVORK5CYII=">
+    <link rel="apple-touch-icon" href="assets/icon-192.png">
+    <link rel="manifest" href="manifest.webmanifest">
     <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
     <main class="container">
         <h1>呃嗯！呼～❤呃啊～哼！！呃嗯哈嗯～啊</h1>
+        <div class="install-app-row" id="installAppRow" hidden>
+            <button class="install-app-button" id="installAppButton" type="button">安装到桌面</button>
+            <span class="install-app-hint">安装后可像普通应用一样离线打开</span>
+        </div>
 
         <div class="tabs" role="tablist" aria-label="编解码类型">
             <button
@@ -86,10 +96,10 @@
                     class="file-input"
                     id="imageFile"
                     type="file"
-                    accept="image/png,image/jpeg,image/gif,image/webp,image/bmp,image/avif"
+                    accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,.avif,.heic,.heif,image/png,image/jpeg,image/jpg,image/gif,image/webp,image/bmp,image/avif,image/heic,image/heif"
                 >
                 <label class="file-picker" for="imageFile" tabindex="0">选择本地图片</label>
-                <p class="hint">支持 PNG、JPEG、GIF、WebP、BMP、AVIF，最大 15 MiB。图片只在本地浏览器中处理。</p>
+                <p class="hint">支持 PNG、JPEG、GIF、WebP、BMP、AVIF、HEIC、HEIF，最大 15 MiB。图片只在本地处理。</p>
             </div>
 
             <fieldset class="compression-panel" id="compressionPanel">
@@ -176,17 +186,22 @@
                         class="file-input"
                         id="comicFiles"
                         type="file"
-                        accept="image/png,image/jpeg,image/gif,image/webp,image/bmp,image/avif"
+                        accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,.avif,.heic,.heif,image/png,image/jpeg,image/jpg,image/gif,image/webp,image/bmp,image/avif,image/heic,image/heif"
                         multiple
                     >
                     <label class="file-picker" id="comicFilesPicker" for="comicFiles" tabindex="0">选择或追加图片</label>
-                    <p class="hint">最多 80 张，导入原图总体积不超过 500 MiB。图片只封装、不压缩、不转格式；输出会因清单和校验信息略大于原图总量。</p>
+                    <p class="hint">
+                        <span class="comic-hint-summary">最多 80 张 · 500 MiB · 原图无损封装</span>
+                        <span class="comic-hint-detail">不压缩、不转格式；输出会因清单和校验信息略大于原图总量。</span>
+                    </p>
                 </div>
 
                 <ol class="comic-file-list" id="comicFileList" aria-label="漫画页面顺序"></ol>
 
-                <label class="comic-name-label" for="comicArchiveName">归档名称</label>
-                <input class="comic-name-input" id="comicArchiveName" type="text" value="comic" maxlength="120">
+                <div class="comic-archive-settings">
+                    <label class="comic-name-label" for="comicArchiveName">归档名称</label>
+                    <input class="comic-name-input" id="comicArchiveName" type="text" value="comic" maxlength="120">
+                </div>
 
                 <p class="comic-security-note">内置码表随应用公开，只能隐藏内容并检测损坏，不等同于私人密码。未来版本可增加外部密码本。</p>
                 <div class="button-group comic-actions">
@@ -286,8 +301,10 @@
     <script src="js/core.js" defer></script>
     <script src="js/comic-core.js" defer></script>
     <script src="js/history-core.js" defer></script>
+    <script src="js/android-bridge.js" defer></script>
     <script src="js/app.js" defer></script>
     <script src="js/comic-worker.js" defer></script>
     <script src="js/comic-app.js" defer></script>
+    <script src="js/pwa.js" defer></script>
 </body>
 </html>

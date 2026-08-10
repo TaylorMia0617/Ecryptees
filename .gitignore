@@ -1,2 +1,31 @@
-/.vscode
+# Editors and operating systems
+/.vscode/
+/.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Local tooling and diagnostics
+/.gstack/
+*.log
+/coverage/
+
+# Web and Android release artifacts
+/dist/
+*.apk
+*.aab
 *.zip
+
+# Android generated and machine-local files
+/android-app/.gradle/
+/android-app/.idea/
+/android-app/**/build/
+/android-app/local.properties
+
+# Signing secrets: keep these outside the repository
+*.jks
+*.keystore
+*.p12
+**/signing.properties
+**/*-signing.properties

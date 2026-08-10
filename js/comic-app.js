@@ -10,6 +10,7 @@
 
     const { format } = comic;
     const { formatBytes, sanitizeDownloadName } = core.utils;
+    const androidMedia = root.EcrypteesAndroidMedia;
     const comicFilesInput = document.getElementById('comicFiles');
     const archiveInput = document.getElementById('comicArchiveFile');
     const fileList = document.getElementById('comicFileList');
@@ -27,10 +28,8 @@
     const DIRECTORY_HANDLE_STORE = 'handles';
     const DIRECTORY_HANDLE_KEY = 'library';
     const DIRECTORY_SCHEMA_VERSION = 1;
-    const runtimeSupported = root.isSecureContext
-        && !!root.crypto?.subtle
+    const runtimeSupported = !!root.crypto?.subtle
         && !!root.indexedDB
-        && typeof navigator.storage?.estimate === 'function'
         && typeof root.Ecryptees.LocalComicWorker === 'function';
 
     let worker = null;
@@ -73,6 +72,10 @@
         archive: { url: '', opfsName: '' },
         longImage: { url: '', opfsName: '' }
     };
+
+    function isHeifMime(mime) {
+        return mime === 'image/heic' || mime === 'image/heif';
+    }
 
     function nextJobId(prefix) {
         jobSequence += 1;
@@ -655,6 +658,7 @@
         document.getElementById('comicSelectionSummary').textContent = items.length
             ? `${items.length} 张 · ${formatBytes(total)}`
             : '尚未选择图片';
+        document.querySelector('#comicPanel .comic-section')?.toggleAttribute('data-has-files', items.length > 0);
         setBusy(activeJobType);
     }
 
@@ -739,20 +743,29 @@
             image.loading = 'lazy';
             image.decoding = 'async';
             image.addEventListener('load', () => {
-                item.width = image.naturalWidth;
-                item.height = image.naturalHeight;
+                if (!item.width || !item.height) {
+                    item.width = image.naturalWidth;
+                    item.height = image.naturalHeight;
+                }
                 updateItemMeta(item);
             }, { once: true });
 
             const info = document.createElement('div');
             info.className = 'comic-file-info';
+            const nameRow = document.createElement('span');
+            nameRow.className = 'comic-file-name-row';
+            const pageIndex = document.createElement('span');
+            pageIndex.className = 'comic-file-index';
+            pageIndex.textContent = `${index + 1}.`;
             const name = document.createElement('span');
             name.className = 'comic-file-name';
-            name.textContent = `${index + 1}. ${item.file.name}`;
+            name.textContent = item.file.name;
+            name.title = item.file.name;
+            nameRow.append(pageIndex, name);
             const meta = document.createElement('span');
             meta.className = 'comic-file-meta';
             meta.dataset.metaId = item.id;
-            info.append(name, meta);
+            info.append(nameRow, meta);
 
             const actions = document.createElement('div');
             actions.className = 'comic-order-actions';
@@ -864,13 +877,47 @@
         const prefix = new Uint8Array(await file.slice(0, 64).arrayBuffer());
         const detected = core.image.sniffImageType(prefix);
         if (!detected || !format.SUPPORTED_MIME_TYPES.includes(detected.mime)) {
-            throw new Error(`“${file.name}”不是支持的 PNG、JPEG、GIF、WebP、BMP 或 AVIF`);
+            throw new Error(`“${file.name}”不是支持的 PNG、JPEG、GIF、WebP、BMP、AVIF、HEIC 或 HEIF`);
         }
         return detected;
     }
 
+    async function prepareComicItem(file, detected) {
+        let previewFile = file;
+        let width = 0;
+        let height = 0;
+        if (isHeifMime(detected.mime) && androidMedia?.isHeicSupported()) {
+            const decoded = await androidMedia.decodeHeic(file, { name: file.name, maxDimension: 256 });
+            previewFile = decoded.file;
+            width = decoded.sourceWidth;
+            height = decoded.sourceHeight;
+        }
+        const url = URL.createObjectURL(previewFile);
+        if (isHeifMime(detected.mime) && previewFile === file) {
+            const probe = new Image();
+            probe.src = url;
+            try {
+                await probe.decode();
+                width = probe.naturalWidth;
+                height = probe.naturalHeight;
+            } catch (error) {
+                URL.revokeObjectURL(url);
+                throw new Error(`“${file.name}”是 HEIC/HEIF；当前环境无法解码，请使用 Android APK`);
+            }
+        }
+        return {
+            id: nextJobId('item'),
+            file,
+            format: detected,
+            url,
+            width,
+            height
+        };
+    }
+
     async function handleFilesSelected() {
         const selected = Array.from(comicFilesInput.files || []);
+        const validated = [];
         comicFilesInput.value = '';
         if (selected.length === 0) {
             return;
@@ -885,25 +932,17 @@
                 throw new Error('漫画原图总体积不能超过 500 MiB');
             }
 
-            const validated = [];
             for (const file of selected) {
-                validated.push({ file, detected: await validateSelectedFile(file) });
+                const detected = await validateSelectedFile(file);
+                validated.push(await prepareComicItem(file, detected));
             }
-            validated.forEach(({ file, detected }) => {
-                items.push({
-                    id: nextJobId('item'),
-                    file,
-                    format: detected,
-                    url: URL.createObjectURL(file),
-                    width: 0,
-                    height: 0
-                });
-            });
+            items.push(...validated);
             renderFileList();
             updateSelectionSummary();
             resetProgress();
             setStatus(`已加入 ${selected.length} 张图片，请拖动或使用箭头确认页面顺序。`, 'success');
         } catch (error) {
+            validated.forEach(revokeItem);
             setStatus(error.message || '图片导入失败', 'error');
         }
     }
@@ -1360,7 +1399,19 @@
         }
         page.pending = false;
         page.jobId = '';
-        const blob = new Blob([message.file], { type: message.mime });
+        let blob = new Blob([message.file], { type: message.mime });
+        if (isHeifMime(message.mime) && androidMedia?.isHeicSupported()) {
+            try {
+                const decoded = await androidMedia.decodeHeic(blob, { name: message.name || page.meta.name });
+                blob = decoded.file;
+            } catch (error) {
+                const pageElement = reader.querySelector(`[data-reader-index="${index}"]`);
+                if (pageElement) {
+                    pageElement.replaceChildren(createReaderPlaceholder(page, index, error.message || 'HEIC/HEIF 解码失败'));
+                }
+                return;
+            }
+        }
         const pageUrl = URL.createObjectURL(blob);
         const image = document.createElement('img');
         image.src = pageUrl;
@@ -1448,6 +1499,26 @@
 
     async function handleWorkerMessage(event) {
         const message = event.data || {};
+        if (message.type === 'nativeDecodeRequest') {
+            try {
+                if (!androidMedia?.isHeicSupported()) {
+                    throw new Error('当前环境没有可用的 HEIC/HEIF 解码器');
+                }
+                const decoded = await androidMedia.decodeHeic(message.file, { name: message.name });
+                worker?.postMessage({
+                    type: 'nativeDecodeResult',
+                    jobId: message.jobId,
+                    payload: { requestId: message.requestId, file: decoded.file }
+                });
+            } catch (error) {
+                worker?.postMessage({
+                    type: 'nativeDecodeResult',
+                    jobId: message.jobId,
+                    payload: { requestId: message.requestId, error: error.message || 'HEIC/HEIF 解码失败' }
+                });
+            }
+            return;
+        }
         if (message.type === 'history') {
             browserHistoryBooks = Array.isArray(message.books) ? message.books : [];
             mergeHistorySources();
@@ -1722,7 +1793,8 @@
     }
 
     function createComicWorker() {
-        if (location.protocol !== 'file:' && typeof root.Worker === 'function') {
+        const canLoadExternalWorker = location.protocol === 'http:' || location.protocol === 'https:';
+        if (canLoadExternalWorker && typeof root.Worker === 'function') {
             try {
                 return new Worker('js/comic-worker.js');
             } catch (error) {
@@ -1773,7 +1845,7 @@
         if (!runtimeSupported) {
             const warning = document.getElementById('comicEnvironmentWarning');
             warning.hidden = false;
-            warning.textContent = '当前浏览器缺少 Web Crypto 或本地暂存能力，无法安全处理大型漫画归档。请升级浏览器后重试。';
+            warning.textContent = '当前浏览器缺少 Web Crypto 或本地数据库能力，无法处理大型漫画归档。请升级浏览器后重试。';
             setStatus('当前打开方式不支持漫画模式。', 'error');
             setBusy('');
             return;

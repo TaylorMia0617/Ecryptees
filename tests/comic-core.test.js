@@ -146,6 +146,14 @@ test('manifest plans page-aligned chunks and enforces count and total limits', (
     }))), error => error instanceof ComicError && error.code === 'TOO_MANY_PAGES');
 });
 
+test('comic manifest accepts HEIC and HEIF while preserving their MIME types', () => {
+    const manifest = format.createManifest([
+        { name: 'one.heic', type: 'image/heic', size: 3, lastModified: 1 },
+        { name: 'two.heif', type: 'image/heif', size: 4, lastModified: 2 }
+    ], 3);
+    assert.deepEqual(manifest.pages.map(page => page.type), ['image/heic', 'image/heif']);
+});
+
 test('multi-page archive round-trips exact bytes across a chunk boundary', async () => {
     const large = new Uint8Array(format.CHUNK_SIZE + 3);
     for (let index = 0; index < large.length; index++) {

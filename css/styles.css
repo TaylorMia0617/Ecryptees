@@ -44,6 +44,49 @@ h1 {
     margin-bottom: 30px;
 }
 
+.install-app-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: -16px auto 22px;
+}
+
+.install-app-button {
+    padding: 9px 20px;
+    font-size: 0.95rem;
+}
+
+.install-app-hint {
+    color: #6d4c58;
+    font-size: 0.86rem;
+}
+
+.android-download-status {
+    position: fixed;
+    z-index: 10000;
+    right: 16px;
+    bottom: 16px;
+    left: 16px;
+    max-width: 560px;
+    margin: auto;
+    padding: 12px 16px;
+    border-radius: 12px;
+    color: #ffffff;
+    background: rgba(33, 33, 33, 0.94);
+    box-shadow: 0 5px 16px rgba(0, 0, 0, 0.28);
+    text-align: center;
+}
+
+.android-download-status[data-kind="success"] {
+    background: rgba(46, 125, 50, 0.96);
+}
+
+.android-download-status[data-kind="error"] {
+    background: rgba(176, 0, 32, 0.96);
+}
+
 [hidden] {
     display: none !important;
 }
@@ -523,6 +566,20 @@ label {
     font-weight: 600;
 }
 
+.comic-file-name-row {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+}
+
+.comic-file-index {
+    flex: 0 0 auto;
+    color: #ad1457;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
 .comic-file-meta {
     margin-top: 5px;
     color: #616161;
@@ -562,6 +619,15 @@ label {
 .comic-name-label {
     display: block;
     margin-top: 14px;
+}
+
+.comic-archive-settings {
+    min-width: 0;
+}
+
+.comic-hint-summary,
+.comic-hint-detail {
+    display: block;
 }
 
 .comic-name-input {
@@ -985,9 +1051,94 @@ label {
         text-align: left;
     }
 
-    .comic-file-item {
-        grid-template-columns: 24px 64px minmax(0, 1fr);
+    #comicPanel .comic-section:first-of-type {
+        display: flex;
+        flex-direction: column;
+        padding-bottom: 8px;
+    }
+
+    #comicPanel .comic-section:first-of-type > .image-card-header {
+        order: 1;
+    }
+
+    #comicPanel .comic-section:first-of-type > .image-upload {
+        order: 2;
+    }
+
+    #comicPanel .comic-section:first-of-type > .comic-archive-settings {
+        order: 3;
+    }
+
+    #comicPanel .comic-section:first-of-type > .comic-file-list {
+        order: 4;
+    }
+
+    #comicPanel .comic-section:first-of-type > .comic-security-note {
+        order: 5;
+    }
+
+    #comicPanel .comic-section:first-of-type > .comic-actions {
+        order: 6;
+    }
+
+    #comicPanel .image-upload {
+        display: grid;
         gap: 8px;
+        margin-top: 10px;
+        padding: 12px;
+        text-align: left;
+    }
+
+    #comicPanel .image-upload .file-picker {
+        width: 100%;
+        min-height: 46px;
+    }
+
+    #comicPanel .image-upload .hint {
+        margin: 0;
+        font-size: 0.82rem;
+        line-height: 1.4;
+        text-align: center;
+    }
+
+    #comicPanel .comic-hint-detail {
+        display: none;
+    }
+
+    #comicPanel .comic-archive-settings {
+        margin-top: 14px;
+        padding-top: 12px;
+        border-top: 1px solid #f3c0d2;
+    }
+
+    #comicPanel .comic-name-label {
+        margin-top: 0;
+        font-size: 0.95rem;
+    }
+
+    #comicPanel .comic-name-input {
+        min-height: 46px;
+    }
+
+    .comic-file-list {
+        max-height: none;
+        overflow: visible;
+        margin: 12px 0;
+        padding-bottom: 64px;
+    }
+
+    .comic-file-item {
+        grid-template-columns: 28px 64px minmax(0, 1fr);
+        align-items: center;
+        gap: 8px;
+        padding: 8px;
+    }
+
+    .comic-drag-handle {
+        display: grid;
+        align-self: stretch;
+        place-items: center;
+        min-height: 44px;
     }
 
     .comic-thumbnail {
@@ -996,9 +1147,74 @@ label {
     }
 
     .comic-order-actions {
-        grid-column: 2 / -1;
+        grid-column: 3;
         display: flex;
         justify-content: flex-end;
+        gap: 4px;
+    }
+
+    .comic-order-button {
+        width: 44px;
+        height: 44px;
+        flex: 0 0 44px;
+    }
+
+    .comic-remove-button {
+        width: auto;
+        flex-basis: auto;
+        padding-inline: 12px;
+    }
+
+    .comic-file-name-row {
+        align-items: flex-start;
+    }
+
+    .comic-file-name {
+        display: -webkit-box;
+        overflow: hidden;
+        font-size: 0.92rem;
+        line-height: 1.3;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+    }
+
+    .comic-file-meta {
+        margin-top: 3px;
+        font-size: 0.76rem;
+        line-height: 1.35;
+    }
+
+    .comic-actions {
+        position: sticky;
+        z-index: 20;
+        bottom: max(8px, env(safe-area-inset-bottom));
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        margin: 8px -4px 0;
+        padding: 8px;
+        border: 1px solid rgba(243, 192, 210, 0.92);
+        border-radius: 16px;
+        background: rgba(255, 249, 251, 0.96);
+        box-shadow: 0 8px 24px rgba(82, 23, 51, 0.16);
+        backdrop-filter: blur(10px);
+    }
+
+    .comic-actions #encryptComicButton {
+        min-height: 48px;
+    }
+
+    .comic-actions #clearComicFilesButton {
+        min-height: 48px;
+        padding-inline: 16px;
+    }
+
+    .comic-actions #cancelComicButton {
+        grid-column: 1 / -1;
+    }
+
+    .comic-actions > * {
+        min-width: 0;
     }
 
     .comic-section {
