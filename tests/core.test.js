@@ -170,6 +170,8 @@ test('static entry point references ordered external files without inline handle
     assert.match(index, /id="selectHistoryDirectoryButton"/);
     assert.match(index, /id="migrateHistoryButton"/);
     assert.match(index, /id="openComicButton"[^>]*>解密、转存并阅读</);
+    assert.match(index, /id="comicArchiveFile"[^>]*accept="\.ecomic,application\/vnd\.ecryptees\.ecomic"/);
+    assert.doesNotMatch(index, /id="comicArchiveFile"[^>]*application\/octet-stream/);
     assert.match(index, /id="encryptComicButton"[^>]*>加密并加入书架</);
     assert.match(index, /class="button-group comic-actions"[\s\S]*id="downloadComicArchive"/);
     assert.doesNotMatch(index, /id="comicArchiveDownloadRow"/);
@@ -189,7 +191,13 @@ test('static entry point references ordered external files without inline handle
     const comicApp = fs.readFileSync(path.join(repositoryRoot, 'js', 'comic-app.js'), 'utf8');
     assert.match(comicApp, /saveCurrentSessionToHistory\(\)/);
     assert.match(comicApp, /startJob\('historySave'/);
-    assert.match(comicApp, /function createHistoryRenameButton\(book\)/);
+    assert.match(comicApp, /function createHistoryMenuButton\(book\)/);
+    assert.match(comicApp, /GROUP_DATABASE_NAME = 'ecryptees-groups-v1'/);
+    assert.match(comicApp, /createObjectStore\(GROUP_STORE, \{ keyPath: 'groupId' \}\)/);
+    assert.match(comicApp, /createObjectStore\(GROUP_MEMBERSHIP_STORE, \{ keyPath: 'bookId' \}\)/);
+    assert.match(comicApp, /function openHistoryFolderDialog\(bookId = ''\)/);
+    assert.match(comicApp, /function openHistoryGroupDialog\(bookId\)/);
+    assert.match(comicApp, /historyAction === 'menu'/);
     assert.match(comicApp, /createHistoryButton\('阅读', 'open'/);
     assert.match(comicApp, /createHistoryButton\('导出 \.ecomic', 'exportArchive'/);
     assert.match(comicApp, /createHistoryButton\('导出长图', 'exportLong'/);
@@ -198,6 +206,9 @@ test('static entry point references ordered external files without inline handle
     assert.match(comicApp, /startJob\('historyExportArchive'/);
     assert.match(comicApp, /historyLongImageReady/);
     assert.match(comicApp, /historyArchiveReady/);
+    assert.match(comicApp, /ecryptees-open-archive/);
+    assert.match(comicApp, /releaseSelectedArchiveTemp\(\)/);
+    assert.match(comicApp, /selectArchiveFile\(file, temporaryEntryName\)/);
     assert.match(comicApp, /已使用 \$\{used\} · 剩余 \$\{remaining\}/);
     assert.match(comicApp, /downloadLongImageFile\(message\.file, message\.name, message\.opfsName, message\.storageKind\)/);
     assert.match(comicApp, /function getComicParallelism\(\)/);
@@ -208,7 +219,13 @@ test('static entry point references ordered external files without inline handle
     assert.match(comicWorker, /opfsName: entryName/);
     assert.match(comicWorker, /post\(payload\.resultType === 'historyExport' \? 'historyLongImageReady' : 'complete'/);
     assert.match(comicWorker, /size: 0,\s*generatedAt: 0,\s*entryName: ''/);
-    assert.match(comicApp, /historyAction === 'rename'/);
+    assert.doesNotMatch(comicApp, /historyAction === 'rename'|history-progress-track|history-more/);
+    assert.match(index, /id="addHistoryFolderButton"[^>]*aria-label="添加文件夹"/);
+    assert.match(index, /id="historyViewMenu"[\s\S]*id="historySort"[\s\S]*id="historyGroupFilterSelect"/);
+    assert.doesNotMatch(index, /id="historyGroupFilters"|class="history-group-filters"/);
+    assert.match(comicApp, /function renderHistoryViewMenu\(\)/);
+    assert.doesNotMatch(comicApp, /renderHistoryGroupFilters|data-history-group-filter/);
+    assert.match(index, /id="historyBookMenuDialog"[\s\S]*修改名称[\s\S]*添加分组/);
     assert.match(comicApp, /showDirectoryPicker/);
     assert.match(comicApp, /EcrypteesAndroid\\\//);
     assert.match(comicApp, /historyDirectoryPanel'\)\.hidden = true/);
@@ -270,7 +287,15 @@ test('Android wrapper loads local HTTPS assets and streams downloads through SAF
     const buildScript = fs.readFileSync(path.join(repositoryRoot, 'android-app', 'build-apk.ps1'), 'utf8');
 
     assert.doesNotMatch(manifest, /android\.permission\.INTERNET/);
+    assert.doesNotMatch(manifest, /READ_EXTERNAL_STORAGE|MANAGE_EXTERNAL_STORAGE/);
     assert.match(manifest, /android:allowBackup="false"/);
+    assert.match(manifest, /android:launchMode="singleTop"/);
+    assert.match(manifest, /android\.intent\.action\.VIEW/);
+    assert.match(manifest, /android\.intent\.action\.SEND/);
+    assert.match(manifest, /application\/vnd\.ecryptees\.ecomic/);
+    assert.match(manifest, /android:mimeType="\*\/\*"/);
+    assert.match(manifest, /android:host="\*" android:scheme="content"/);
+    assert.match(manifest, /android:pathPattern="\.\*\\\\\.ecomic"/);
     assert.match(activity, /WebViewAssetLoader\.AssetsPathHandler/);
     assert.match(activity, /https:\/\/appassets\.androidplatform\.net\/assets\/index\.html/);
     assert.match(activity, /Intent\.ACTION_CREATE_DOCUMENT/);
@@ -285,6 +310,16 @@ test('Android wrapper loads local HTTPS assets and streams downloads through SAF
     assert.match(activity, /Executors\.newFixedThreadPool\(2\)/);
     assert.match(activity, /new Semaphore\(1, true\)/);
     assert.match(activity, /Bitmap\.CompressFormat\.PNG/);
+    assert.match(activity, /protected void onNewIntent/);
+    assert.match(activity, /Intent\.ACTION_SEND\.equals\(intent\.getAction\(\)\)/);
+    assert.match(activity, /Intent\.EXTRA_STREAM, Uri\.class/);
+    assert.match(activity, /clipData\.getItemCount\(\) > 1/);
+    assert.match(activity, /OpenableColumns\.DISPLAY_NAME/);
+    assert.match(activity, /endsWith\("\.ecomic"\)/);
+    assert.match(activity, /claimIncomingDocument\(\)/);
+    assert.match(activity, /readIncomingChunk\(String token, int requestedLength\)/);
+    assert.match(activity, /finishIncomingDocument\(String token\)/);
+    assert.match(activity, /MAX_INCOMING_ARCHIVE_BYTES/);
     assert.match(bridge, /response\.body\.getReader\(\)/);
     assert.match(bridge, /bridge\.writeChunk\(token, encodeBase64\(value\)\)/);
     assert.match(bridge, /EcrypteesAndroidMedia/);
@@ -295,12 +330,20 @@ test('Android wrapper loads local HTTPS assets and streams downloads through SAF
     assert.match(bridge, /emitDownloadResult\('success'/);
     assert.match(bridge, /emitDownloadResult\('cancelled'/);
     assert.match(bridge, /emitDownloadResult\('failed'/);
+    assert.match(bridge, /application\/vnd\.ecryptees\.ecomic/);
+    assert.match(bridge, /navigator\.storage\?\.getDirectory/);
+    assert.match(bridge, /ECOMIC_MAGIC/);
+    assert.match(bridge, /ecryptees-open-archive/);
+    assert.match(bridge, /readIncomingChunk\(token, INCOMING_CHUNK_BYTES\)/);
     assert.doesNotMatch(bridge, /mediaQueue|queueMediaTask|finishHeicDecode/);
     assert.doesNotMatch(bridge, /await response\.arrayBuffer\(\)|await response\.blob\(\)/);
     assert.match(appBuild, /include 'js\/\*\*'/);
     assert.match(appBuild, /androidx\.webkit:webkit:1\.16\.0/);
     assert.match(buildScript, /apksigner\.bat/);
     assert.match(buildScript, /91306e7c15932646a58ffbd3443f541be57401f1f64106d8dcd0e97fbc5687e8/);
+    assert.match(buildScript, /output-metadata\.json/);
+    assert.match(buildScript, /Ecryptees-v\$versionName\.apk/);
+    assert.match(buildScript, /APK version mismatch/);
 });
 
 test('JPG and JPEG remain selectable in browsers and Android document providers', () => {
@@ -329,9 +372,9 @@ test('JPG and JPEG remain selectable in browsers and Android document providers'
 
     assert.match(activity, /params\.getAcceptTypes\(\)/);
     assert.match(activity, /createImageDocumentIntent\(params\)/);
-    assert.match(appBuild, /versionCode 8/);
-    assert.match(appBuild, /versionName '1\.0\.7'/);
-    assert.match(serviceWorker, /const CACHE_NAME = 'ecryptees-app-v7'/);
+    assert.match(appBuild, /versionCode 11/);
+    assert.match(appBuild, /versionName '1\.0\.10'/);
+    assert.match(serviceWorker, /const CACHE_NAME = 'ecryptees-app-v10'/);
 });
 
 test('Android comic picker returns every readable document without trusting provider MIME metadata', () => {
@@ -347,6 +390,6 @@ test('Android comic picker returns every readable document without trusting prov
     assert.match(activity, /data\.getClipData\(\)/);
     assert.match(activity, /getContentResolver\(\)\.openFileDescriptor\(uri, "r"\)/);
     assert.match(activity, /parseImageDocumentResult\(resultCode, data\)/);
-    assert.match(appBuild, /versionCode 8/);
-    assert.match(appBuild, /versionName '1\.0\.7'/);
+    assert.match(appBuild, /versionCode 11/);
+    assert.match(appBuild, /versionName '1\.0\.10'/);
 });

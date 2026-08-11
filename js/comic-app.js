@@ -29,6 +29,10 @@
     const DIRECTORY_HANDLE_STORE = 'handles';
     const DIRECTORY_HANDLE_KEY = 'library';
     const DIRECTORY_SCHEMA_VERSION = 1;
+    const GROUP_DATABASE_NAME = 'ecryptees-groups-v1';
+    const GROUP_DATABASE_VERSION = 1;
+    const GROUP_STORE = 'groups';
+    const GROUP_MEMBERSHIP_STORE = 'memberships';
     const READER_HEADER_STORAGE_KEY = 'ecryptees-reader-header-collapsed-v1';
     const runtimeSupported = !!root.crypto?.subtle
         && !!root.indexedDB
@@ -50,9 +54,15 @@
     let readerHeaderRestoreTimer = 0;
     let readerReturnFocus = null;
     let readerHeaderCollapsed = false;
+    let selectedArchiveTempName = '';
     let historyBooks = [];
     let browserHistoryBooks = [];
     let directoryBooks = [];
+    let historyGroups = [];
+    let historyGroupMemberships = new Map();
+    let selectedHistoryGroup = 'all';
+    let activeHistoryMenuBookId = '';
+    let folderAssignmentBookId = '';
     let libraryDirectoryHandle = null;
     let directoryPermissionGranted = false;
     let pendingArchiveForDirectory = null;
@@ -121,6 +131,12 @@
         document.getElementById('clearHistoryButton').disabled = busy || historyBooks.length === 0;
         document.getElementById('historySearch').disabled = busy;
         document.getElementById('historySort').disabled = busy;
+        document.getElementById('historyGroupFilterSelect').disabled = busy;
+        document.getElementById('historyViewMenu').dataset.disabled = String(busy);
+        if (busy) {
+            document.getElementById('historyViewMenu').open = false;
+        }
+        document.getElementById('addHistoryFolderButton').disabled = busy;
         document.getElementById('selectHistoryDirectoryButton').disabled = busy || !directoryPickerSupported;
         document.getElementById('migrateHistoryButton').disabled = busy
             || !directoryPermissionGranted
@@ -236,6 +252,139 @@
             request.onsuccess = () => resolve(request.result);
             request.onerror = () => reject(request.error || new Error('独立书架设置读取失败'));
         });
+    }
+
+    function transactionToPromise(transaction, fallbackMessage) {
+        return new Promise((resolve, reject) => {
+            transaction.oncomplete = resolve;
+            transaction.onerror = () => reject(transaction.error || new Error(fallbackMessage));
+            transaction.onabort = () => reject(transaction.error || new Error(fallbackMessage));
+        });
+    }
+
+    async function openHistoryGroupDatabase() {
+        const request = indexedDB.open(GROUP_DATABASE_NAME, GROUP_DATABASE_VERSION);
+        request.onupgradeneeded = () => {
+            if (!request.result.objectStoreNames.contains(GROUP_STORE)) {
+                request.result.createObjectStore(GROUP_STORE, { keyPath: 'groupId' });
+            }
+            if (!request.result.objectStoreNames.contains(GROUP_MEMBERSHIP_STORE)) {
+                request.result.createObjectStore(GROUP_MEMBERSHIP_STORE, { keyPath: 'bookId' });
+            }
+        };
+        return requestToPromise(request);
+    }
+
+    function normalizeHistoryGroupName(value) {
+        return String(value || '').trim().slice(0, 40);
+    }
+
+    function createHistoryGroupId() {
+        if (typeof root.crypto.randomUUID === 'function') {
+            return root.crypto.randomUUID();
+        }
+        const bytes = root.crypto.getRandomValues(new Uint8Array(16));
+        return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+    }
+
+    async function loadHistoryGroupState() {
+        const database = await openHistoryGroupDatabase();
+        try {
+            const transaction = database.transaction([GROUP_STORE, GROUP_MEMBERSHIP_STORE], 'readonly');
+            const [groups, memberships] = await Promise.all([
+                requestToPromise(transaction.objectStore(GROUP_STORE).getAll()),
+                requestToPromise(transaction.objectStore(GROUP_MEMBERSHIP_STORE).getAll())
+            ]);
+            historyGroups = groups
+                .map(group => ({
+                    groupId: String(group?.groupId || ''),
+                    name: normalizeHistoryGroupName(group?.name),
+                    createdAt: Math.max(0, Number(group?.createdAt) || 0)
+                }))
+                .filter(group => group.groupId && group.name)
+                .sort((left, right) => left.createdAt - right.createdAt || left.name.localeCompare(right.name, 'zh-CN'));
+            const validGroupIds = new Set(historyGroups.map(group => group.groupId));
+            historyGroupMemberships = new Map(memberships
+                .filter(item => item?.bookId && validGroupIds.has(String(item.groupId || '')))
+                .map(item => [String(item.bookId), String(item.groupId)]));
+            if (selectedHistoryGroup !== 'all'
+                && selectedHistoryGroup !== 'ungrouped'
+                && !validGroupIds.has(selectedHistoryGroup)) {
+                selectedHistoryGroup = 'all';
+            }
+        } finally {
+            database.close();
+        }
+        renderHistory();
+    }
+
+    async function createHistoryGroup(name, bookId = '') {
+        const normalizedName = normalizeHistoryGroupName(name);
+        if (!normalizedName) {
+            throw new Error('文件夹名称不能为空。');
+        }
+        if (historyGroups.some(group => group.name.toLocaleLowerCase() === normalizedName.toLocaleLowerCase())) {
+            throw new Error('已经存在同名文件夹。');
+        }
+        const now = Date.now();
+        const group = { groupId: createHistoryGroupId(), name: normalizedName, createdAt: now, updatedAt: now };
+        const database = await openHistoryGroupDatabase();
+        try {
+            const transaction = database.transaction([GROUP_STORE, GROUP_MEMBERSHIP_STORE], 'readwrite');
+            transaction.objectStore(GROUP_STORE).add(group);
+            if (bookId) {
+                transaction.objectStore(GROUP_MEMBERSHIP_STORE).put({ bookId, groupId: group.groupId, updatedAt: now });
+            }
+            await transactionToPromise(transaction, '无法保存文件夹');
+        } finally {
+            database.close();
+        }
+        await loadHistoryGroupState();
+        return group;
+    }
+
+    async function setHistoryBookGroup(bookId, groupId) {
+        const normalizedGroupId = String(groupId || '');
+        if (normalizedGroupId && !historyGroups.some(group => group.groupId === normalizedGroupId)) {
+            throw new Error('所选文件夹已不存在。');
+        }
+        const database = await openHistoryGroupDatabase();
+        try {
+            const transaction = database.transaction(GROUP_MEMBERSHIP_STORE, 'readwrite');
+            const store = transaction.objectStore(GROUP_MEMBERSHIP_STORE);
+            if (normalizedGroupId) {
+                store.put({ bookId, groupId: normalizedGroupId, updatedAt: Date.now() });
+            } else {
+                store.delete(bookId);
+            }
+            await transactionToPromise(transaction, '无法保存漫画分组');
+        } finally {
+            database.close();
+        }
+        if (normalizedGroupId) {
+            historyGroupMemberships.set(bookId, normalizedGroupId);
+        } else {
+            historyGroupMemberships.delete(bookId);
+        }
+        renderHistory();
+    }
+
+    async function removeHistoryMemberships(bookId) {
+        const database = await openHistoryGroupDatabase();
+        try {
+            const transaction = database.transaction(GROUP_MEMBERSHIP_STORE, 'readwrite');
+            const store = transaction.objectStore(GROUP_MEMBERSHIP_STORE);
+            if (bookId === '*') {
+                store.clear();
+                historyGroupMemberships.clear();
+            } else {
+                store.delete(bookId);
+                historyGroupMemberships.delete(bookId);
+            }
+            await transactionToPromise(transaction, '无法清理漫画分组');
+        } finally {
+            database.close();
+        }
     }
 
     async function openDirectoryDatabase() {
@@ -588,12 +737,39 @@
         return button;
     }
 
-    function createHistoryRenameButton(book) {
-        const button = createHistoryButton('修改标题', 'rename', book.bookId, 'history-rename');
-        button.title = '修改标题';
-        button.setAttribute('aria-label', `修改《${book.title}》的标题`);
-        button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l10.6-10.6a2.1 2.1 0 0 0 0-3L17.6 5.4a2.1 2.1 0 0 0-3 0L4 16v4Zm2-3.2 10-10 1.2 1.2-10 10H6v-1.2Z"/></svg>';
+    function createHistoryMenuButton(book) {
+        const button = createHistoryButton('更多操作', 'menu', book.bookId, 'history-menu-button');
+        button.title = '更多操作';
+        button.setAttribute('aria-label', `打开《${book.title}》的更多操作`);
+        button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 6a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 6a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z"/></svg>';
         return button;
+    }
+
+    function renderHistoryViewMenu() {
+        const select = document.getElementById('historyGroupFilterSelect');
+        select.replaceChildren();
+        const definitions = [
+            { groupId: 'all', name: '全部' },
+            { groupId: 'ungrouped', name: '未分组' },
+            ...historyGroups
+        ];
+        for (const group of definitions) {
+            const option = document.createElement('option');
+            option.value = group.groupId;
+            const count = group.groupId === 'all'
+                ? historyBooks.length
+                : historyBooks.filter(book => {
+                    const membership = historyGroupMemberships.get(book.bookId) || '';
+                    return group.groupId === 'ungrouped' ? !membership : membership === group.groupId;
+                }).length;
+            option.textContent = `${group.name}（${count}）`;
+            select.append(option);
+        }
+        select.value = selectedHistoryGroup;
+        const sortSelect = document.getElementById('historySort');
+        const sortName = sortSelect.selectedOptions[0]?.textContent || '最近阅读';
+        const groupName = definitions.find(group => group.groupId === selectedHistoryGroup)?.name || '全部';
+        document.getElementById('historyViewSummary').textContent = `${sortName} · ${groupName}`;
     }
 
     function renderHistory() {
@@ -601,7 +777,16 @@
         const query = document.getElementById('historySearch').value.trim().toLocaleLowerCase();
         const sort = document.getElementById('historySort').value;
         const books = historyBooks
-            .filter(book => !query || book.title.toLocaleLowerCase().includes(query))
+            .filter(book => {
+                if (query && !book.title.toLocaleLowerCase().includes(query)) {
+                    return false;
+                }
+                const membership = historyGroupMemberships.get(book.bookId) || '';
+                if (selectedHistoryGroup === 'ungrouped') {
+                    return !membership;
+                }
+                return selectedHistoryGroup === 'all' || membership === selectedHistoryGroup;
+            })
             .slice();
         books.sort((left, right) => {
             if (sort === 'title') {
@@ -613,6 +798,7 @@
             return (right.lastOpenedAt || right.updatedAt) - (left.lastOpenedAt || left.updatedAt);
         });
         historyGrid.replaceChildren();
+        renderHistoryViewMenu();
         document.getElementById('historyEmptyState').hidden = historyBooks.length !== 0;
         for (const book of books) {
             const card = document.createElement('article');
@@ -636,7 +822,7 @@
             title.className = 'history-card-title';
             title.title = book.title;
             title.textContent = book.title;
-            cardHeader.append(title, createHistoryRenameButton(book));
+            cardHeader.append(title, createHistoryMenuButton(book));
             const meta = document.createElement('p');
             meta.className = 'history-card-meta';
             meta.textContent = `${book.pageCount} 页 · ${formatBytes(book.totalSize)}${book.archiveFile ? ' · 独立目录' : ''}`;
@@ -661,6 +847,57 @@
             setHistoryStatus('');
         }
         setBusy(activeJobType);
+    }
+
+    function closeHistoryDialog(dialog) {
+        if (dialog.open) {
+            dialog.close();
+        }
+    }
+
+    function openHistoryBookMenu(bookId) {
+        const book = historyBooks.find(item => item.bookId === bookId);
+        if (!book || activeJobType) {
+            return;
+        }
+        activeHistoryMenuBookId = bookId;
+        document.getElementById('historyBookMenuTitle').textContent = book.title;
+        document.getElementById('historyBookMenuDialog').showModal();
+    }
+
+    function openHistoryFolderDialog(bookId = '') {
+        folderAssignmentBookId = bookId;
+        const dialog = document.getElementById('historyFolderDialog');
+        const input = document.getElementById('historyFolderName');
+        const error = document.getElementById('historyFolderError');
+        input.value = '';
+        error.hidden = true;
+        error.textContent = '';
+        dialog.showModal();
+        root.setTimeout(() => input.focus(), 0);
+    }
+
+    function openHistoryGroupDialog(bookId) {
+        const book = historyBooks.find(item => item.bookId === bookId);
+        if (!book || activeJobType) {
+            return;
+        }
+        activeHistoryMenuBookId = bookId;
+        const select = document.getElementById('historyGroupSelect');
+        select.replaceChildren();
+        const ungrouped = document.createElement('option');
+        ungrouped.value = '';
+        ungrouped.textContent = '未分组';
+        select.append(ungrouped);
+        for (const group of historyGroups) {
+            const option = document.createElement('option');
+            option.value = group.groupId;
+            option.textContent = group.name;
+            select.append(option);
+        }
+        select.value = historyGroupMemberships.get(bookId) || '';
+        document.getElementById('historyGroupDialogTitle').textContent = `添加分组 · ${book.title}`;
+        document.getElementById('historyGroupDialog').showModal();
     }
 
     function requestHistoryList() {
@@ -1057,28 +1294,54 @@
         });
     }
 
-    function handleArchiveSelected() {
-        const file = archiveInput.files && archiveInput.files[0];
+    function releaseSelectedArchiveTemp() {
+        if (!selectedArchiveTempName || !worker) {
+            selectedArchiveTempName = '';
+            return;
+        }
+        worker.postMessage({
+            type: 'releaseOutput',
+            jobId: nextJobId('release-incoming'),
+            payload: { opfsName: selectedArchiveTempName }
+        });
+        selectedArchiveTempName = '';
+    }
+
+    function selectArchiveFile(file, temporaryEntryName = '') {
         if (sessionId) {
             closeReaderSession();
         }
+        releaseSelectedArchiveTemp();
         selectedArchive = null;
         if (!file) {
             setBusy(activeJobType);
-            return;
+            return false;
         }
         if (!/\.ecomic$/i.test(file.name)) {
             archiveInput.value = '';
             document.getElementById('comicArchiveMeta').textContent = '文件格式无效';
             setStatus('请选择 .ecomic 漫画归档', 'error');
             setBusy(activeJobType);
-            return;
+            if (temporaryEntryName) {
+                worker.postMessage({
+                    type: 'releaseOutput',
+                    jobId: nextJobId('release-invalid-incoming'),
+                    payload: { opfsName: temporaryEntryName }
+                });
+            }
+            return false;
         }
         selectedArchive = file;
+        selectedArchiveTempName = temporaryEntryName;
         document.getElementById('comicArchiveMeta').textContent = `${file.name} · ${formatBytes(file.size)}`;
         resetProgress();
         setStatus('漫画归档已选择，可以开始解密。');
         setBusy(activeJobType);
+        return true;
+    }
+
+    function handleArchiveSelected() {
+        selectArchiveFile(archiveInput.files && archiveInput.files[0]);
     }
 
     function closeReaderSession(saveProgress = true) {
@@ -1257,6 +1520,7 @@
                     closeReaderSession(false);
                 }
                 await deleteDirectoryBook(bookId);
+                await removeHistoryMemberships(bookId);
                 setHistoryStatus(`已从独立书架目录删除《${book.title}》。`, 'success');
             } catch (error) {
                 setHistoryStatus(`删除失败：${error.message}`, 'error');
@@ -1285,6 +1549,7 @@
             try {
                 closeReaderSession(false);
                 await deleteAllDirectoryBooks();
+                await removeHistoryMemberships('*');
                 setHistoryStatus('独立书架目录已清空。', 'success');
             } catch (error) {
                 setHistoryStatus(`清空失败：${error.message}`, 'error');
@@ -1733,6 +1998,7 @@
                         await deleteDirectoryBook(deletion.bookId);
                     }
                 }
+                await removeHistoryMemberships(message.bookId);
                 setHistoryStatus(deletion?.deleteExternal
                     ? '浏览器缓存和独立目录原件均已删除。'
                     : (isAndroidRuntime
@@ -1859,6 +2125,9 @@
             if (completedJobType === 'encrypt') {
                 revealArchiveDownload();
             }
+            if (completedJobType === 'historySave') {
+                releaseSelectedArchiveTemp();
+            }
             activeJobId = '';
             setBusy('');
             return;
@@ -1890,6 +2159,9 @@
                     setHistoryStatus('已取消导出长图。');
                 } else if (cancelledType === 'historySave') {
                     setHistoryStatus('已取消加入书架。');
+                }
+                if (cancelledType === 'open' || cancelledType === 'historySave') {
+                    releaseSelectedArchiveTemp();
                 }
                 setBusy('');
                 resetProgress();
@@ -1935,6 +2207,9 @@
                     setHistoryStatus(`导出长图失败：${message.message || '未知错误'}`, 'error');
                 } else if (failedType === 'historySave') {
                     setHistoryStatus(`加入书架失败：${message.message || '未知错误'}`, 'error');
+                }
+                if (failedType === 'open' || failedType === 'historySave') {
+                    releaseSelectedArchiveTemp();
                 }
                 setBusy('');
                 progressGroup.dataset.kind = 'error';
@@ -2022,6 +2297,9 @@
             document.getElementById('historyDescription').textContent = '书架保存在应用私有数据中；覆盖更新会保留，清除应用数据或卸载会删除。';
             document.getElementById('historyEmptyDescription').textContent = '加密图片或打开 `.ecomic` 后，漫画会自动加入应用书架。';
         }
+        loadHistoryGroupState().catch(error => {
+            setHistoryStatus(error.message || '书架文件夹读取失败。', 'error');
+        });
         startWorker('', true);
         if (!isAndroidRuntime) {
             restoreLibraryDirectory();
@@ -2096,20 +2374,113 @@
             exportHistoryArchive(bookId);
         } else if (historyAction === 'exportLong') {
             exportHistoryLongImage(bookId);
-        } else if (historyAction === 'rename') {
-            renameHistoryBook(bookId);
+        } else if (historyAction === 'menu') {
+            openHistoryBookMenu(bookId);
         } else if (historyAction === 'delete') {
             requestDeleteHistoryBook(bookId);
+        }
+    });
+    document.getElementById('historyGroupFilterSelect').addEventListener('change', event => {
+        selectedHistoryGroup = event.currentTarget.value;
+        document.getElementById('historyViewMenu').open = false;
+        renderHistory();
+    });
+    document.getElementById('addHistoryFolderButton').addEventListener('click', () => openHistoryFolderDialog());
+    document.getElementById('historyMenuCancelButton').addEventListener('click', () => {
+        closeHistoryDialog(document.getElementById('historyBookMenuDialog'));
+        activeHistoryMenuBookId = '';
+    });
+    document.getElementById('historyMenuRenameButton').addEventListener('click', () => {
+        const bookId = activeHistoryMenuBookId;
+        closeHistoryDialog(document.getElementById('historyBookMenuDialog'));
+        activeHistoryMenuBookId = '';
+        renameHistoryBook(bookId);
+    });
+    document.getElementById('historyMenuGroupButton').addEventListener('click', () => {
+        const bookId = activeHistoryMenuBookId;
+        closeHistoryDialog(document.getElementById('historyBookMenuDialog'));
+        openHistoryGroupDialog(bookId);
+    });
+    document.getElementById('historyFolderCancelButton').addEventListener('click', () => {
+        closeHistoryDialog(document.getElementById('historyFolderDialog'));
+        folderAssignmentBookId = '';
+    });
+    document.getElementById('historyFolderForm').addEventListener('submit', async event => {
+        event.preventDefault();
+        const input = document.getElementById('historyFolderName');
+        const error = document.getElementById('historyFolderError');
+        try {
+            const bookId = folderAssignmentBookId;
+            const group = await createHistoryGroup(input.value, bookId);
+            folderAssignmentBookId = '';
+            closeHistoryDialog(document.getElementById('historyFolderDialog'));
+            selectedHistoryGroup = group.groupId;
+            renderHistory();
+            setHistoryStatus(bookId ? `已创建“${group.name}”并加入漫画。` : `已创建文件夹“${group.name}”。`, 'success');
+        } catch (createError) {
+            error.textContent = createError.message || '文件夹创建失败。';
+            error.hidden = false;
+            input.focus();
+        }
+    });
+    document.getElementById('historyGroupCancelButton').addEventListener('click', () => {
+        closeHistoryDialog(document.getElementById('historyGroupDialog'));
+        activeHistoryMenuBookId = '';
+    });
+    document.getElementById('historyGroupCreateFolderButton').addEventListener('click', () => {
+        const bookId = activeHistoryMenuBookId;
+        closeHistoryDialog(document.getElementById('historyGroupDialog'));
+        activeHistoryMenuBookId = '';
+        openHistoryFolderDialog(bookId);
+    });
+    document.getElementById('historyGroupForm').addEventListener('submit', async event => {
+        event.preventDefault();
+        const bookId = activeHistoryMenuBookId;
+        const groupId = document.getElementById('historyGroupSelect').value;
+        try {
+            await setHistoryBookGroup(bookId, groupId);
+            closeHistoryDialog(document.getElementById('historyGroupDialog'));
+            activeHistoryMenuBookId = '';
+            const groupName = historyGroups.find(group => group.groupId === groupId)?.name || '未分组';
+            setHistoryStatus(`《${historyBooks.find(book => book.bookId === bookId)?.title || '漫画'}》已移至“${groupName}”。`, 'success');
+        } catch (groupError) {
+            setHistoryStatus(groupError.message || '漫画分组保存失败。', 'error');
         }
     });
     document.getElementById('clearHistoryButton').addEventListener('click', requestClearHistory);
     document.getElementById('selectHistoryDirectoryButton').addEventListener('click', connectLibraryDirectory);
     document.getElementById('migrateHistoryButton').addEventListener('click', migrateCurrentShelf);
     document.getElementById('historySearch').addEventListener('input', renderHistory);
-    document.getElementById('historySort').addEventListener('change', renderHistory);
+    document.getElementById('historySort').addEventListener('change', () => {
+        document.getElementById('historyViewMenu').open = false;
+        renderHistory();
+    });
     document.getElementById('historyGoToComicButton').addEventListener('click', () => document.getElementById('comicTab').click());
     document.getElementById('historyTab').addEventListener('click', requestHistoryList);
     root.addEventListener('pageshow', () => requestHistoryList());
+    document.addEventListener('ecryptees-open-archive', event => {
+        const detail = event.detail || {};
+        const file = detail.file;
+        const temporaryEntryName = String(detail.opfsName || '');
+        if (!(file instanceof Blob) || !temporaryEntryName) {
+            return;
+        }
+        if (activeJobType) {
+            worker.postMessage({
+                type: 'releaseOutput',
+                jobId: nextJobId('release-busy-incoming'),
+                payload: { opfsName: temporaryEntryName }
+            });
+            setStatus('当前任务正在处理，请稍后重新打开 .ecomic。', 'error');
+            return;
+        }
+        archiveInput.value = '';
+        document.getElementById('comicTab').click();
+        if (selectArchiveFile(file, temporaryEntryName)) {
+            setStatus(`正在打开 ${file.name}…`);
+            openComic();
+        }
+    });
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'hidden') {
             saveReaderProgressNow();
@@ -2140,6 +2511,7 @@
     });
     root.addEventListener('beforeunload', () => {
         items.forEach(revokeItem);
+        releaseSelectedArchiveTemp();
         Object.keys(outputState).forEach(releaseOutput);
         readerPages.forEach(page => {
             if (page.url) {

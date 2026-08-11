@@ -218,7 +218,7 @@
                     <span class="image-meta" id="comicArchiveMeta">尚未选择 .ecomic</span>
                 </div>
                 <div class="cipher-file-actions">
-                    <input class="file-input" id="comicArchiveFile" type="file" accept=".ecomic,application/octet-stream">
+                    <input class="file-input" id="comicArchiveFile" type="file" accept=".ecomic,application/vnd.ecryptees.ecomic">
                     <label class="file-picker" id="comicArchiveFilePicker" for="comicArchiveFile" tabindex="0">选择 .ecomic</label>
                     <button id="openComicButton" type="button" disabled>解密、转存并阅读</button>
                 </div>
@@ -253,12 +253,27 @@
             <div class="history-toolbar">
                 <label class="sr-only" for="historySearch">搜索漫画标题</label>
                 <input id="historySearch" type="search" placeholder="搜索漫画标题">
-                <label class="sr-only" for="historySort">书架排序</label>
-                <select id="historySort">
-                    <option value="recent">最近阅读</option>
-                    <option value="converted">最近转存</option>
-                    <option value="title">标题</option>
-                </select>
+                <div class="history-sort-actions">
+                    <details class="history-view-menu" id="historyViewMenu">
+                        <summary id="historyViewSummary">最近阅读 · 全部</summary>
+                        <div class="history-view-menu-panel">
+                            <label for="historySort">排序方式</label>
+                            <select id="historySort">
+                                <option value="recent">最近阅读</option>
+                                <option value="converted">最近转存</option>
+                                <option value="title">标题</option>
+                            </select>
+                            <label for="historyGroupFilterSelect">文件夹</label>
+                            <select id="historyGroupFilterSelect">
+                                <option value="all">全部</option>
+                                <option value="ungrouped">未分组</option>
+                            </select>
+                        </div>
+                    </details>
+                    <button class="history-folder-add" id="addHistoryFolderButton" type="button" aria-label="添加文件夹" title="添加文件夹">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 4l2 2h7a2 2 0 0 1 2 2v3h-2V8h-7.8l-2-2H5v12h7v2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h5Zm7 8v3h3v2h-3v3h-2v-3h-3v-2h3v-3h2Z"/></svg>
+                    </button>
+                </div>
             </div>
             <div class="history-storage" id="historyStorageSummary">正在读取本地存储空间…</div>
             <div class="history-empty" id="historyEmptyState" hidden>
@@ -271,6 +286,43 @@
         </section>
         <p class="sr-only" id="copyStatus" role="status" aria-live="polite"></p>
     </main>
+
+    <dialog class="history-action-dialog" id="historyBookMenuDialog" aria-labelledby="historyBookMenuTitle">
+        <div class="history-dialog-shell">
+            <h2 id="historyBookMenuTitle">漫画操作</h2>
+            <div class="history-menu-actions">
+                <button id="historyMenuRenameButton" type="button">修改名称</button>
+                <button id="historyMenuGroupButton" class="secondary-button" type="button">添加分组</button>
+                <button id="historyMenuCancelButton" class="secondary-button" type="button">取消</button>
+            </div>
+        </div>
+    </dialog>
+
+    <dialog class="history-action-dialog" id="historyFolderDialog" aria-labelledby="historyFolderDialogTitle">
+        <form class="history-dialog-shell" id="historyFolderForm" method="dialog">
+            <h2 id="historyFolderDialogTitle">添加文件夹</h2>
+            <label for="historyFolderName">文件夹名称</label>
+            <input id="historyFolderName" maxlength="40" autocomplete="off" required>
+            <p class="history-dialog-error" id="historyFolderError" role="alert" hidden></p>
+            <div class="history-dialog-actions">
+                <button class="secondary-button" id="historyFolderCancelButton" type="button">取消</button>
+                <button type="submit">创建</button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog class="history-action-dialog" id="historyGroupDialog" aria-labelledby="historyGroupDialogTitle">
+        <form class="history-dialog-shell" id="historyGroupForm" method="dialog">
+            <h2 id="historyGroupDialogTitle">添加分组</h2>
+            <label for="historyGroupSelect">选择文件夹</label>
+            <select id="historyGroupSelect"></select>
+            <button class="history-dialog-create-folder secondary-button" id="historyGroupCreateFolderButton" type="button">新建文件夹</button>
+            <div class="history-dialog-actions">
+                <button class="secondary-button" id="historyGroupCancelButton" type="button">取消</button>
+                <button type="submit">保存</button>
+            </div>
+        </form>
+    </dialog>
 
     <dialog
         class="comic-reader-dialog"

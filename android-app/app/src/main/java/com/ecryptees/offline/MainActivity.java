@@ -4,6 +4,7 @@ import android.annotation.SuppressLint;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.Intent;
+import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
@@ -13,6 +14,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.provider.DocumentsContract;
+import android.provider.OpenableColumns;
 import android.util.Base64;
 import android.util.Size;
 import android.view.ViewGroup;
@@ -40,6 +42,7 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.util.ArrayList;
@@ -58,8 +61,10 @@ public final class MainActivity extends ComponentActivity {
     private static final int REQUEST_SAVE_FILE = 1202;
     private static final long MAX_NATIVE_IMAGE_PIXELS = 40_000_000L;
     private static final long MAX_NATIVE_INPUT_BYTES = 500L * 1024L * 1024L;
+    private static final long MAX_INCOMING_ARCHIVE_BYTES = 512L * 1024L * 1024L;
     private static final int MAX_NATIVE_CHUNK_BYTES = 1024 * 1024;
     private static final String HEIC_CACHE_PREFIX = "ecryptees-heic-";
+    private static final String ECOMIC_MIME_TYPE = "application/vnd.ecryptees.ecomic";
 
     private FrameLayout rootView;
     private WebView webView;
@@ -70,6 +75,10 @@ public final class MainActivity extends ComponentActivity {
     private OutputStream downloadStream;
     private Uri downloadUri;
     private String downloadToken;
+    private PendingIncomingDocument pendingIncomingDocument;
+    private InputStream incomingDocumentStream;
+    private long incomingDocumentBytesRead;
+    private boolean webAppReady;
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -80,12 +89,20 @@ public final class MainActivity extends ComponentActivity {
         rootView = new FrameLayout(this);
         setContentView(rootView);
         createWebView(savedInstanceState);
+        handleIncomingDocument(getIntent());
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
             public void handleOnBackPressed() {
                 handleBackNavigation(this);
             }
         });
+    }
+
+    @Override
+    protected void onNewIntent(@NonNull Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleIncomingDocument(intent);
     }
 
     @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
@@ -144,10 +161,19 @@ public final class MainActivity extends ComponentActivity {
             }
 
             @Override
+            public void onPageFinished(@NonNull WebView view, @NonNull String url) {
+                super.onPageFinished(view, url);
+                webAppReady = url.startsWith(APP_URL);
+                notifyIncomingDocument();
+            }
+
+            @Override
             public boolean onRenderProcessGone(
                     @NonNull WebView view,
                     @NonNull RenderProcessGoneDetail detail
             ) {
+                webAppReady = false;
+                fileBridge.abortIncomingDocument(null);
                 fileBridge.abortCurrentDownload(false);
                 fileBridge.abortAllHeicDecodes();
                 rootView.removeView(view);
@@ -321,6 +347,111 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    @Nullable
+    @SuppressWarnings("deprecation")
+    private Uri getIncomingDocumentUri(@NonNull Intent intent) {
+        if (Intent.ACTION_VIEW.equals(intent.getAction())) {
+            return intent.getData();
+        }
+        if (!Intent.ACTION_SEND.equals(intent.getAction())) {
+            return null;
+        }
+        Uri stream = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                ? intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri.class)
+                : intent.getParcelableExtra(Intent.EXTRA_STREAM);
+        if (stream != null) {
+            return stream;
+        }
+        ClipData clipData = intent.getClipData();
+        if (clipData != null && clipData.getItemCount() == 1) {
+            return clipData.getItemAt(0).getUri();
+        }
+        return intent.getData();
+    }
+
+    private void handleIncomingDocument(@Nullable Intent intent) {
+        if (intent == null || (!Intent.ACTION_VIEW.equals(intent.getAction())
+                && !Intent.ACTION_SEND.equals(intent.getAction()))) {
+            return;
+        }
+        ClipData clipData = intent.getClipData();
+        if (Intent.ACTION_SEND.equals(intent.getAction())
+                && clipData != null && clipData.getItemCount() > 1) {
+            Toast.makeText(this, "一次只能打开一个 .ecomic 文件", Toast.LENGTH_LONG).show();
+            return;
+        }
+        Uri uri = getIncomingDocumentUri(intent);
+        if (uri == null || !("content".equalsIgnoreCase(uri.getScheme())
+                || "file".equalsIgnoreCase(uri.getScheme()))) {
+            Toast.makeText(this, "只能打开 .ecomic 文件", Toast.LENGTH_LONG).show();
+            return;
+        }
+        String displayName = null;
+        long size = -1;
+        try (Cursor cursor = getContentResolver().query(
+                uri,
+                new String[]{OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE},
+                null,
+                null,
+                null
+        )) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                int sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE);
+                if (nameIndex >= 0 && !cursor.isNull(nameIndex)) {
+                    displayName = cursor.getString(nameIndex);
+                }
+                if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) {
+                    size = cursor.getLong(sizeIndex);
+                }
+            }
+        } catch (RuntimeException ignored) {
+            // Fall back to the URI path and descriptor metadata below.
+        }
+        if (displayName == null || displayName.trim().isEmpty()) {
+            displayName = Uri.decode(uri.getLastPathSegment());
+        }
+        displayName = displayName == null ? "" : displayName.trim();
+        if (!displayName.toLowerCase(Locale.ROOT).endsWith(".ecomic")) {
+            Toast.makeText(this, "只能打开 .ecomic 文件", Toast.LENGTH_LONG).show();
+            return;
+        }
+        try (ParcelFileDescriptor descriptor = getContentResolver().openFileDescriptor(uri, "r")) {
+            if (descriptor == null) {
+                throw new IOException("Document cannot be opened");
+            }
+            if (size < 0) {
+                size = descriptor.getStatSize();
+            }
+        } catch (IOException | SecurityException error) {
+            Toast.makeText(this, "无法读取这个 .ecomic 文件", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (size == 0 || size > MAX_INCOMING_ARCHIVE_BYTES) {
+            Toast.makeText(this, "该 .ecomic 文件为空或超过大小限制", Toast.LENGTH_LONG).show();
+            return;
+        }
+        synchronized (fileBridge) {
+            fileBridge.abortIncomingDocument(null);
+            pendingIncomingDocument = new PendingIncomingDocument(
+                    UUID.randomUUID().toString(),
+                    uri,
+                    displayName,
+                    size
+            );
+        }
+        notifyIncomingDocument();
+    }
+
+    private void notifyIncomingDocument() {
+        if (webAppReady && webView != null && pendingIncomingDocument != null) {
+            webView.evaluateJavascript(
+                    "window.EcrypteesAndroidIncoming&&window.EcrypteesAndroidIncoming.receive()",
+                    null
+            );
+        }
+    }
+
     @Override
     protected void onSaveInstanceState(@NonNull Bundle outState) {
         if (webView != null) {
@@ -356,10 +487,12 @@ public final class MainActivity extends ComponentActivity {
 
     @Override
     protected void onDestroy() {
+        webAppReady = false;
         if (fileChooserCallback != null) {
             fileChooserCallback.onReceiveValue(null);
             fileChooserCallback = null;
         }
+        fileBridge.abortIncomingDocument(null);
         fileBridge.abortCurrentDownload(false);
         fileBridge.shutdownHeicDecodes();
         if (webView != null) {
@@ -372,6 +505,9 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private static String safeMimeType(String mimeType, String fileName) {
+        if (fileName != null && fileName.toLowerCase(Locale.ROOT).endsWith(".ecomic")) {
+            return ECOMIC_MIME_TYPE;
+        }
         if (mimeType != null && mimeType.contains("/")) {
             return mimeType;
         }
@@ -447,6 +583,101 @@ public final class MainActivity extends ComponentActivity {
         private final Map<String, HeicTask> heicTasks = new ConcurrentHashMap<>();
         private final ExecutorService heicExecutor = Executors.newFixedThreadPool(2);
         private final Semaphore fullSizeDecodeSlot = new Semaphore(1, true);
+
+        @JavascriptInterface
+        public synchronized String claimIncomingDocument() {
+            PendingIncomingDocument document = pendingIncomingDocument;
+            if (document == null || document.claimed || incomingDocumentStream != null) {
+                return "";
+            }
+            try {
+                InputStream stream = getContentResolver().openInputStream(document.uri);
+                if (stream == null) {
+                    throw new IOException("Document cannot be opened");
+                }
+                incomingDocumentStream = stream;
+                incomingDocumentBytesRead = 0;
+                document.claimed = true;
+                return "{\"token\":" + JSONObject.quote(document.token)
+                        + ",\"name\":" + JSONObject.quote(document.name)
+                        + ",\"size\":" + document.size + "}";
+            } catch (IOException | SecurityException error) {
+                abortIncomingDocument(document.token);
+                runOnUiThread(() -> Toast.makeText(
+                        MainActivity.this,
+                        "无法读取这个 .ecomic 文件",
+                        Toast.LENGTH_LONG
+                ).show());
+                return "";
+            }
+        }
+
+        @JavascriptInterface
+        @Nullable
+        public synchronized String readIncomingChunk(String token, int requestedLength) {
+            PendingIncomingDocument document = pendingIncomingDocument;
+            if (document == null || incomingDocumentStream == null || !document.token.equals(token)) {
+                return null;
+            }
+            int length = Math.max(1, Math.min(requestedLength, MAX_NATIVE_CHUNK_BYTES));
+            byte[] bytes = new byte[length];
+            try {
+                int read = incomingDocumentStream.read(bytes);
+                if (read < 0) {
+                    if (document.size >= 0 && incomingDocumentBytesRead != document.size) {
+                        abortIncomingDocument(token);
+                        return null;
+                    }
+                    return "";
+                }
+                incomingDocumentBytesRead += read;
+                if (incomingDocumentBytesRead > MAX_INCOMING_ARCHIVE_BYTES
+                        || (document.size >= 0 && incomingDocumentBytesRead > document.size)) {
+                    abortIncomingDocument(token);
+                    return null;
+                }
+                return Base64.encodeToString(bytes, 0, read, Base64.NO_WRAP);
+            } catch (IOException | SecurityException error) {
+                abortIncomingDocument(token);
+                return null;
+            }
+        }
+
+        @JavascriptInterface
+        public synchronized boolean finishIncomingDocument(String token) {
+            PendingIncomingDocument document = pendingIncomingDocument;
+            if (document == null || !document.token.equals(token)) {
+                return false;
+            }
+            boolean complete = document.size < 0 || incomingDocumentBytesRead == document.size;
+            closeIncomingDocumentStream();
+            pendingIncomingDocument = null;
+            incomingDocumentBytesRead = 0;
+            return complete;
+        }
+
+        @JavascriptInterface
+        public synchronized void abortIncomingDocument(@Nullable String token) {
+            if (pendingIncomingDocument != null
+                    && token != null
+                    && !pendingIncomingDocument.token.equals(token)) {
+                return;
+            }
+            closeIncomingDocumentStream();
+            pendingIncomingDocument = null;
+            incomingDocumentBytesRead = 0;
+        }
+
+        private void closeIncomingDocumentStream() {
+            if (incomingDocumentStream != null) {
+                try {
+                    incomingDocumentStream.close();
+                } catch (IOException ignored) {
+                    // Best-effort cleanup for a provider-owned stream.
+                }
+                incomingDocumentStream = null;
+            }
+        }
 
         @JavascriptInterface
         public boolean beginDownload(String name, String mimeType, String blobUrl) {
@@ -839,6 +1070,21 @@ public final class MainActivity extends ComponentActivity {
             this.name = name;
             this.mimeType = mimeType;
             this.blobUrl = blobUrl;
+        }
+    }
+
+    private static final class PendingIncomingDocument {
+        private final String token;
+        private final Uri uri;
+        private final String name;
+        private final long size;
+        private boolean claimed;
+
+        private PendingIncomingDocument(String token, Uri uri, String name, long size) {
+            this.token = token;
+            this.uri = uri;
+            this.name = name;
+            this.size = size;
         }
     }
 }

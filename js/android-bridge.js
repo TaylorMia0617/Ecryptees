@@ -4,8 +4,13 @@
     const bridge = globalThis.AndroidFileBridge;
     if (!bridge) return;
 
+    const ECOMIC_MIME_TYPE = 'application/vnd.ecryptees.ecomic';
+    const MAX_INCOMING_ARCHIVE_BYTES = 512 * 1024 * 1024;
+    const INCOMING_CHUNK_BYTES = 768 * 1024;
+    const ECOMIC_MAGIC = Uint8Array.from([0x45, 0x43, 0x52, 0x43, 0x4F, 0x4D, 0x31, 0x00]);
     let statusElement = null;
     let pendingDownload = null;
+    let incomingBusy = false;
 
     function emitDownloadResult(status, fallback = {}) {
         const download = fallback.url ? fallback : pendingDownload;
@@ -47,7 +52,7 @@
         if (lower.endsWith('.png')) return 'image/png';
         if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
         if (lower.endsWith('.txt')) return 'text/plain';
-        if (lower.endsWith('.ecomic')) return 'application/octet-stream';
+        if (lower.endsWith('.ecomic')) return ECOMIC_MIME_TYPE;
         return 'application/octet-stream';
     }
 
@@ -68,6 +73,122 @@
         }
         return bytes;
     }
+
+    function hasEcomicMagic(file) {
+        return file.slice(0, ECOMIC_MAGIC.length).arrayBuffer().then(buffer => {
+            const bytes = new Uint8Array(buffer);
+            return bytes.length === ECOMIC_MAGIC.length
+                && bytes.every((value, index) => value === ECOMIC_MAGIC[index]);
+        });
+    }
+
+    async function receiveIncomingDocument() {
+        if (incomingBusy || typeof bridge.claimIncomingDocument !== 'function') {
+            return;
+        }
+        let metadata;
+        try {
+            const encoded = bridge.claimIncomingDocument();
+            if (!encoded) {
+                return;
+            }
+            metadata = JSON.parse(encoded);
+        } catch (error) {
+            showStatus('无法读取外部漫画归档。', 'error', true);
+            return;
+        }
+        const token = String(metadata.token || '');
+        const name = String(metadata.name || '');
+        const expectedSize = Number(metadata.size);
+        incomingBusy = true;
+        let storageRoot;
+        let writable;
+        let entryName = '';
+        try {
+            if (!token || !name.toLowerCase().endsWith('.ecomic')) {
+                throw new Error('只能打开 .ecomic 文件');
+            }
+            if (Number.isFinite(expectedSize)
+                && (expectedSize === 0 || expectedSize > MAX_INCOMING_ARCHIVE_BYTES)) {
+                throw new Error('该 .ecomic 文件为空或超过大小限制');
+            }
+            if (!globalThis.navigator.storage?.getDirectory) {
+                throw new Error('当前 Android System WebView 不支持安全导入外部归档');
+            }
+            storageRoot = await globalThis.navigator.storage.getDirectory();
+            entryName = `ecryptees-temp-incoming-${token.replace(/[^a-z0-9-]/gi, '')}.ecomic`;
+            const handle = await storageRoot.getFileHandle(entryName, { create: true });
+            writable = await handle.createWritable();
+            let received = 0;
+            showStatus(`正在打开 ${name}…`);
+            while (true) {
+                const encoded = bridge.readIncomingChunk(token, INCOMING_CHUNK_BYTES);
+                if (encoded === null || encoded === undefined) {
+                    throw new Error('外部 .ecomic 文件读取失败');
+                }
+                if (!encoded) {
+                    break;
+                }
+                const bytes = decodeBase64(encoded);
+                received += bytes.byteLength;
+                if (received > MAX_INCOMING_ARCHIVE_BYTES
+                    || (Number.isFinite(expectedSize) && expectedSize >= 0 && received > expectedSize)) {
+                    throw new Error('该 .ecomic 文件超过大小限制');
+                }
+                await writable.write(bytes);
+                if (expectedSize > 0) {
+                    showStatus(`正在打开 ${name}… ${Math.min(100, Math.round(received / expectedSize * 100))}%`);
+                }
+            }
+            if (expectedSize >= 0 && received !== expectedSize) {
+                throw new Error('外部 .ecomic 文件读取不完整');
+            }
+            await writable.close();
+            writable = null;
+            if (!bridge.finishIncomingDocument(token)) {
+                throw new Error('外部 .ecomic 文件读取未完成');
+            }
+            const stored = await handle.getFile();
+            if (!(await hasEcomicMagic(stored))) {
+                throw new Error('该文件后缀为 .ecomic，但内容不是有效的漫画归档');
+            }
+            const file = new File([stored], name, {
+                type: ECOMIC_MIME_TYPE,
+                lastModified: stored.lastModified
+            });
+            showStatus(`正在验证 ${name}…`, 'success', true);
+            document.dispatchEvent(new CustomEvent('ecryptees-open-archive', {
+                detail: { file, opfsName: entryName }
+            }));
+            entryName = '';
+        } catch (error) {
+            try {
+                await writable?.abort(error);
+            } catch (abortError) {
+                // Preserve the original import failure.
+            }
+            try {
+                bridge.abortIncomingDocument(token);
+            } catch (abortError) {
+                // Android also closes the stream when the activity is destroyed.
+            }
+            showStatus(error.message || '无法打开外部漫画归档', 'error', true);
+        } finally {
+            if (storageRoot && entryName) {
+                try {
+                    await storageRoot.removeEntry(entryName);
+                } catch (cleanupError) {
+                    // Cold-start temporary cleanup is the final fallback.
+                }
+            }
+            incomingBusy = false;
+            globalThis.setTimeout(receiveIncomingDocument, 0);
+        }
+    }
+
+    globalThis.EcrypteesAndroidIncoming = Object.freeze({
+        receive: receiveIncomingDocument
+    });
 
     const mediaWaiters = [];
     let activeMediaTasks = 0;

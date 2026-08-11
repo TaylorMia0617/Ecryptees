@@ -33,6 +33,23 @@ try {
         throw "Android build failed with exit code $LASTEXITCODE"
     }
     $source = "$PSScriptRoot\app\build\outputs\apk\release\app-release.apk"
+    $metadataPath = "$PSScriptRoot\app\build\outputs\apk\release\output-metadata.json"
+    if (-not (Test-Path -LiteralPath $metadataPath)) {
+        throw "Missing APK output metadata: $metadataPath"
+    }
+    $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+    $artifact = @($metadata.elements)[0]
+    $versionName = [string]$artifact.versionName
+    $versionCode = [int]$artifact.versionCode
+    if ($versionName -notmatch '^\d+\.\d+\.\d+$' -or $versionCode -lt 1) {
+        throw "Invalid APK version metadata: versionName=$versionName versionCode=$versionCode"
+    }
+    $buildScript = Get-Content -LiteralPath "$PSScriptRoot\app\build.gradle" -Raw
+    $declaredName = [regex]::Match($buildScript, "versionName\s+'([^']+)'").Groups[1].Value
+    $declaredCode = [regex]::Match($buildScript, 'versionCode\s+(\d+)').Groups[1].Value
+    if ($versionName -ne $declaredName -or $versionCode -ne [int]$declaredCode) {
+        throw "APK version mismatch. Gradle declares $declaredName/$declaredCode but output is $versionName/$versionCode"
+    }
     $buildToolsDirectory = Get-ChildItem -LiteralPath "$env:ANDROID_SDK_ROOT\build-tools" -Directory |
         Sort-Object { [version]$_.Name } -Descending |
         Select-Object -First 1
@@ -51,8 +68,11 @@ try {
     }
     $destinationDirectory = Join-Path (Split-Path $PSScriptRoot -Parent) 'dist'
     New-Item -ItemType Directory -Force -Path $destinationDirectory | Out-Null
-    Copy-Item -LiteralPath $source -Destination (Join-Path $destinationDirectory 'Ecryptees.apk') -Force
-    Write-Host "APK: $destinationDirectory\Ecryptees.apk"
+    $versionedDestination = Join-Path $destinationDirectory "Ecryptees-v$versionName.apk"
+    $stableDestination = Join-Path $destinationDirectory 'Ecryptees.apk'
+    Copy-Item -LiteralPath $source -Destination $versionedDestination -Force
+    Copy-Item -LiteralPath $source -Destination $stableDestination -Force
+    Write-Host "APK: $versionedDestination (versionCode $versionCode)"
 } finally {
     Pop-Location
 }

@@ -265,6 +265,23 @@ No actionable build, lint, packaging, signing, or chunk-transfer issue remains. 
 
 final result: passed with device coverage gap
 
+## APK 1.0.8 strict `.ecomic` open-association verification
+
+- Date: 2026-08-11. Android now advertises `ACTION_VIEW` for the dedicated `application/vnd.ecryptees.ecomic` MIME type and for case-bounded `content:` URI paths ending in `.ecomic`; it does not register a broad `application/octet-stream` handler.
+- `MainActivity` uses `singleTop`, accepts cold-start and `onNewIntent` documents, resolves `OpenableColumns.DISPLAY_NAME`, and rejects non-`.ecomic`, empty, inaccessible, and over-limit inputs before exposing bytes to the WebView.
+- Incoming documents are read sequentially through a tokenized native stream in chunks of at most 1 MiB. The web bridge writes 768 KiB chunks to a unique OPFS `ecryptees-temp-*` entry, validates the ECRCOM1 magic, and then invokes the existing authenticated import and shelf-save flow.
+- New `.ecomic` exports use `application/vnd.ecryptees.ecomic`; the archive v1 bytes and cryptographic format are unchanged. The in-app picker keeps its extension filter and no longer lists `application/octet-stream` as an accepted type.
+- Temporary incoming files are released after shelf save, authentication/save failure, cancellation, replacement, or unload, with cold-start cleanup as a fallback. No storage, all-files, or Internet permission was added.
+- Node regressions passed 26/26; JavaScript syntax and whitespace checks passed. Gradle Java compilation, `assembleRelease`, and `lintRelease` passed. The packaged Manifest retained the escaped `.ecomic` suffix matcher and dedicated MIME.
+- `aapt2` confirmed `com.ecryptees.offline`, version 1.0.8 (code 9), minSdk 26, targetSdk 36, and no `INTERNET` or storage permission. `apksigner` verified certificate SHA-256 `91306e7c15932646a58ffbd3443f541be57401f1f64106d8dcd0e97fbc5687e8`.
+- Final APK: `dist/Ecryptees.apk`, 3,403,267 bytes; SHA-256 `8540535C5D2B8F53899162E04817FC0AC975E57FF3E5F086A4A87449D9E2D972`.
+
+**Findings**
+
+No actionable association-filter, chunk-transfer, archive-format, permission, build, lint, or signing issue remains. No Android device was attached, so chooser visibility across OEM file providers, cold/warm `ACTION_VIEW`, and a real large-file external-open run remain physical-device acceptance items.
+
+final result: passed with device coverage gap
+
 ## APK 1.0.6 private-shelf export and update verification
 
 - Date: 2026-08-11. The Android shelf keeps original pages, the generated long PNG, cover, metadata, and reading progress; it does not persist a `.ecomic` archive. The new shelf export action reads the stored pages in record order and reuses the existing bounded, chunked `.ecomic` v1 encryption pipeline.
@@ -354,5 +371,37 @@ final result: passed with device coverage gap
 **Findings**
 
 No actionable shelf-commit, temporary-output, UI, browser-runtime, build, lint, permission, or signing issue remains. No physical Android device was connected, so 1.0.5/1.0.6 in-place installation, legacy-PNG space reclamation on device, and native save-picker cancellation remain physical-device acceptance items.
+
+final result: passed with device coverage gap
+
+## APK 1.0.9 shelf folders and release-name verification
+
+- Date: 2026-08-11. The shelf toolbar now places an accessible add-folder icon beside the sort selector and renders scrollable `全部`, `未分组`, and named-folder filters.
+- The title edit pencil was replaced by a three-dot card menu containing `修改名称` and `添加分组`. The four direct card actions remain `阅读`, `导出 .ecomic`, `导出长图`, and `删除`.
+- Folder definitions and one-folder-per-book memberships use the separate `ecryptees-groups-v1` IndexedDB database. The existing `ecryptees-library-v1` database, book schema, pages, covers, progress, and `.ecomic` v1 format are unchanged. Existing books default to `未分组`.
+- Deleting a book clears its membership; deleting all books clears memberships while leaving empty folder definitions available for reuse.
+- Node regressions passed 26/26, JavaScript syntax checks and `git diff --check` passed, and the packaged web assets contain the new folder controls and group database integration.
+- Gradle `assembleRelease` and `lintRelease` passed. `aapt2` confirmed `com.ecryptees.offline`, version 1.0.9 (code 10), and no `INTERNET` or storage permission. `apksigner` verified certificate SHA-256 `91306e7c15932646a58ffbd3443f541be57401f1f64106d8dcd0e97fbc5687e8`.
+- The build script now validates generated version metadata and writes `dist/Ecryptees-v1.0.9.apk`; the stable `dist/Ecryptees.apk` alias has identical bytes. Both are 3,406,347 bytes with SHA-256 `16FEF7A9FBB673F87037994E83B77FF136CEA42B243447E83E3BF823E36ED047`.
+
+**Findings**
+
+No actionable storage-compatibility, archive-format, static UI, build, lint, permission, signing, or artifact-naming issue remains. A physical Android device was not connected, so touch interaction, system font scaling, and in-place installation from the mislabeled 1.0.7 artifact remain device-level acceptance items.
+
+final result: passed with device coverage gap
+
+## APK 1.0.10 broad Android handoff and compact shelf menu verification
+
+- Date: 2026-08-11. Android now advertises `ACTION_VIEW` and single-file `ACTION_SEND` for wildcard MIME data, plus a content-URI fallback for providers that omit MIME metadata. The existing custom MIME and `.ecomic` path filters remain available for precise providers.
+- Incoming shares read one URI from `EXTRA_STREAM`, `ClipData`, or intent data. More than one shared item is rejected. Every candidate still requires an `.ecomic` display name, bounded size, `ECRCOM1` magic, and the existing authenticated archive verification before shelf import.
+- The horizontal folder strip was removed. The shelf now exposes one `最近阅读 · 当前文件夹` dropdown containing separate sorting and folder selectors; the add-folder icon remains adjacent.
+- The app-private `ecryptees-library-v1` book database and `.ecomic` v1 format remain unchanged. Folder metadata continues to use the separate `ecryptees-groups-v1` database.
+- Node regressions passed 26/26, JavaScript syntax checks and `git diff --check` passed. Gradle `assembleRelease` and `lintRelease` passed.
+- `aapt2` confirmed `com.ecryptees.offline`, version 1.0.10 (code 11), and no `INTERNET` or storage permission. `apksigner` verified certificate SHA-256 `91306e7c15932646a58ffbd3443f541be57401f1f64106d8dcd0e97fbc5687e8`.
+- Final APK: `dist/Ecryptees-v1.0.10.apk`, 3,406,827 bytes; SHA-256 `300B7236235D7C931201990C056AF9927B6DACE65E423C3BB8F72FE06B9F3E28`.
+
+**Findings**
+
+No actionable archive-validation, storage-compatibility, static UI, build, lint, permission, signing, or packaging issue remains. Broad wildcard registration intentionally makes Ecryptees visible for unrelated single files; those files are rejected after selection. No physical Android device was connected, so QQ and Xiaomi intent behavior remains device-level acceptance coverage.
 
 final result: passed with device coverage gap
