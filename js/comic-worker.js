@@ -521,7 +521,7 @@ async function createIndexedDbBackend() {
             await transactionToPromise(transaction);
             return keys.map(String);
         },
-        async cleanup(cutoff) {
+        async cleanup(cutoff, removeAllTemporary = false) {
             const transaction = database.transaction('entries', 'readonly');
             const store = transaction.objectStore('entries');
             const entriesPromise = requestToPromise(store.getAll());
@@ -531,7 +531,8 @@ async function createIndexedDbBackend() {
             for (let index = 0; index < keys.length; index++) {
                 const name = String(keys[index]);
                 if (name.startsWith(history.config.STAGING_PREFIX)
-                    || (isTemporaryEntryName(name) && entries[index].lastModified < cutoff)) {
+                    || (name.startsWith(TEMP_PREFIX)
+                        && (removeAllTemporary || entries[index].lastModified < cutoff))) {
                     await this.remove(keys[index]);
                 }
             }
@@ -566,12 +567,14 @@ async function createOpfsBackend() {
             }
             return names;
         },
-        async cleanup(cutoff) {
+        async cleanup(cutoff, removeAllTemporary = false) {
             for await (const [name, handle] of root.entries()) {
                 if (handle.kind === 'file' && isTemporaryEntryName(name)) {
                     try {
                         const file = await handle.getFile();
-                        if (name.startsWith(history.config.STAGING_PREFIX) || file.lastModified < cutoff) {
+                        if (name.startsWith(history.config.STAGING_PREFIX)
+                            || (name.startsWith(TEMP_PREFIX)
+                                && (removeAllTemporary || file.lastModified < cutoff))) {
                             await root.removeEntry(name);
                         }
                     } catch (error) {
@@ -622,11 +625,35 @@ async function removeEntryQuietly(storage, name) {
     }
 }
 
-async function cleanupStaleEntries() {
+async function cleanupStaleEntries(removeAllTemporary = false) {
     const storage = await getStorageBackend();
-    await storage.cleanup(Date.now() - 24 * 60 * 60 * 1000);
+    await storage.cleanup(Date.now() - 24 * 60 * 60 * 1000, removeAllTemporary);
     const referenced = new Set();
-    const records = await listHistoryRecords();
+    let records = await listHistoryRecords();
+    if (removeAllTemporary) {
+        const updatedRecords = [];
+        for (const record of records) {
+            const legacyLongImage = record.png?.entryName || '';
+            if (!legacyLongImage) {
+                updatedRecords.push(record);
+                continue;
+            }
+            const updated = await putHistoryRecord({
+                ...record,
+                png: {
+                    ...record.png,
+                    width: 1,
+                    height: 1,
+                    size: 0,
+                    generatedAt: 0,
+                    entryName: ''
+                }
+            });
+            updatedRecords.push(updated);
+            await removeEntryQuietly(storage, legacyLongImage);
+        }
+        records = updatedRecords;
+    }
     for (const record of records) {
         referenced.add(record.coverEntryName);
         referenced.add(record.png?.entryName);
@@ -774,7 +801,7 @@ async function encryptArchive(jobId, payload) {
             pages: manifest.pages.length
         };
         if (payload.addToShelf === false) {
-            post('portableArchive', jobId, archiveMessage);
+            post(payload.resultType === 'historyExport' ? 'historyArchiveReady' : 'portableArchive', jobId, archiveMessage);
             archiveReady = true;
             return;
         }
@@ -793,11 +820,10 @@ async function encryptArchive(jobId, payload) {
             bookId: ''
         });
         try {
-            await exportLongImage(jobId, {
+            await saveHistorySession(jobId, {
                 sessionId,
                 outputName,
                 sourceName: `${outputName}.${format.EXTENSION}`,
-                saveHistory: true,
                 parallelism,
                 progressRange: { start: 500, end: 1000, total: 1000 }
             });
@@ -819,8 +845,7 @@ async function encryptArchive(jobId, payload) {
     }
 }
 
-async function openArchive(jobId, payload) {
-    const file = payload.file;
+async function createArchiveSession(jobId, file) {
     if (!(file instanceof Blob) || file.size < format.HEADER_SIZE + format.AUTH_TAG_SIZE) {
         throw new ComicError('TRUNCATED_ARCHIVE', '漫画归档不完整');
     }
@@ -844,6 +869,11 @@ async function openArchive(jobId, payload) {
     const manifest = format.validateManifest(format.decodeManifest(manifestBytes), header, file.size);
     const sessionId = `${jobId}-${self.crypto.getRandomValues(new Uint32Array(1))[0].toString(16)}`;
     sessions.set(sessionId, { kind: 'archive', file, header, key, manifest, pageEntries: new Map(), bookId: '' });
+    return { sessionId, manifest };
+}
+
+async function openArchive(jobId, payload) {
+    const { sessionId, manifest } = await createArchiveSession(jobId, payload.file);
     post('opened', jobId, {
         sessionId,
         createdAt: manifest.createdAt,
@@ -1336,6 +1366,125 @@ function postLongImageProgress(jobId, payload, processed, message) {
     post('progress', jobId, { processed, total: 1000, message });
 }
 
+async function saveHistorySession(jobId, payload) {
+    const session = sessions.get(payload.sessionId);
+    if (!session || (session.kind !== 'archive' && session.kind !== 'uploads')) {
+        throw new ComicError('INVALID_SESSION', '漫画阅读会话已失效');
+    }
+    const storage = await getStorageBackend();
+    const parallelism = Math.min(
+        normalizeParallelism(payload.parallelism),
+        session.manifest.pages.length
+    );
+    const pool = getCodecTaskPool(parallelism);
+    const bookId = await history.createBookId(session.header.bytes, session.file.size);
+    const existingRecord = await getHistoryRecord(bookId);
+    const generation = `${Date.now().toString(36)}-${jobId.replace(/[^a-z0-9-]/gi, '')}`;
+    const pageReferences = new Array(session.manifest.pages.length);
+    const dimensions = new Array(session.manifest.pages.length);
+    const newEntryNames = [];
+    let historyCommitted = false;
+
+    try {
+        await ensureStorage(session.manifest.totalSize);
+        let savedPages = 0;
+        await runBounded(session.manifest.pages.length, parallelism, async index => {
+            assertNotCancelled(jobId);
+            const sourcePage = session.manifest.pages[index];
+            const pageEntryName = `${history.config.HISTORY_PREFIX}${bookId}-${generation}-page-${String(index).padStart(4, '0')}`;
+            newEntryNames.push(pageEntryName);
+            const file = await writeArchivePageToEntry(jobId, pool, session, index, storage, pageEntryName);
+            pageReferences[index] = { file, entryName: pageEntryName };
+            const size = await inspectPageWithPool(jobId, pool, file, sourcePage.name, sourcePage.type);
+            if (!size.width || !size.height) {
+                throw new ComicError('DIMENSIONS_UNAVAILABLE', `无法读取图片“${sourcePage.name}”的尺寸`);
+            }
+            dimensions[index] = size;
+            savedPages += 1;
+            postLongImageProgress(
+                jobId,
+                payload,
+                Math.round(savedPages / session.manifest.pages.length * 900),
+                `正在保存第 ${savedPages}/${session.manifest.pages.length} 页`
+            );
+        });
+
+        const pages = session.manifest.pages.map((sourcePage, index) => ({
+            name: sourcePage.name,
+            type: sourcePage.type,
+            size: sourcePage.size,
+            width: dimensions[index].width,
+            height: dimensions[index].height,
+            lastModified: sourcePage.lastModified,
+            entryName: pageReferences[index].entryName
+        }));
+        const coverEntryName = `${history.config.HISTORY_PREFIX}${bookId}-${generation}-cover.jpg`;
+        newEntryNames.push(coverEntryName);
+        postLongImageProgress(jobId, payload, 940, '正在生成书架封面');
+        await createHistoryCover(
+            jobId,
+            storage,
+            pageReferences[0].file,
+            coverEntryName,
+            pages[0].name,
+            pages[0].type
+        );
+        const coverFile = await storage.getFile(coverEntryName);
+        const baseName = String(payload.outputName || 'comic').replace(/\.[^.]*$/, '') || 'comic';
+        const now = Date.now();
+        postLongImageProgress(jobId, payload, 980, '正在提交漫画书架');
+        const record = await putHistoryRecord({
+            schemaVersion: history.config.SCHEMA_VERSION,
+            bookId,
+            title: existingRecord?.title || baseName,
+            sourceName: payload.sourceName || session.file.name || `${baseName}.ecomic`,
+            storageKind: storage.kind,
+            coverEntryName,
+            coverMime: 'image/jpeg',
+            totalSize: session.manifest.totalSize,
+            pages,
+            png: {
+                name: `${baseName}-long.png`,
+                width: 1,
+                height: 1,
+                size: 0,
+                generatedAt: 0,
+                entryName: ''
+            },
+            progress: existingRecord?.progress || { pageIndex: 0, pageRatio: 0 },
+            createdAt: existingRecord?.createdAt || now,
+            updatedAt: now,
+            lastOpenedAt: existingRecord?.lastOpenedAt || 0
+        });
+        historyCommitted = true;
+        await requestPersistentStorage();
+        if (existingRecord) {
+            for (const page of existingRecord.pages) {
+                await removeEntryQuietly(storage, page.entryName);
+            }
+            await removeEntryQuietly(storage, existingRecord.coverEntryName);
+            await removeEntryQuietly(storage, existingRecord.png?.entryName);
+        }
+        post('historySaved', jobId, {
+            bookId,
+            book: history.summarizeRecord(record),
+            coverFile,
+            pages: pages.length,
+            size: session.manifest.totalSize
+        });
+    } catch (error) {
+        if (!historyCommitted) {
+            for (const name of newEntryNames) {
+                await removeEntryQuietly(storage, name);
+            }
+        }
+        if (error && error.code === 'INSUFFICIENT_STORAGE') {
+            throw new ComicError('INSUFFICIENT_HISTORY_STORAGE', '空间不足，无法把漫画原页和封面写入书架应用数据');
+        }
+        throw error;
+    }
+}
+
 async function exportLongImage(jobId, payload) {
     const session = sessions.get(payload.sessionId);
     if (!session) {
@@ -1345,33 +1494,12 @@ async function exportLongImage(jobId, payload) {
         throw new ComicError('PNG_UNSUPPORTED', '当前浏览器不支持流式生成 PNG 长图，请升级浏览器');
     }
 
-    const saveHistory = payload.saveHistory !== false
-        && (session.kind === 'archive' || session.kind === 'uploads');
     const storage = await getStorageBackend();
     const parallelism = Math.min(
         normalizeParallelism(payload.parallelism),
         session.manifest.pages.length
     );
     const pool = getCodecTaskPool(parallelism);
-    const pageReferences = new Array(session.manifest.pages.length);
-    const newEntryNames = [];
-    let historyCommitted = false;
-    let bookId = '';
-    let existingRecord = null;
-    let generation = '';
-    if (saveHistory) {
-        bookId = await history.createBookId(session.header.bytes, session.file.size);
-        existingRecord = await getHistoryRecord(bookId);
-        generation = `${Date.now().toString(36)}-${jobId.replace(/[^a-z0-9-]/gi, '')}`;
-        try {
-            await ensureStorage(session.manifest.totalSize);
-        } catch (error) {
-            if (error && error.code === 'INSUFFICIENT_STORAGE') {
-                throw new ComicError('INSUFFICIENT_HISTORY_STORAGE', '空间不足，无法把漫画和长图写入书架应用数据');
-            }
-            throw error;
-        }
-    }
 
     const dimensions = new Array(session.manifest.pages.length);
     let outputWidth = 0;
@@ -1383,15 +1511,7 @@ async function exportLongImage(jobId, payload) {
             const page = session.manifest.pages[index];
             let reference = null;
             try {
-                if (saveHistory) {
-                    const pageEntryName = `${history.config.HISTORY_PREFIX}${bookId}-${generation}-page-${String(index).padStart(4, '0')}`;
-                    newEntryNames.push(pageEntryName);
-                    const file = await writeArchivePageToEntry(jobId, pool, session, index, storage, pageEntryName);
-                    reference = { file, storage, entryName: pageEntryName, temporary: false };
-                    pageReferences[index] = reference;
-                } else {
-                    reference = await getExportPageFile(jobId, pool, session, payload.sessionId, index);
-                }
+                reference = await getExportPageFile(jobId, pool, session, payload.sessionId, index);
                 const size = await inspectPageWithPool(
                     jobId,
                     pool,
@@ -1411,9 +1531,7 @@ async function exportLongImage(jobId, payload) {
                     `正在并行分析 ${analyzedPages}/${session.manifest.pages.length} 页`
                 );
             } finally {
-                if (!saveHistory) {
-                    await releaseExportPage(reference);
-                }
+                await releaseExportPage(reference);
             }
         });
         for (const size of dimensions) {
@@ -1426,20 +1544,13 @@ async function exportLongImage(jobId, payload) {
             throw new ComicError('LONG_IMAGE_TOO_LARGE', '合并后的 PNG 像素尺寸超出格式限制');
         }
         const largestPage = Math.max(...session.manifest.pages.map(page => page.size));
-        await ensureStorage(estimatePngStorage(session, rawSize) + (saveHistory ? 0 : largestPage));
+        const temporaryPageBytes = session.kind === 'history' ? 0 : largestPage;
+        await ensureStorage(estimatePngStorage(session, rawSize) + temporaryPageBytes);
     } catch (error) {
-        for (const name of newEntryNames) {
-            await removeEntryQuietly(storage, name);
-        }
         throw error;
     }
     const rowBytes = 1 + outputWidth * 4;
-    const entryName = saveHistory
-        ? `${history.config.HISTORY_PREFIX}${bookId}-${generation}-long.png`
-        : `${TEMP_PREFIX}${jobId}.png`;
-    if (saveHistory) {
-        newEntryNames.push(entryName);
-    }
+    const entryName = `${TEMP_PREFIX}${jobId}.png`;
     let writable;
     let compressionWriter;
     let compressionPump;
@@ -1471,16 +1582,12 @@ async function exportLongImage(jobId, payload) {
         let processedRows = 0;
         const preparePage = async pageIndex => {
             const page = session.manifest.pages[pageIndex];
-            const reference = saveHistory
-                ? pageReferences[pageIndex]
-                : await getExportPageFile(jobId, pool, session, payload.sessionId, pageIndex);
+            const reference = await getExportPageFile(jobId, pool, session, payload.sessionId, pageIndex);
             try {
                 const bitmap = await createPageBitmap(reference.file, page.name, page.type);
                 return { reference, bitmap };
             } catch (error) {
-                if (!saveHistory) {
-                    await releaseExportPage(reference);
-                }
+                await releaseExportPage(reference);
                 throw error;
             }
         };
@@ -1551,9 +1658,7 @@ async function exportLongImage(jobId, payload) {
                 }
             } finally {
                 prepared.bitmap.close();
-                if (!saveHistory) {
-                    await releaseExportPage(prepared.reference);
-                }
+                await releaseExportPage(prepared.reference);
             }
         }
         postLongImageProgress(jobId, payload, 990, '正在完成 PNG 压缩');
@@ -1566,81 +1671,19 @@ async function exportLongImage(jobId, payload) {
 
         const file = await storage.getFile(entryName);
         const baseName = String(payload.outputName || 'comic').replace(/\.[^.]*$/, '') || 'comic';
-        let book = null;
-        let coverFile = null;
-        if (saveHistory) {
-            postLongImageProgress(jobId, payload, 995, '正在保存到漫画书架');
-            const pages = session.manifest.pages.map((sourcePage, index) => {
-                return {
-                    name: sourcePage.name,
-                    type: sourcePage.type,
-                    size: sourcePage.size,
-                    width: dimensions[index].width,
-                    height: dimensions[index].height,
-                    lastModified: sourcePage.lastModified,
-                    entryName: pageReferences[index].entryName
-                };
-            });
-            const coverEntryName = `${history.config.HISTORY_PREFIX}${bookId}-${generation}-cover.jpg`;
-            newEntryNames.push(coverEntryName);
-            await createHistoryCover(
-                jobId,
-                storage,
-                pageReferences[0].file,
-                coverEntryName,
-                pages[0].name,
-                pages[0].type
-            );
-            coverFile = await storage.getFile(coverEntryName);
-            const now = Date.now();
-            const record = await putHistoryRecord({
-                schemaVersion: history.config.SCHEMA_VERSION,
-                bookId,
-                title: existingRecord?.title || baseName,
-                sourceName: payload.sourceName || session.file.name || `${baseName}.ecomic`,
-                storageKind: storage.kind,
-                coverEntryName,
-                coverMime: 'image/jpeg',
-                totalSize: session.manifest.totalSize,
-                pages,
-                png: {
-                    name: `${baseName}-long.png`,
-                    width: outputWidth,
-                    height: outputHeight,
-                    size: file.size,
-                    generatedAt: now,
-                    entryName
-                },
-                progress: existingRecord?.progress || { pageIndex: 0, pageRatio: 0 },
-                createdAt: existingRecord?.createdAt || now,
-                updatedAt: now,
-                lastOpenedAt: existingRecord?.lastOpenedAt || 0
-            });
-            historyCommitted = true;
-            await requestPersistentStorage();
-            if (existingRecord) {
-                for (const page of existingRecord.pages) {
-                    await removeEntryQuietly(storage, page.entryName);
-                }
-                await removeEntryQuietly(storage, existingRecord.coverEntryName);
-                await removeEntryQuietly(storage, existingRecord.png?.entryName);
-            }
-            book = history.summarizeRecord(record);
-        }
-        post('complete', jobId, {
+        post(payload.resultType === 'historyExport' ? 'historyLongImageReady' : 'complete', jobId, {
             kind: 'longImage',
             file,
-            opfsName: saveHistory ? '' : entryName,
+            opfsName: entryName,
             storageKind: storage.kind,
             name: `${baseName}-long.png`,
+            title: payload.title || baseName,
             size: file.size,
             pages: session.manifest.pages.length,
             width: outputWidth,
             height: outputHeight,
-            bookId: bookId || String(payload.bookId || ''),
-            book,
-            coverFile,
-            persisted: saveHistory
+            bookId: String(payload.bookId || ''),
+            persisted: false
         });
     } catch (error) {
         if (preparedPage) {
@@ -1648,9 +1691,7 @@ async function exportLongImage(jobId, payload) {
                 const preparedResult = await preparedPage;
                 if (preparedResult.prepared) {
                     preparedResult.prepared.bitmap.close();
-                    if (!saveHistory) {
-                        await releaseExportPage(preparedResult.prepared.reference);
-                    }
+                    await releaseExportPage(preparedResult.prepared.reference);
                 }
             } catch (prepareError) {
                 // Preserve the original failure.
@@ -1678,14 +1719,7 @@ async function exportLongImage(jobId, payload) {
                 // Ignore cleanup failures and report the original error.
             }
         }
-        if (!historyCommitted) {
-            await removeEntryQuietly(storage, entryName);
-        }
-        if (!historyCommitted) {
-            for (const name of newEntryNames) {
-                await removeEntryQuietly(storage, name);
-            }
-        }
+        await removeEntryQuietly(storage, entryName);
         throw error;
     }
 }
@@ -1900,41 +1934,47 @@ async function historyDelete(jobId, payload) {
 async function historyStorage(jobId) {
     let quota = 0;
     let usage = 0;
-    let persisted = false;
     if (self.navigator.storage) {
         if (typeof self.navigator.storage.estimate === 'function') {
             const estimate = await self.navigator.storage.estimate();
             quota = Number(estimate.quota) || 0;
             usage = Number(estimate.usage) || 0;
         }
-        if (typeof self.navigator.storage.persisted === 'function') {
-            persisted = await self.navigator.storage.persisted();
-        }
     }
-    post('historyStorage', jobId, { quota, usage, persisted });
+    post('historyStorage', jobId, { quota, usage });
 }
 
 async function historyExportLongImage(jobId, payload) {
-    const record = await getHistoryRecord(String(payload.bookId || ''));
-    if (!record) {
+    const bookId = String(payload.bookId || '');
+    const record = await getHistoryRecord(bookId);
+    let sessionId = '';
+    let title = String(payload.outputName || '').trim();
+    if (record) {
+        sessionId = `${jobId}-history-long-${record.bookId}`;
+        createHistorySession(record, sessionId);
+        title = record.title;
+    } else if (payload.file instanceof Blob) {
+        const opened = await createArchiveSession(jobId, payload.file);
+        sessionId = opened.sessionId;
+    } else {
         throw new ComicError('HISTORY_NOT_FOUND', '这本漫画已不在书架中');
     }
-    if (!record.png?.entryName) {
-        throw new ComicError('HISTORY_PNG_NOT_FOUND', '这本漫画还没有保存在应用数据中的长图');
-    }
-    const storage = await getStorageBackend();
-    let file;
     try {
-        file = await storage.getFile(record.png.entryName);
-    } catch (error) {
-        throw new ComicError('HISTORY_PNG_NOT_FOUND', '应用数据中的长图已丢失，请重新导入原归档');
+        await exportLongImage(jobId, {
+            sessionId,
+            outputName: title || 'comic',
+            title: title || 'comic',
+            bookId,
+            resultType: 'historyExport',
+            parallelism: payload.parallelism
+        });
+    } finally {
+        sessions.delete(sessionId);
     }
-    post('historyLongImageReady', jobId, {
-        file,
-        name: record.png.name,
-        title: record.title,
-        size: file.size
-    });
+}
+
+async function historySave(jobId, payload) {
+    await saveHistorySession(jobId, payload);
 }
 
 async function historyArchive(jobId, payload) {
@@ -1953,6 +1993,27 @@ async function historyArchive(jobId, payload) {
         files,
         outputName: record.title,
         addToShelf: false,
+        parallelism: payload.parallelism
+    });
+}
+
+async function historyExportArchive(jobId, payload) {
+    const record = await getHistoryRecord(String(payload.bookId || ''));
+    if (!record) {
+        throw new ComicError('HISTORY_NOT_FOUND', '这本漫画已不在书架中');
+    }
+    const storage = await getStorageBackend();
+    const files = [];
+    for (const page of record.pages) {
+        assertNotCancelled(jobId);
+        const file = await storage.getFile(page.entryName);
+        files.push(new File([file], page.name, { type: page.type, lastModified: page.lastModified }));
+    }
+    await encryptArchive(jobId, {
+        files,
+        outputName: record.title,
+        addToShelf: false,
+        resultType: 'historyExport',
         parallelism: payload.parallelism
     });
 }
@@ -2010,7 +2071,7 @@ async function handleComicCommand(data, sink = messageSink) {
 
     try {
         if (type === 'cleanup') {
-            await cleanupStaleEntries();
+            await cleanupStaleEntries(payload.aggressive === true);
             post('cleaned', jobId);
         } else if (type === 'encrypt') {
             await encryptArchive(jobId, payload);
@@ -2026,6 +2087,8 @@ async function handleComicCommand(data, sink = messageSink) {
             await historyList(jobId);
         } else if (type === 'historyOpen') {
             await historyOpen(jobId, payload);
+        } else if (type === 'historySave') {
+            await historySave(jobId, payload);
         } else if (type === 'historyDelete') {
             await historyDelete(jobId, payload);
         } else if (type === 'historyProgress') {
@@ -2038,6 +2101,8 @@ async function handleComicCommand(data, sink = messageSink) {
             await historyExportLongImage(jobId, payload);
         } else if (type === 'historyArchive') {
             await historyArchive(jobId, payload);
+        } else if (type === 'historyExportArchive') {
+            await historyExportArchive(jobId, payload);
         } else if (type === 'releasePage') {
             await releasePage(payload);
         } else if (type === 'closeSession') {

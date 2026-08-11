@@ -23,6 +23,7 @@
     const readerNotice = document.getElementById('comicReaderNotice');
     const historyGrid = document.getElementById('historyGrid');
     const historyStatus = document.getElementById('historyStatus');
+    const isAndroidRuntime = !!root.AndroidFileBridge || /EcrypteesAndroid\//.test(root.navigator.userAgent);
     const directoryPickerSupported = typeof root.showDirectoryPicker === 'function';
     const DIRECTORY_DATABASE_NAME = 'ecryptees-directory-v1';
     const DIRECTORY_HANDLE_STORE = 'handles';
@@ -69,8 +70,9 @@
     const directoryMetadataTasks = new Map();
     const pageJobs = new Map();
     const outputState = {
-        archive: { url: '', opfsName: '' },
-        longExport: { url: '', opfsName: '' }
+        archive: { url: '', opfsName: '', name: '', releaseTimer: 0 },
+        historyArchive: { url: '', opfsName: '', name: '', releaseTimer: 0 },
+        longExport: { url: '', opfsName: '', name: '', releaseTimer: 0 }
     };
 
     function isHeifMime(mime) {
@@ -110,7 +112,9 @@
         comicFilesInput.disabled = busy || !runtimeSupported;
         archiveInput.disabled = busy || !runtimeSupported;
         document.getElementById('comicArchiveName').disabled = busy || !runtimeSupported;
-        document.getElementById('encryptComicButton').disabled = busy || !runtimeSupported || items.length === 0;
+        const encryptButton = document.getElementById('encryptComicButton');
+        encryptButton.disabled = busy || !runtimeSupported || items.length === 0;
+        encryptButton.textContent = type === 'encrypt' ? '正在加密并加入书架…' : '加密并加入书架';
         document.getElementById('clearComicFilesButton').disabled = busy || items.length === 0;
         document.getElementById('openComicButton').disabled = busy || !runtimeSupported || !selectedArchive;
         document.getElementById('cancelComicButton').hidden = !busy;
@@ -125,6 +129,11 @@
 
     function releaseOutput(kind) {
         const output = outputState[kind];
+        if (!output) {
+            return;
+        }
+        clearTimeout(output.releaseTimer);
+        output.releaseTimer = 0;
         if (output.url) {
             URL.revokeObjectURL(output.url);
             output.url = '';
@@ -133,16 +142,18 @@
             worker.postMessage({ type: 'releaseOutput', jobId: nextJobId('release'), payload: { opfsName: output.opfsName } });
             output.opfsName = '';
         }
+        output.name = '';
     }
 
-    function showArchiveDownload(message) {
-        releaseOutput('archive');
-        const output = outputState.archive;
+    function captureOutput(kind, message, mime) {
+        releaseOutput(kind);
+        const output = outputState[kind];
         const outputBlob = new Blob([message.file], {
-            type: 'application/octet-stream'
+            type: mime
         });
         output.url = URL.createObjectURL(outputBlob);
         output.opfsName = message.opfsName;
+        output.name = message.name;
         if (message.storageKind === 'indexeddb' && output.opfsName) {
             worker.postMessage({
                 type: 'releaseOutput',
@@ -151,12 +162,67 @@
             });
             output.opfsName = '';
         }
+        return output;
+    }
+
+    function resetArchiveAction(release = true) {
+        if (release) {
+            releaseOutput('archive');
+        }
+        const link = document.getElementById('downloadComicArchive');
+        link.href = '#';
+        link.download = '';
+        link.textContent = '下载 .ecomic';
+        link.setAttribute('aria-disabled', 'true');
+        link.hidden = true;
+        const encryptButton = document.getElementById('encryptComicButton');
+        encryptButton.hidden = false;
+        encryptButton.textContent = '加密并加入书架';
+    }
+
+    function prepareArchiveDownload(message) {
+        const output = captureOutput('archive', message, 'application/octet-stream');
         const link = document.getElementById('downloadComicArchive');
         link.href = output.url;
         link.download = sanitizeDownloadName(message.name, format.EXTENSION);
+        link.textContent = `下载 ${link.download}`;
         link.setAttribute('aria-disabled', 'false');
-        link.hidden = false;
-        document.getElementById('comicArchiveDownloadRow').hidden = false;
+        link.hidden = true;
+    }
+
+    function revealArchiveDownload() {
+        if (!outputState.archive.url) {
+            return;
+        }
+        document.getElementById('encryptComicButton').hidden = true;
+        document.getElementById('downloadComicArchive').hidden = false;
+    }
+
+    function scheduleOutputRelease(kind, resetCreateAction = false) {
+        const output = outputState[kind];
+        clearTimeout(output.releaseTimer);
+        output.releaseTimer = root.setTimeout(() => {
+            if (resetCreateAction) {
+                resetArchiveAction();
+            } else {
+                releaseOutput(kind);
+            }
+            requestHistoryList();
+        }, 60000);
+    }
+
+    function downloadOutput(kind, message, fallbackName) {
+        const output = captureOutput(kind, message, 'application/octet-stream');
+        const link = document.createElement('a');
+        link.href = output.url;
+        link.download = sanitizeDownloadName(message.name, fallbackName);
+        link.hidden = true;
+        document.body.append(link);
+        link.click();
+        link.remove();
+        if (!isAndroidRuntime) {
+            scheduleOutputRelease(kind);
+        }
     }
 
     function setHistoryStatus(message, kind = 'info') {
@@ -319,6 +385,9 @@
 
     function createDirectoryMetadata(book, existing = {}) {
         const pageCount = Math.max(1, Math.trunc(Number(book.pageCount) || 1));
+        const png = Number(book.png?.size) > 0
+            ? book.png
+            : (existing.png || book.png || { name: 'long.png', width: 1, height: 1, size: 0, generatedAt: 0 });
         return {
             schemaVersion: DIRECTORY_SCHEMA_VERSION,
             bookId: book.bookId,
@@ -326,7 +395,7 @@
             pageCount,
             totalSize: Math.max(1, Math.trunc(Number(book.totalSize) || 1)),
             progress: historyCore.normalizeProgress(book.progress, pageCount),
-            png: book.png || existing.png || { name: 'long.png', width: 1, height: 1, size: 0, generatedAt: 0 },
+            png,
             createdAt: Math.max(0, Math.trunc(Number(book.createdAt) || Number(existing.createdAt) || Date.now())),
             updatedAt: Date.now(),
             lastOpenedAt: Math.max(0, Math.trunc(Number(book.lastOpenedAt) || Number(existing.lastOpenedAt) || 0))
@@ -509,14 +578,6 @@
         }).format(new Date(timestamp));
     }
 
-    function historyProgressPercent(book) {
-        if (!book.pageCount) {
-            return 0;
-        }
-        return Math.max(0, Math.min(100,
-            Math.round((book.progress.pageIndex + book.progress.pageRatio) / book.pageCount * 100)));
-    }
-
     function createHistoryButton(label, action, bookId, className = 'secondary-button') {
         const button = document.createElement('button');
         button.type = 'button';
@@ -576,30 +637,21 @@
             title.title = book.title;
             title.textContent = book.title;
             cardHeader.append(title, createHistoryRenameButton(book));
-            const percent = historyProgressPercent(book);
             const meta = document.createElement('p');
             meta.className = 'history-card-meta';
-            meta.textContent = `${book.pageCount} 页 · ${formatBytes(book.totalSize)} · 已读 ${percent}%${book.archiveFile ? ' · 独立目录' : ''}`;
+            meta.textContent = `${book.pageCount} 页 · ${formatBytes(book.totalSize)}${book.archiveFile ? ' · 独立目录' : ''}`;
             const time = document.createElement('p');
             time.className = 'history-card-time';
             time.textContent = `最近：${formatHistoryDate(book.lastOpenedAt || book.updatedAt)}`;
-            const track = document.createElement('div');
-            track.className = 'history-progress-track';
-            const value = document.createElement('span');
-            value.className = 'history-progress-value';
-            value.style.setProperty('--history-progress', `${percent}%`);
-            track.append(value);
             const actions = document.createElement('div');
             actions.className = 'history-card-actions';
             actions.append(
-                createHistoryButton('继续阅读', 'open', book.bookId, 'history-open'),
-                createHistoryButton('从头阅读', 'restart', book.bookId)
+                createHistoryButton('阅读', 'open', book.bookId, 'history-open'),
+                createHistoryButton('导出 .ecomic', 'exportArchive', book.bookId),
+                createHistoryButton('导出长图', 'exportLong', book.bookId),
+                createHistoryButton('删除', 'delete', book.bookId, 'secondary-button history-delete')
             );
-            if (book.longFile || book.png?.entryName) {
-                actions.append(createHistoryButton('导出长图', 'export', book.bookId));
-            }
-            actions.append(createHistoryButton('删除', 'delete', book.bookId, 'secondary-button history-delete'));
-            body.append(cardHeader, meta, time, track, actions);
+            body.append(cardHeader, meta, time, actions);
             card.append(cover, body);
             historyGrid.append(card);
         }
@@ -651,6 +703,7 @@
     }
 
     function updateSelectionSummary() {
+        resetArchiveAction();
         const total = items.reduce((sum, item) => sum + item.file.size, 0);
         document.getElementById('comicSelectionSummary').textContent = items.length
             ? `${items.length} 张 · ${formatBytes(total)}`
@@ -830,6 +883,7 @@
         }
         const [item] = items.splice(sourceIndex, 1);
         items.splice(Math.max(0, Math.min(targetIndex, items.length)), 0, item);
+        resetArchiveAction();
         renderFileList();
         setStatus('页面顺序已更新。');
     }
@@ -842,6 +896,7 @@
         }
         const [item] = items.splice(index, 1);
         items.splice(target, 0, item);
+        resetArchiveAction();
         renderFileList();
         setStatus('页面顺序已更新。');
     }
@@ -993,8 +1048,7 @@
             setStatus('请先选择漫画图片', 'error');
             return;
         }
-        releaseOutput('archive');
-        document.getElementById('comicArchiveDownloadRow').hidden = true;
+        resetArchiveAction();
         const rawName = document.getElementById('comicArchiveName').value.trim() || 'comic';
         const outputName = sanitizeDownloadName(rawName, format.EXTENSION).replace(/\.ecomic$/i, '');
         startJob('encrypt', '正在创建无损漫画归档…', {
@@ -1093,10 +1147,13 @@
         startJob('historyOpen', '正在从本地书架打开漫画…', { bookId });
     }
 
-    function downloadLongImageFile(file, name) {
-        releaseOutput('longExport');
-        const output = outputState.longExport;
-        output.url = URL.createObjectURL(new Blob([file], { type: 'image/png' }));
+    function downloadLongImageFile(file, name, opfsName = '', storageKind = '') {
+        const output = captureOutput('longExport', {
+            file,
+            name,
+            opfsName,
+            storageKind
+        }, 'image/png');
         const link = document.createElement('a');
         link.href = output.url;
         link.download = sanitizeDownloadName(name, 'comic-long.png');
@@ -1104,6 +1161,28 @@
         document.body.append(link);
         link.click();
         link.remove();
+        if (!isAndroidRuntime) {
+            scheduleOutputRelease('longExport');
+        }
+    }
+
+    function exportHistoryArchive(bookId) {
+        if (!bookId || activeJobType) {
+            return;
+        }
+        const book = historyBooks.find(item => item.bookId === bookId);
+        if (!book) {
+            return;
+        }
+        if (book.archiveFile) {
+            downloadOutput('historyArchive', {
+                file: book.archiveFile,
+                name: `${book.title.replace(/\.ecomic$/i, '')}.${format.EXTENSION}`
+            }, `comic.${format.EXTENSION}`);
+            setHistoryStatus(`正在导出《${book.title}》归档…`, 'success');
+            return;
+        }
+        startJob('historyExportArchive', `正在加密《${book.title}》…`, { bookId });
     }
 
     function exportHistoryLongImage(bookId) {
@@ -1119,7 +1198,11 @@
             setHistoryStatus(`正在导出《${book.title}》长图…`, 'success');
             return;
         }
-        startJob('historyExportLongImage', '正在从应用数据读取长图…', { bookId });
+        startJob('historyExportLongImage', `正在合并《${book.title}》长图…`, {
+            bookId,
+            file: book.archiveFile || null,
+            outputName: book.title
+        });
     }
 
     async function renameHistoryBook(bookId) {
@@ -1180,7 +1263,10 @@
             }
             return;
         }
-        if (!root.confirm(`确定从浏览器书架移除《${book.title}》吗？`)) {
+        const deletePrompt = isAndroidRuntime
+            ? `确定从应用书架删除《${book.title}》吗？原始页面、封面、元数据和阅读进度都会被删除，无法撤销。`
+            : `确定从浏览器书架移除《${book.title}》吗？`;
+        if (!root.confirm(deletePrompt)) {
             return;
         }
         const deleteExternal = external && root.confirm('这本漫画也保存在独立目录中。是否同时删除目录里的原件？\n\n选择“取消”只清理浏览器缓存，独立目录中的漫画仍会显示在书架。');
@@ -1205,7 +1291,10 @@
             }
             return;
         }
-        if (!root.confirm('确定清空当前浏览器中的全部漫画缓存吗？此操作无法撤销。')) {
+        const clearPrompt = isAndroidRuntime
+            ? '确定清空应用书架吗？全部漫画的原始页面、封面、元数据和阅读进度都会被删除，无法撤销。'
+            : '确定清空当前浏览器中的全部漫画缓存吗？此操作无法撤销。';
+        if (!root.confirm(clearPrompt)) {
             return;
         }
         const deleteExternal = directoryBooks.length > 0 && root.confirm('是否同时删除独立书架目录中的全部漫画原件？\n\n选择“取消”只清理浏览器缓存，目录中的漫画仍会显示在书架。');
@@ -1424,24 +1513,21 @@
         });
     }
 
-    function saveLongImageToShelf() {
+    function saveCurrentSessionToHistory() {
         if (!sessionId) {
             return;
         }
         if (activeJobType) {
-            showReaderNotice('当前任务尚未完成，请稍候。');
             return;
         }
         const historyBook = historyBooks.find(book => book.bookId === currentHistoryBookId);
         const outputName = (historyBook?.title || selectedArchive?.name || 'comic').replace(/\.ecomic$/i, '');
-        startJob('exportLongImage', '正在生成整本无损长图…', {
+        startJob('historySave', '正在把原始页面和封面加入书架…', {
             sessionId,
             outputName,
-            sourceName: selectedArchive?.name || '',
-            saveHistory: true,
-            bookId: currentHistoryBookId
+            sourceName: selectedArchive?.name || ''
         });
-        showReaderNotice('正在逐页合并整本漫画；完成后只保存到书架应用数据，不会下载到设备。');
+        showReaderNotice('正在保存原始页面和封面；长图只在点击导出时生成。');
     }
 
     async function showReaderPage(message) {
@@ -1583,17 +1669,29 @@
             return;
         }
         if (message.type === 'historyStorage') {
-            const used = message.usage ? formatBytes(message.usage) : '未知';
-            const quota = message.quota ? formatBytes(message.quota) : '未知';
-            const persistence = message.persisted ? '已获持久存储保护' : '可能随浏览器清理而移除';
-            document.getElementById('historyStorageSummary').textContent = `浏览器存储：${used} / ${quota} · ${persistence}`;
+            const usage = Number(message.usage);
+            const quota = Number(message.quota);
+            const used = Number.isFinite(usage) && usage >= 0 ? formatBytes(usage) : '未知';
+            const remaining = Number.isFinite(quota) && quota > 0 && Number.isFinite(usage)
+                ? formatBytes(Math.max(0, quota - usage))
+                : '未知';
+            document.getElementById('historyStorageSummary').textContent = `已使用 ${used} · 剩余 ${remaining}`;
+            return;
+        }
+        if (message.type === 'historyArchiveReady' && message.jobId === activeJobId) {
+            activeJobId = '';
+            setBusy('');
+            downloadOutput('historyArchive', message, `comic.${format.EXTENSION}`);
+            setHistoryStatus(`《${message.name.replace(/\.ecomic$/i, '')}》已加密，正在打开保存位置…`, 'success');
+            requestHistoryList();
             return;
         }
         if (message.type === 'historyLongImageReady' && message.jobId === activeJobId) {
             activeJobId = '';
             setBusy('');
-            downloadLongImageFile(message.file, message.name);
+            downloadLongImageFile(message.file, message.name, message.opfsName, message.storageKind);
             setHistoryStatus(`正在导出《${message.title}》长图…`, 'success');
+            requestHistoryList();
             return;
         }
         if (message.type === 'historyProgressed') {
@@ -1637,7 +1735,9 @@
                 }
                 setHistoryStatus(deletion?.deleteExternal
                     ? '浏览器缓存和独立目录原件均已删除。'
-                    : (message.count ? '浏览器缓存已删除，独立目录原件已保留。' : '这本漫画已不在浏览器缓存中。'), 'success');
+                    : (isAndroidRuntime
+                        ? (message.count ? '应用书架数据已删除。' : '这本漫画已不在应用书架中。')
+                        : (message.count ? '浏览器缓存已删除，独立目录原件已保留。' : '这本漫画已不在浏览器缓存中。')), 'success');
             } catch (error) {
                 setHistoryStatus(`浏览器缓存已删除，但目录原件删除失败：${error.message}`, 'error');
             }
@@ -1647,7 +1747,7 @@
         if (message.type === 'progress' && message.jobId === activeJobId) {
             setProgress(message.processed, message.total);
             setStatus(`${message.message}… ${progressText.textContent}`);
-            if (activeJobType === 'exportLongImage') {
+            if (activeJobType === 'historyExportLongImage') {
                 showReaderNotice(`${message.message}… ${progressText.textContent}`);
             }
             return;
@@ -1657,10 +1757,10 @@
             return;
         }
         if (message.type === 'archiveReady' && message.jobId === activeJobId) {
-            showArchiveDownload(message);
+            prepareArchiveDownload(message);
             pendingArchiveForDirectory = { file: message.file, name: message.name };
-            setStatus(`漫画归档已生成：${message.pages} 页 · ${formatBytes(message.size)}。正在生成 PNG 并加入书架…`, 'success');
-            setHistoryStatus('正在把本次上传的图片加入书架…');
+            setStatus(`漫画归档已生成：${message.pages} 页 · ${formatBytes(message.size)}。正在保存原始页面和封面…`, 'success');
+            setHistoryStatus('正在把本次上传的原始页面加入书架…');
             return;
         }
         if (message.type === 'portableArchive' && message.jobId === activeJobId) {
@@ -1715,48 +1815,49 @@
                 setHistoryStatus('已从本地书架恢复高清阅读。', 'success');
                 requestHistoryList();
             } else {
-                setStatus('漫画归档验证成功，正在转存 PNG 并加入书架。', 'success');
+                setStatus('漫画归档验证成功，正在保存原始页面和封面。', 'success');
             }
             activeJobId = '';
             setBusy('');
             if (shouldConvertArchive) {
-                saveLongImageToShelf();
+                saveCurrentSessionToHistory();
             }
             return;
         }
-        if (message.type === 'complete' && message.jobId === activeJobId) {
+        if (message.type === 'historySaved' && message.jobId === activeJobId) {
+            const completedJobType = activeJobType;
             setProgress(1, 1, 'success');
-            const label = message.kind === 'archive' ? '漫画归档' : '整本长图';
-            const dimensions = message.kind === 'longImage' ? ` · ${message.width}×${message.height}` : '';
-            setStatus(`${label}已写入书架应用数据：${message.pages} 页 · ${formatBytes(message.size)}${dimensions}。`, 'success');
-            if (message.kind === 'longImage') {
-                showReaderNotice('PNG 已保存到书架应用数据，不会自动下载到设备。');
-                const existingDirectoryBook = directoryBooks.find(book => book.bookId === message.bookId);
-                const directoryBook = message.book
-                    || historyBooks.find(book => book.bookId === message.bookId)
-                    || existingDirectoryBook;
-                if (directoryPermissionGranted && message.bookId && directoryBook) {
-                    try {
-                        await syncBookToDirectory(directoryBook, {
-                            archiveFile: pendingArchiveForDirectory?.file
-                                || existingDirectoryBook?.archiveFile
-                                || (message.book ? selectedArchive : null),
-                            longFile: message.file,
-                            coverFile: message.coverFile || existingDirectoryBook?.coverFile || directoryBook.coverFile
-                        });
-                        setHistoryStatus(`已加入独立书架目录“${libraryDirectoryHandle.name}”。`, 'success');
-                    } catch (error) {
-                        setDirectorySummary(`漫画已保存到浏览器，但目录写入失败：${error.message}`, 'error');
-                    }
+            setStatus(`漫画已加入书架：${message.pages} 页 · ${formatBytes(message.size)}。`, 'success');
+            showReaderNotice('原始页面和封面已保存；长图将在导出时生成。');
+            const existingDirectoryBook = directoryBooks.find(book => book.bookId === message.bookId);
+            const directoryBook = message.book
+                || historyBooks.find(book => book.bookId === message.bookId)
+                || existingDirectoryBook;
+            if (directoryPermissionGranted && message.bookId && directoryBook) {
+                try {
+                    await syncBookToDirectory(directoryBook, {
+                        archiveFile: pendingArchiveForDirectory?.file
+                            || existingDirectoryBook?.archiveFile
+                            || selectedArchive,
+                        coverFile: message.coverFile || existingDirectoryBook?.coverFile || directoryBook.coverFile
+                    });
+                    setHistoryStatus(`已加入独立书架目录“${libraryDirectoryHandle.name}”。`, 'success');
+                } catch (error) {
+                    setDirectorySummary(`漫画已保存到浏览器，但目录写入失败：${error.message}`, 'error');
                 }
-                pendingArchiveForDirectory = null;
-                if (message.bookId) {
-                    currentHistoryBookId = message.bookId;
-                    if (!directoryPermissionGranted) {
-                        setHistoryStatus('已加入浏览器书架。连接独立目录后可获得可迁移备份。', 'success');
-                    }
-                    requestHistoryList();
+            }
+            pendingArchiveForDirectory = null;
+            if (message.bookId) {
+                currentHistoryBookId = message.bookId;
+                if (!directoryPermissionGranted) {
+                    setHistoryStatus(isAndroidRuntime
+                        ? '已加入应用书架。'
+                        : '已加入浏览器书架。连接独立目录后可获得可迁移备份。', 'success');
                 }
+                requestHistoryList();
+            }
+            if (completedJobType === 'encrypt') {
+                revealArchiveDownload();
             }
             activeJobId = '';
             setBusy('');
@@ -1783,12 +1884,21 @@
                     migrationQueue = [];
                     migrationCurrentBook = null;
                     setHistoryStatus('书架迁移已取消。');
+                } else if (cancelledType === 'historyExportArchive') {
+                    setHistoryStatus('已取消导出 .ecomic。');
+                } else if (cancelledType === 'historyExportLongImage') {
+                    setHistoryStatus('已取消导出长图。');
+                } else if (cancelledType === 'historySave') {
+                    setHistoryStatus('已取消加入书架。');
                 }
                 setBusy('');
                 resetProgress();
                 setStatus(archiveWasCreated
                     ? '漫画归档已生成，加入书架的后续处理已取消；仍可下载 .ecomic。'
                     : '操作已取消。');
+                if (archiveWasCreated) {
+                    revealArchiveDownload();
+                }
             }
             return;
         }
@@ -1819,12 +1929,21 @@
                     migrationQueue = [];
                     migrationCurrentBook = null;
                     setHistoryStatus(`迁移失败：${message.message || '未知错误'}`, 'error');
+                } else if (failedType === 'historyExportArchive') {
+                    setHistoryStatus(`导出 .ecomic 失败：${message.message || '未知错误'}`, 'error');
+                } else if (failedType === 'historyExportLongImage') {
+                    setHistoryStatus(`导出长图失败：${message.message || '未知错误'}`, 'error');
+                } else if (failedType === 'historySave') {
+                    setHistoryStatus(`加入书架失败：${message.message || '未知错误'}`, 'error');
                 }
                 setBusy('');
                 progressGroup.dataset.kind = 'error';
                 setStatus(archiveWasCreated
                     ? `漫画归档已生成，但加入书架失败：${message.message || '未知错误'}。仍可下载 .ecomic。`
                     : (message.message || '漫画处理失败'), 'error');
+                if (archiveWasCreated) {
+                    revealArchiveDownload();
+                }
             }
         }
     }
@@ -1848,7 +1967,7 @@
         return new root.Ecryptees.LocalComicWorker();
     }
 
-    function startWorker(reopenBookId = '') {
+    function startWorker(reopenBookId = '', aggressiveCleanup = false) {
         worker = createComicWorker();
         worker.addEventListener('message', handleWorkerMessage);
         worker.addEventListener('error', () => {
@@ -1873,11 +1992,15 @@
             setBusy('');
             setStatus('漫画后台已重新启动，正在恢复书架阅读…');
             root.setTimeout(() => {
-                startWorker(recoverBookId);
+                startWorker(recoverBookId, false);
                 recoveringWorker = false;
             }, 100);
         });
-        worker.postMessage({ type: 'cleanup', jobId: nextJobId('cleanup') });
+        worker.postMessage({
+            type: 'cleanup',
+            jobId: nextJobId('cleanup'),
+            payload: { aggressive: aggressiveCleanup }
+        });
         requestHistoryList();
         if (reopenBookId) {
             root.setTimeout(() => openHistoryBook(reopenBookId, false), 0);
@@ -1894,8 +2017,15 @@
             return;
         }
 
-        startWorker();
-        restoreLibraryDirectory();
+        if (isAndroidRuntime) {
+            document.getElementById('historyDirectoryPanel').hidden = true;
+            document.getElementById('historyDescription').textContent = '书架保存在应用私有数据中；覆盖更新会保留，清除应用数据或卸载会删除。';
+            document.getElementById('historyEmptyDescription').textContent = '加密图片或打开 `.ecomic` 后，漫画会自动加入应用书架。';
+        }
+        startWorker('', true);
+        if (!isAndroidRuntime) {
+            restoreLibraryDirectory();
+        }
         setReaderHeaderCollapsed(readReaderHeaderPreference(), false, false);
         setStatus(location.protocol === 'file:'
             ? '本地漫画模式已就绪。图片将按列表顺序无损封装。'
@@ -1908,6 +2038,16 @@
     document.getElementById('comicFilesPicker').addEventListener('keydown', event => activateFilePicker(event, comicFilesInput));
     document.getElementById('comicArchiveFilePicker').addEventListener('keydown', event => activateFilePicker(event, archiveInput));
     document.getElementById('encryptComicButton').addEventListener('click', encryptComic);
+    document.getElementById('comicArchiveName').addEventListener('input', () => resetArchiveAction());
+    document.getElementById('downloadComicArchive').addEventListener('click', event => {
+        if (event.currentTarget.getAttribute('aria-disabled') === 'true') {
+            event.preventDefault();
+            return;
+        }
+        if (!isAndroidRuntime) {
+            scheduleOutputRelease('archive', true);
+        }
+    });
     document.getElementById('clearComicFilesButton').addEventListener('click', clearItems);
     document.getElementById('openComicButton').addEventListener('click', openComic);
     document.getElementById('closeComicReaderButton').addEventListener('click', () => closeReaderDialog());
@@ -1952,9 +2092,9 @@
         const { historyAction, bookId } = button.dataset;
         if (historyAction === 'open') {
             openHistoryBook(bookId, false);
-        } else if (historyAction === 'restart') {
-            openHistoryBook(bookId, true);
-        } else if (historyAction === 'export') {
+        } else if (historyAction === 'exportArchive') {
+            exportHistoryArchive(bookId);
+        } else if (historyAction === 'exportLong') {
             exportHistoryLongImage(bookId);
         } else if (historyAction === 'rename') {
             renameHistoryBook(bookId);
@@ -1974,6 +2114,29 @@
         if (document.visibilityState === 'hidden') {
             saveReaderProgressNow();
         }
+    });
+    document.addEventListener('ecryptees-download-result', event => {
+        const detail = event.detail || {};
+        const kind = Object.keys(outputState).find(key => outputState[key].url === detail.url);
+        if (!kind) {
+            return;
+        }
+        const succeeded = detail.status === 'success';
+        const cancelled = detail.status === 'cancelled';
+        if (kind === 'archive') {
+            resetArchiveAction();
+            setStatus(succeeded
+                ? `${detail.name || '漫画归档'} 已保存。`
+                : (cancelled ? '已取消保存漫画归档。' : '漫画归档保存失败，请重新加密后再试。'),
+            succeeded ? 'success' : (cancelled ? 'info' : 'error'));
+        } else {
+            releaseOutput(kind);
+            setHistoryStatus(succeeded
+                ? `${detail.name || '文件'} 已保存。`
+                : (cancelled ? '已取消保存。' : '文件保存失败，请检查剩余空间后重试。'),
+            succeeded ? 'success' : (cancelled ? 'info' : 'error'));
+        }
+        requestHistoryList();
     });
     root.addEventListener('beforeunload', () => {
         items.forEach(revokeItem);

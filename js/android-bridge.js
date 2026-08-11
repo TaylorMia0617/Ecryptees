@@ -5,6 +5,24 @@
     if (!bridge) return;
 
     let statusElement = null;
+    let pendingDownload = null;
+
+    function emitDownloadResult(status, fallback = {}) {
+        const download = fallback.url ? fallback : pendingDownload;
+        if (!download.url) {
+            return;
+        }
+        document.dispatchEvent(new CustomEvent('ecryptees-download-result', {
+            detail: {
+                url: download.url,
+                name: download.name || '',
+                status
+            }
+        }));
+        if (pendingDownload?.url === download.url) {
+            pendingDownload = null;
+        }
+    }
 
     function showStatus(message, kind = 'info', temporary = false) {
         if (!statusElement) {
@@ -180,8 +198,11 @@
         event.stopImmediatePropagation();
         const name = link.download || 'download.bin';
         const accepted = bridge.beginDownload(name, inferMimeType(name), link.href);
-        if (!accepted) {
+        if (accepted) {
+            pendingDownload = { url: link.href, name };
+        } else {
             showStatus('当前文件尚未保存完成，请稍后再试。', 'error', true);
+            emitDownloadResult('failed', { url: link.href, name });
         }
     }, true);
 
@@ -212,6 +233,7 @@
                     throw new Error('Android 文件收尾失败');
                 }
                 showStatus(`${name} 已保存`, 'success', true);
+                emitDownloadResult('success', { url: blobUrl, name });
             } catch (error) {
                 try {
                     await reader?.cancel(error);
@@ -220,13 +242,16 @@
                 }
                 bridge.abortDownload(token);
                 showStatus(error.message || '文件保存失败', 'error', true);
+                emitDownloadResult('failed', { url: blobUrl, name });
             }
         },
         cancelled() {
             showStatus('已取消保存', 'info', true);
+            emitDownloadResult('cancelled');
         },
         failed() {
             showStatus('文件保存失败，请检查剩余空间后重试。', 'error', true);
+            emitDownloadResult('failed');
         }
     });
 })();

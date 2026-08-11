@@ -206,11 +206,9 @@
                 <p class="comic-security-note">内置码表随应用公开，只能隐藏内容并检测损坏，不等同于私人密码。未来版本可增加外部密码本。</p>
                 <div class="button-group comic-actions">
                     <button id="encryptComicButton" type="button" disabled>加密并加入书架</button>
+                    <a class="download-button" id="downloadComicArchive" href="#" aria-disabled="true" hidden>下载 .ecomic</a>
                     <button class="secondary-button" id="clearComicFilesButton" type="button" disabled>清空列表</button>
                     <button class="secondary-button" id="cancelComicButton" type="button" hidden>取消任务</button>
-                </div>
-                <div class="download-row" id="comicArchiveDownloadRow" hidden>
-                    <a class="download-button" id="downloadComicArchive" href="#" aria-disabled="true">下载 .ecomic</a>
                 </div>
             </div>
 
@@ -238,11 +236,11 @@
             <div class="history-header">
                 <div>
                     <h2>漫画书架</h2>
-                    <p class="hint">独立目录保存永久文件；浏览器数据库只作为可重建的阅读缓存。</p>
+                    <p class="hint" id="historyDescription">独立目录保存永久文件；浏览器数据库只作为可重建的阅读缓存。</p>
                 </div>
                 <button class="secondary-button history-clear" id="clearHistoryButton" type="button" disabled>清空书架</button>
             </div>
-            <div class="history-directory">
+            <div class="history-directory" id="historyDirectoryPanel">
                 <div>
                     <strong id="historyDirectoryTitle">独立书架目录</strong>
                     <span id="historyDirectorySummary">尚未连接；选择的目录可直接备份或打包为 ZIP</span>
@@ -265,7 +263,7 @@
             <div class="history-storage" id="historyStorageSummary">正在读取本地存储空间…</div>
             <div class="history-empty" id="historyEmptyState" hidden>
                 <strong>书架还是空的</strong>
-                <p>连接书架目录可恢复已有漫画；加密或解密 `.ecomic` 后也会自动加入。</p>
+                <p id="historyEmptyDescription">连接书架目录可恢复已有漫画；加密或解密 `.ecomic` 后也会自动加入。</p>
                 <button id="historyGoToComicButton" type="button">前往漫画模式</button>
             </div>
             <div class="history-grid" id="historyGrid" aria-live="polite"></div>
@@ -285,7 +283,7 @@
                 <div class="comic-reader-heading">
                     <strong id="comicReaderTitle">连续阅读</strong>
                     <span class="comic-reader-meta" id="comicReaderMeta"></span>
-                    <span class="comic-reader-hint" id="comicReaderHint">整本 PNG 长图保存在书架应用数据中，不会自动下载到设备</span>
+                    <span class="comic-reader-hint" id="comicReaderHint">书架保存原始页面和封面；长图仅在导出时生成</span>
                 </div>
                 <div class="comic-reader-actions">
                     <button class="reader-icon-button" id="collapseComicReaderHeaderButton" type="button" aria-label="收起阅读器顶部栏" aria-expanded="true" title="收起顶部栏">

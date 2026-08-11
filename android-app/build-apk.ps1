@@ -33,6 +33,22 @@ try {
         throw "Android build failed with exit code $LASTEXITCODE"
     }
     $source = "$PSScriptRoot\app\build\outputs\apk\release\app-release.apk"
+    $buildToolsDirectory = Get-ChildItem -LiteralPath "$env:ANDROID_SDK_ROOT\build-tools" -Directory |
+        Sort-Object { [version]$_.Name } -Descending |
+        Select-Object -First 1
+    if (-not $buildToolsDirectory) {
+        throw 'Android build-tools are unavailable for APK signature verification'
+    }
+    $apkSigner = Join-Path $buildToolsDirectory.FullName 'apksigner.bat'
+    $signatureOutput = & $apkSigner verify --print-certs $source 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "APK signature verification failed:`n$($signatureOutput -join "`n")"
+    }
+    $expectedCertificate = '91306e7c15932646a58ffbd3443f541be57401f1f64106d8dcd0e97fbc5687e8'
+    $signatureText = $signatureOutput -join "`n"
+    if ($signatureText -notmatch [regex]::Escape($expectedCertificate)) {
+        throw "Unexpected release signing certificate. Expected SHA-256 $expectedCertificate"
+    }
     $destinationDirectory = Join-Path (Split-Path $PSScriptRoot -Parent) 'dist'
     New-Item -ItemType Directory -Force -Path $destinationDirectory | Out-Null
     Copy-Item -LiteralPath $source -Destination (Join-Path $destinationDirectory 'Ecryptees.apk') -Force

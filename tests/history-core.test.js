@@ -92,22 +92,30 @@ test('history validation rejects invalid storage keys and totals over 500 MiB', 
     assert.throws(() => history.validateRecord(wrongPngKey), /长图存储信息无效/);
 });
 
-test('worker exposes staging cleanup, shelf migration, and all history commands', () => {
+test('worker exposes cleanup, shelf archive export, migration, and all history commands', () => {
     const source = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'js', 'comic-worker.js'), 'utf8');
-    for (const command of ['historyList', 'historyOpen', 'historyDelete', 'historyProgress', 'historyRename', 'historyStorage', 'historyExportLongImage', 'historyArchive']) {
+    for (const command of ['historyList', 'historyOpen', 'historySave', 'historyDelete', 'historyProgress', 'historyRename', 'historyStorage', 'historyExportLongImage', 'historyExportArchive', 'historyArchive']) {
         assert.match(source, new RegExp(`type === '${command}'`));
     }
     assert.match(source, /STAGING_PREFIX/);
     assert.match(source, /historyCommitted/);
+    assert.match(source, /post\('historySaved'/);
     assert.match(source, /storage\.listNames\(\)/);
     assert.match(source, /name\.startsWith\(history\.config\.HISTORY_PREFIX\) && !referenced\.has\(name\)/);
     assert.match(source, /pageEntryName = `\$\{history\.config\.HISTORY_PREFIX\}/);
     assert.doesNotMatch(source, /stagingReferences|promotedEntryNames/);
     assert.match(source, /kind: 'uploads'/);
     assert.match(source, /post\('archiveReady'/);
-    assert.match(source, /post\('portableArchive'/);
+    assert.match(source, /post\(payload\.resultType === 'historyExport' \? 'historyArchiveReady' : 'portableArchive'/);
     assert.match(source, /addToShelf: false/);
+    assert.match(source, /resultType: 'historyExport'/);
     assert.match(source, /progressRange: \{ start: 500, end: 1000, total: 1000 \}/);
-    assert.match(source, /HISTORY_PNG_NOT_FOUND/);
+    assert.match(source, /resultType: 'historyExport'/);
+    assert.match(source, /createArchiveSession\(jobId, payload\.file\)/);
+    assert.match(source, /entryName: ''/);
     assert.match(source, /removeEntryQuietly\(storage, record\.png\?\.entryName\)/);
+    assert.match(source, /cleanupStaleEntries\(payload\.aggressive === true\)/);
+    assert.match(source, /legacyLongImage[\s\S]*putHistoryRecord[\s\S]*removeEntryQuietly\(storage, legacyLongImage\)/);
+    assert.match(source, /post\('historyStorage', jobId, \{ quota, usage \}\)/);
+    assert.doesNotMatch(source, /longImageBytes|temporaryBytes/);
 });

@@ -950,6 +950,7 @@ label {
 
 .history-storage {
     justify-content: space-between;
+    flex-wrap: wrap;
     min-height: 42px;
     margin-bottom: 14px;
     padding: 10px 12px;
@@ -957,6 +958,7 @@ label {
     background: #fff3f7;
     color: #6d4c57;
     font-size: 0.9rem;
+    line-height: 1.45;
 }
 
 .history-grid {
@@ -1041,21 +1043,6 @@ label {
     font-size: 0.82rem;
 }
 
-.history-progress-track {
-    overflow: hidden;
-    height: 6px;
-    margin: 4px 0 9px;
-    border-radius: 999px;
-    background: #f1d7e0;
-}
-
-.history-progress-value {
-    display: block;
-    width: var(--history-progress, 0%);
-    height: 100%;
-    background: var(--md-primary);
-}
-
 .history-card-actions {
     flex-wrap: wrap;
     gap: 6px;
@@ -1063,13 +1050,10 @@ label {
 }
 
 .history-card-actions button {
+    flex: 1 1 calc(50% - 3px);
     min-width: 0;
     padding: 8px 10px;
     font-size: 0.82rem;
-}
-
-.history-card-actions .history-open {
-    flex: 1 0 100%;
 }
 
 .history-card-actions .history-delete {
@@ -1272,8 +1256,15 @@ label {
         backdrop-filter: blur(10px);
     }
 
-    .comic-actions #encryptComicButton {
+    .comic-actions #encryptComicButton,
+    .comic-actions #downloadComicArchive {
         min-height: 48px;
+    }
+
+    .comic-actions #downloadComicArchive {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
 
     .comic-actions #clearComicFilesButton {

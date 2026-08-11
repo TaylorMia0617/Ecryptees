@@ -157,7 +157,7 @@ test('static entry point references ordered external files without inline handle
     assert.doesNotMatch(index, /<script(?![^>]*\bsrc=)/);
     assert.doesNotMatch(index, /onclick\s*=/);
     assert.match(index, /<dialog[\s\S]*id="comicReaderDialog"/);
-    assert.match(index, /id="comicReaderHint">整本 PNG 长图保存在书架应用数据中，不会自动下载到设备/);
+    assert.match(index, /id="comicReaderHint">书架保存原始页面和封面；长图仅在导出时生成/);
     assert.match(index, /最多 80 张 · 500 MiB · 原图无损封装/);
     assert.doesNotMatch(index, /id="exportComicLongImageButton"/);
     assert.doesNotMatch(index, /id="downloadComicLongImage"/);
@@ -171,6 +171,8 @@ test('static entry point references ordered external files without inline handle
     assert.match(index, /id="migrateHistoryButton"/);
     assert.match(index, /id="openComicButton"[^>]*>解密、转存并阅读</);
     assert.match(index, /id="encryptComicButton"[^>]*>加密并加入书架</);
+    assert.match(index, /class="button-group comic-actions"[\s\S]*id="downloadComicArchive"/);
+    assert.doesNotMatch(index, /id="comicArchiveDownloadRow"/);
     assert.doesNotMatch(index, /id="exportComicZipButton"/);
     assert.doesNotMatch(index, /id="comicReaderSection"/);
     assert.match(comicWorker, /new self\.CompressionStream\('deflate'\)/);
@@ -185,18 +187,32 @@ test('static entry point references ordered external files without inline handle
     assert.match(comicWorker, /name: `\$\{baseName\}-long\.png`/);
     assert.doesNotMatch(comicWorker, /-long\.svg/);
     const comicApp = fs.readFileSync(path.join(repositoryRoot, 'js', 'comic-app.js'), 'utf8');
-    assert.match(comicApp, /saveLongImageToShelf\(\)/);
-    assert.match(comicApp, /createHistoryButton\('导出长图', 'export'/);
+    assert.match(comicApp, /saveCurrentSessionToHistory\(\)/);
+    assert.match(comicApp, /startJob\('historySave'/);
+    assert.match(comicApp, /function createHistoryRenameButton\(book\)/);
+    assert.match(comicApp, /createHistoryButton\('阅读', 'open'/);
+    assert.match(comicApp, /createHistoryButton\('导出 \.ecomic', 'exportArchive'/);
+    assert.match(comicApp, /createHistoryButton\('导出长图', 'exportLong'/);
+    assert.match(comicApp, /createHistoryButton\('删除', 'delete'/);
+    assert.doesNotMatch(comicApp, /createHistoryButton\('从头阅读'|history-progress-track|history-more/);
+    assert.match(comicApp, /startJob\('historyExportArchive'/);
     assert.match(comicApp, /historyLongImageReady/);
+    assert.match(comicApp, /historyArchiveReady/);
+    assert.match(comicApp, /已使用 \$\{used\} · 剩余 \$\{remaining\}/);
+    assert.match(comicApp, /downloadLongImageFile\(message\.file, message\.name, message\.opfsName, message\.storageKind\)/);
     assert.match(comicApp, /function getComicParallelism\(\)/);
     assert.match(comicApp, /READER_HEADER_STORAGE_KEY/);
     assert.match(comicApp, /setReaderHeaderCollapsed\(readReaderHeaderPreference\(\), false, false\)/);
     assert.match(comicApp, /header\.inert = readerHeaderCollapsed/);
     assert.doesNotMatch(comicApp, /downloadComicLongImage|autoDownloadLongImage/);
-    assert.match(comicWorker, /opfsName: saveHistory \? '' : entryName/);
-    assert.match(comicWorker, /generatedAt: now,\s*entryName/);
+    assert.match(comicWorker, /opfsName: entryName/);
+    assert.match(comicWorker, /post\(payload\.resultType === 'historyExport' \? 'historyLongImageReady' : 'complete'/);
+    assert.match(comicWorker, /size: 0,\s*generatedAt: 0,\s*entryName: ''/);
     assert.match(comicApp, /historyAction === 'rename'/);
     assert.match(comicApp, /showDirectoryPicker/);
+    assert.match(comicApp, /EcrypteesAndroid\\\//);
+    assert.match(comicApp, /historyDirectoryPanel'\)\.hidden = true/);
+    assert.match(comicApp, /startWorker\('', true\)/);
     assert.match(comicApp, /ecryptees-directory-v1/);
     assert.match(comicApp, /getFileHandle\('archive\.ecomic'/);
     assert.match(comicApp, /writeDirectoryFile\(folder, 'metadata\.json'/);
@@ -251,6 +267,7 @@ test('Android wrapper loads local HTTPS assets and streams downloads through SAF
     );
     const bridge = fs.readFileSync(path.join(repositoryRoot, 'js', 'android-bridge.js'), 'utf8');
     const appBuild = fs.readFileSync(path.join(repositoryRoot, 'android-app', 'app', 'build.gradle'), 'utf8');
+    const buildScript = fs.readFileSync(path.join(repositoryRoot, 'android-app', 'build-apk.ps1'), 'utf8');
 
     assert.doesNotMatch(manifest, /android\.permission\.INTERNET/);
     assert.match(manifest, /android:allowBackup="false"/);
@@ -274,10 +291,16 @@ test('Android wrapper loads local HTTPS assets and streams downloads through SAF
     assert.match(bridge, /bridge\.commitHeicDecode\(token, maxDimension\)/);
     assert.match(bridge, /bridge\.getHeicDecodeStatus\(token\)/);
     assert.match(bridge, /activeMediaTasks < 2/);
+    assert.match(bridge, /ecryptees-download-result/);
+    assert.match(bridge, /emitDownloadResult\('success'/);
+    assert.match(bridge, /emitDownloadResult\('cancelled'/);
+    assert.match(bridge, /emitDownloadResult\('failed'/);
     assert.doesNotMatch(bridge, /mediaQueue|queueMediaTask|finishHeicDecode/);
     assert.doesNotMatch(bridge, /await response\.arrayBuffer\(\)|await response\.blob\(\)/);
     assert.match(appBuild, /include 'js\/\*\*'/);
     assert.match(appBuild, /androidx\.webkit:webkit:1\.16\.0/);
+    assert.match(buildScript, /apksigner\.bat/);
+    assert.match(buildScript, /91306e7c15932646a58ffbd3443f541be57401f1f64106d8dcd0e97fbc5687e8/);
 });
 
 test('JPG and JPEG remain selectable in browsers and Android document providers', () => {
@@ -306,9 +329,9 @@ test('JPG and JPEG remain selectable in browsers and Android document providers'
 
     assert.match(activity, /params\.getAcceptTypes\(\)/);
     assert.match(activity, /createImageDocumentIntent\(params\)/);
-    assert.match(appBuild, /versionCode 6/);
-    assert.match(appBuild, /versionName '1\.0\.5'/);
-    assert.match(serviceWorker, /const CACHE_NAME = 'ecryptees-app-v5'/);
+    assert.match(appBuild, /versionCode 8/);
+    assert.match(appBuild, /versionName '1\.0\.7'/);
+    assert.match(serviceWorker, /const CACHE_NAME = 'ecryptees-app-v7'/);
 });
 
 test('Android comic picker returns every readable document without trusting provider MIME metadata', () => {
@@ -324,6 +347,6 @@ test('Android comic picker returns every readable document without trusting prov
     assert.match(activity, /data\.getClipData\(\)/);
     assert.match(activity, /getContentResolver\(\)\.openFileDescriptor\(uri, "r"\)/);
     assert.match(activity, /parseImageDocumentResult\(resultCode, data\)/);
-    assert.match(appBuild, /versionCode 6/);
-    assert.match(appBuild, /versionName '1\.0\.5'/);
+    assert.match(appBuild, /versionCode 8/);
+    assert.match(appBuild, /versionName '1\.0\.7'/);
 });

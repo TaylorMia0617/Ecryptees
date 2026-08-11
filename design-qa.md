@@ -265,6 +265,22 @@ No actionable build, lint, packaging, signing, or chunk-transfer issue remains. 
 
 final result: passed with device coverage gap
 
+## APK 1.0.6 private-shelf export and update verification
+
+- Date: 2026-08-11. The Android shelf keeps original pages, the generated long PNG, cover, metadata, and reading progress; it does not persist a `.ecomic` archive. The new shelf export action reads the stored pages in record order and reuses the existing bounded, chunked `.ecomic` v1 encryption pipeline.
+- The create flow now replaces `加密并加入书架` with `下载「漫画名」.ecomic` only after the shelf commit completes. A completed archive remains available if the later shelf write fails, and selecting or changing source images resets the action for the next job.
+- Android hides directory selection, connection state, and migration controls, and explains that private shelf data survives an in-place update but not uninstall or clearing app data. Desktop browsers retain the connected-directory workflow and its `archive.ecomic` protocol.
+- Cold startup removes abandoned temporary and staging entries plus unreferenced history files without deleting valid shelf records. Storage details separately report original pages, long images, covers, temporary files, and total application usage. Native download success, cancellation, and failure release only the matching temporary output.
+- Headless desktop and Android-user-agent smoke runs verified the runtime-specific directory UI and private-shelf wording. Node regressions passed 26/26; JavaScript syntax checks and `git diff --check` passed.
+- Gradle `assembleRelease` and `lintRelease` passed. `aapt2` confirmed `com.ecryptees.offline`, version 1.0.6 (code 7), minSdk 26, targetSdk 36, and no `INTERNET` permission. `apksigner` verified certificate SHA-256 `91306e7c15932646a58ffbd3443f541be57401f1f64106d8dcd0e97fbc5687e8`.
+- Final APK: `dist/Ecryptees.apk`, 3,398,331 bytes; SHA-256 `C5E4A1112C36AB6DE5187AC455E6AD60A8EBC1C1153AAEADE7E38C598CBE10DF`.
+
+**Findings**
+
+No actionable archive-format, storage-cleanup, browser compatibility, build, lint, permission, or signing issue remains. No Android device was connected, so the 1.0.5-to-1.0.6 in-place installation and system save-picker success/cancellation/failure paths remain physical-device acceptance items.
+
+final result: passed with device coverage gap
+
 ## Mobile comic import UI verification
 
 - Date: 2026-08-10. The 390 x 844 layout now uses a compact import area, places the archive title before the page list, and lets the document scroll naturally instead of trapping the list in a short inner scroller.
@@ -321,5 +337,22 @@ final result: passed
 **Findings**
 
 No actionable browser, archive-ordering, storage-commit, build, lint, or signing issue remains. A physical Android device was not connected, so simultaneous native HEIC decoding, cancellation during native decode, and a real near-500 MiB phone memory run remain device-level acceptance items.
+
+final result: passed with device coverage gap
+
+## APK 1.0.7 compact shelf and on-demand long-image verification
+
+- Date: 2026-08-11. Shelf commits now write generation-specific original pages and a JPEG cover, then commit the unchanged schema-v1 record only after every file succeeds. Long PNG generation is no longer part of a create or import commit.
+- The shelf card restores the title edit icon and exposes exactly four direct buttons: `阅读`, `导出 .ecomic`, `导出长图`, and `删除`. Visible progress and restart controls are removed while saved reading position remains active.
+- Long-image export streams page strips into a temporary PNG from private original pages or a directory-only `archive.ecomic`. Existing external `long.png` files remain directly exportable; new private or directory books do not automatically persist a long PNG.
+- Aggressive cold-start cleanup clears legacy private PNG references before removing the old files. Original pages, covers, titles, timestamps, and reading progress remain intact, and unreferenced files are still removed by the orphan pass.
+- Storage UI now renders only `已使用` and `剩余`. Desktop and Android-user-agent HTTP Chrome smoke runs passed; the Android runtime hid directory controls and retained the in-place-update explanation.
+- Node regressions passed 26/26, JavaScript syntax checks and `git diff --check` passed, and the packaged APK was confirmed to contain the new `historySave`/`historySaved` worker flow.
+- Gradle `assembleRelease` and `lintRelease` passed. `aapt2` confirmed `com.ecryptees.offline`, version 1.0.7 (code 8), minSdk 26, targetSdk 36, and no `INTERNET` permission. `apksigner` verified certificate SHA-256 `91306e7c15932646a58ffbd3443f541be57401f1f64106d8dcd0e97fbc5687e8`.
+- Final APK: `dist/Ecryptees.apk`, 3,397,703 bytes; SHA-256 `1C351A96F6713185DFD43713E8E48B8BE9D2BDC141D7B7CC147BCEEF3310394B`.
+
+**Findings**
+
+No actionable shelf-commit, temporary-output, UI, browser-runtime, build, lint, permission, or signing issue remains. No physical Android device was connected, so 1.0.5/1.0.6 in-place installation, legacy-PNG space reclamation on device, and native save-picker cancellation remain physical-device acceptance items.
 
 final result: passed with device coverage gap
