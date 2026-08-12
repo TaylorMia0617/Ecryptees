@@ -18,17 +18,17 @@ Keep processing local. Do not add remote assets, analytics, frameworks, or unnec
 - `node --test tests/*.test.js` runs format and static integration tests.
 - `node --check js/comic-app.js` validates a changed script; repeat for each changed JavaScript file.
 - `python -m http.server 8000` serves the browser/PWA build locally.
-- `powershell -ExecutionPolicy Bypass -File .\android-app\build-apk.ps1` builds, lints, and signs the APK using the D-drive toolchain, then writes `dist/Ecryptees.apk`.
+- `powershell -ExecutionPolicy Bypass -File .\android-app\build-apk.ps1` builds, lints, and signs the APK using the D-drive toolchain, then writes a versioned `dist/Ecryptees-v<version>.apk` plus `dist/Ecryptees.apk`.
 - `git diff --check` finds whitespace errors and conflict markers.
 
 ## Coding Style & Boundaries
 
 Use four-space indentation, `camelCase` for functions/DOM IDs, `UPPER_SNAKE_CASE` for constants, and kebab-case CSS classes. Prefer `const`, accessible labels, visible focus, and `addEventListener`.
 
-Core files must not access the DOM. Controllers own UI state and Blob URL cleanup. Comic parallelism is capped at two lanes on mobile and four on desktop; encrypted chunks must still be written by counter order. Write shelf pages directly to a generation-specific final key and commit metadata only after every page succeeds. Long PNG generation must persist to shelf application data and must never start a download automatically; only the explicit shelf “导出长图” action may download it. Preserve classic-script order and never change the text codebook, image v1–v3 payloads, or `.ecomic` v1 unintentionally. Android transfers must remain chunked.
+Core files must not access the DOM. Controllers own UI state and Blob URL cleanup. Comic parallelism is capped at two lanes on mobile and four on desktop; encrypted chunks must still be written by counter order. Write shelf pages directly to a generation-specific final key and commit metadata only after every page succeeds. Long PNG generation is an explicit, temporary export from stored original pages and must never become a persistent shelf entry or automatic download. Preserve classic-script order and never change the text codebook, image v1–v3 payloads, or `.ecomic` v1 unintentionally. Android transfers must remain chunked.
 
 ## Storage, Testing, and Submission
 
-Browser storage is rebuildable. The internal shelf stores original pages, cover, metadata, and the generated long PNG; deleting a book must remove all four. A connected shelf directory stores `books/<32-char-id>/archive.ecomic` plus optional PNG, cover, and metadata. APK private storage survives cache cleanup but not uninstall or “clear data”; explicitly exported documents remain external. Never enable Android cloud backup or `INTERNET` without explicit review.
+Browser storage is rebuildable. The internal shelf stores original pages, cover, metadata, and reading progress; lightweight folder assignments use a separate local database. It does not persist `.ecomic` archives or generated long PNGs. A connected shelf directory stores `books/<32-char-id>/archive.ecomic` plus optional historical PNG, cover, and metadata. APK private storage survives cache cleanup and in-place updates but not uninstall or “clear data”; explicitly exported documents remain external. Never enable Android cloud backup or add network behavior to the offline wrapper without explicit review; future channel work must preserve a verifiable zero-network offline build.
 
 Cover byte-exact round trips, parallelism 1/2/4 ordering, reader collapse persistence, HEIC/HEIF token bridging, authentication failures, 80-page/500 MiB boundaries, PWA metadata, permissions, lint, APK signing, and chunked export. Recent commits use short Chinese summaries without prefixes. Pull requests should describe format, privacy, storage, and compatibility effects and list all verification performed.

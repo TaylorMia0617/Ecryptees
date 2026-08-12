@@ -405,3 +405,19 @@ final result: passed with device coverage gap
 No actionable archive-validation, storage-compatibility, static UI, build, lint, permission, signing, or packaging issue remains. Broad wildcard registration intentionally makes Ecryptees visible for unrelated single files; those files are rejected after selection. No physical Android device was connected, so QQ and Xiaomi intent behavior remains device-level acceptance coverage.
 
 final result: passed with device coverage gap
+
+## APK 1.0.11 user-triggered webpage import verification
+
+- Date: 2026-08-12. The former top tabs now live in a focus-managed slide-out drawer. Text, image, local comic, shelf, reader, folder, export, and `.ecomic` handoff identifiers and storage formats remain unchanged.
+- Comic creation keeps the existing local-image path and adds an explicit “网页链接” source. No request occurs until the user presses “分析网页”. Static HTML is parsed without executing target scripts; all `<img>` elements are considered in DOM order using lazy-source attributes, the largest `srcset` candidate, and finally `src`.
+- Candidates are limited to HTTPS, capped at 500, displayed without remote thumbnails, deduplicated without reordering, and can be selected, removed, dragged, or moved before download. The completed batch is appended to the existing comic array only after every selected image passes byte-signature validation; a partial failure leaves the comic unchanged and supports retry.
+- Android declares only `INTERNET` in addition to its existing internal generated permission and still has no broad storage permission. Its tokenized network bridge follows at most five validated HTTPS redirects, uses system TLS, omits cookies and authorization state, streams HTML/images through native cache files, caps HTML at 5 MiB, and runs at most two requests concurrently.
+- Node regressions passed 29/29, including lazy sources, `srcset`, relative/protocol-relative URLs, duplicate handling, candidate limits, archive authentication, exact page bytes, and parallel ordering. JavaScript syntax checks and `git diff --check` passed.
+- Gradle `clean assembleRelease lintRelease` passed. `aapt2` confirmed `com.ecryptees.offline`, version 1.0.11 (code 12), minSdk 26, targetSdk 36, and `android.permission.INTERNET`. `apksigner` verified certificate SHA-256 `91306e7c15932646a58ffbd3443f541be57401f1f64106d8dcd0e97fbc5687e8`.
+- Final APK: `dist/Ecryptees-v1.0.11.apk`, 3,421,225 bytes; SHA-256 `4DE42251CE7DC9262911B91DAD70B4B6B5844979DAC31BCE2C92542A05213349`.
+
+**Findings**
+
+No actionable archive-format, database, static UI, network-boundary, build, lint, storage-permission, signing, or packaging issue remains. The optional browser QA helper was unavailable in this Windows environment, and no physical Android device was connected, so drawer touch behavior, OEM WebView networking, site-specific anti-hotlink behavior, and in-place installation remain device-level acceptance coverage.
+
+final result: passed with device coverage gap

@@ -4,13 +4,15 @@
     const core = root.Ecryptees && root.Ecryptees.core;
     const comic = root.Ecryptees && root.Ecryptees.comic;
     const historyCore = root.Ecryptees && root.Ecryptees.history;
-    if (!core || !comic || !historyCore) {
-        throw new Error('Ecryptees core, comic core, and history core must load before the comic controller.');
+    const webImportCore = root.Ecryptees && root.Ecryptees.webImport;
+    if (!core || !comic || !historyCore || !webImportCore) {
+        throw new Error('Ecryptees core modules must load before the comic controller.');
     }
 
     const { format } = comic;
     const { formatBytes, sanitizeDownloadName } = core.utils;
     const androidMedia = root.EcrypteesAndroidMedia;
+    const androidNetwork = root.AndroidNetworkBridge;
     const comicFilesInput = document.getElementById('comicFiles');
     const archiveInput = document.getElementById('comicArchiveFile');
     const fileList = document.getElementById('comicFileList');
@@ -76,6 +78,14 @@
     let readerRestoreProgress = null;
     let readerMemoryBytes = 0;
     let recoveringWorker = false;
+    let webImportCandidates = [];
+    let webImportFinalUrl = '';
+    let webImportRenderedToken = '';
+    let webImportAbortController = null;
+    let webImportDragId = '';
+    let webImportSessionId = '';
+    let savedComicBookId = '';
+    const activeRemoteFetchTokens = new Set();
     const historyCoverUrls = new Map();
     const directoryMetadataTasks = new Map();
     const pageJobs = new Map();
@@ -122,13 +132,25 @@
         comicFilesInput.disabled = busy || !runtimeSupported;
         archiveInput.disabled = busy || !runtimeSupported;
         document.getElementById('comicArchiveName').disabled = busy || !runtimeSupported;
+        document.getElementById('localComicSourceButton').disabled = busy;
+        document.getElementById('webComicSourceButton').disabled = busy;
+        document.getElementById('webImportUrl').disabled = busy;
+        document.getElementById('clearWebImportUrlButton').disabled = false;
+        document.getElementById('analyzeWebImportButton').disabled = busy || !runtimeSupported;
+        document.getElementById('webImportSelectAllButton').disabled = busy;
+        document.getElementById('clearWebImportButton').disabled = busy;
+        document.getElementById('downloadWebImportButton').disabled = busy
+            || !runtimeSupported
+            || !webImportCandidates.some(candidate => candidate.selected && !candidate.duplicate);
         const encryptButton = document.getElementById('encryptComicButton');
         encryptButton.disabled = busy || !runtimeSupported || items.length === 0;
-        encryptButton.textContent = type === 'encrypt' ? '正在加密并加入书架…' : '加密并加入书架';
+        encryptButton.textContent = type === 'encrypt' ? '正在加密并加入资产…' : '加密并加入资产';
         document.getElementById('clearComicFilesButton').disabled = busy || items.length === 0;
         document.getElementById('openComicButton').disabled = busy || !runtimeSupported || !selectedArchive;
         document.getElementById('cancelComicButton').hidden = !busy;
-        document.getElementById('clearHistoryButton').disabled = busy || historyBooks.length === 0;
+        if (!root.EcrypteesImageAssetsUI?.isActive()) {
+            document.getElementById('clearHistoryButton').disabled = busy || historyBooks.length === 0;
+        }
         document.getElementById('historySearch').disabled = busy;
         document.getElementById('historySort').disabled = busy;
         document.getElementById('historyGroupFilterSelect').disabled = busy;
@@ -193,7 +215,9 @@
         link.hidden = true;
         const encryptButton = document.getElementById('encryptComicButton');
         encryptButton.hidden = false;
-        encryptButton.textContent = '加密并加入书架';
+        encryptButton.textContent = '加密并加入资产';
+        savedComicBookId = '';
+        document.getElementById('viewSavedComicButton').hidden = true;
     }
 
     function prepareArchiveDownload(message) {
@@ -212,6 +236,13 @@
         }
         document.getElementById('encryptComicButton').hidden = true;
         document.getElementById('downloadComicArchive').hidden = false;
+    }
+
+    function revealSavedComic(bookId) {
+        savedComicBookId = String(bookId || '');
+        document.getElementById('encryptComicButton').hidden = true;
+        document.getElementById('downloadComicArchive').hidden = true;
+        document.getElementById('viewSavedComicButton').hidden = !savedComicBookId;
     }
 
     function scheduleOutputRelease(kind, resetCreateAction = false) {
@@ -250,7 +281,7 @@
     function requestToPromise(request) {
         return new Promise((resolve, reject) => {
             request.onsuccess = () => resolve(request.result);
-            request.onerror = () => reject(request.error || new Error('独立书架设置读取失败'));
+            request.onerror = () => reject(request.error || new Error('独立漫画目录设置读取失败'));
         });
     }
 
@@ -404,8 +435,8 @@
             transaction.objectStore(DIRECTORY_HANDLE_STORE).put(handle, DIRECTORY_HANDLE_KEY);
             await new Promise((resolve, reject) => {
                 transaction.oncomplete = resolve;
-                transaction.onerror = () => reject(transaction.error || new Error('无法保存书架目录授权'));
-                transaction.onabort = () => reject(transaction.error || new Error('书架目录授权保存已取消'));
+                transaction.onerror = () => reject(transaction.error || new Error('无法保存漫画目录授权'));
+                transaction.onabort = () => reject(transaction.error || new Error('漫画目录授权保存已取消'));
             });
         } finally {
             database.close();
@@ -571,7 +602,7 @@
             try {
                 await folder.getFileHandle('archive.ecomic');
             } catch (error) {
-                throw new Error('独立书架缺少可保存的 .ecomic 归档');
+                throw new Error('独立漫画目录缺少可保存的 .ecomic 归档');
             }
         }
         if (longFile) {
@@ -626,16 +657,16 @@
             const handle = await root.showDirectoryPicker({ id: 'ecryptees-library', mode: 'readwrite' });
             const permission = await handle.requestPermission({ mode: 'readwrite' });
             if (permission !== 'granted') {
-                throw new Error('未获得书架目录读写权限');
+                throw new Error('未获得漫画目录读写权限');
             }
             libraryDirectoryHandle = handle;
             directoryPermissionGranted = true;
             await rememberDirectoryHandle(handle);
             await scanLibraryDirectory();
-            setHistoryStatus('独立书架目录已连接。以后生成的漫画会自动写入该目录。', 'success');
+            setHistoryStatus('独立漫画目录已连接。以后生成的漫画会自动写入该目录。', 'success');
         } catch (error) {
             if (error?.name !== 'AbortError') {
-                setDirectorySummary(error.message || '无法连接独立书架目录', 'error');
+                setDirectorySummary(error.message || '无法连接独立漫画目录', 'error');
             }
         }
         setBusy(activeJobType);
@@ -643,7 +674,7 @@
 
     async function restoreLibraryDirectory() {
         if (!directoryPickerSupported) {
-            setDirectorySummary('当前浏览器不支持直接写入普通目录；继续使用浏览器书架和文件下载。', 'error');
+            setDirectorySummary('当前浏览器不支持直接写入普通目录；继续使用浏览器资产和文件下载。', 'error');
             return;
         }
         try {
@@ -657,10 +688,10 @@
             if (directoryPermissionGranted) {
                 await scanLibraryDirectory();
             } else {
-                setDirectorySummary(`需要重新授权“${handle.name}”，请点击“选择书架目录”`, 'info');
+                setDirectorySummary(`需要重新授权“${handle.name}”，请点击“选择漫画目录”`, 'info');
             }
         } catch (error) {
-            setDirectorySummary('原书架目录已不可用，请重新选择。', 'error');
+            setDirectorySummary('原漫画目录已不可用，请重新选择。', 'error');
         }
         setBusy(activeJobType);
     }
@@ -766,13 +797,15 @@
             select.append(option);
         }
         select.value = selectedHistoryGroup;
-        const sortSelect = document.getElementById('historySort');
-        const sortName = sortSelect.selectedOptions[0]?.textContent || '最近阅读';
         const groupName = definitions.find(group => group.groupId === selectedHistoryGroup)?.name || '全部';
-        document.getElementById('historyViewSummary').textContent = `${sortName} · ${groupName}`;
+        document.getElementById('historyViewSummary').textContent = groupName === '全部' ? '全部文件夹' : groupName;
     }
 
     function renderHistory() {
+        if (root.EcrypteesImageAssetsUI?.isActive()) {
+            root.EcrypteesImageAssetsUI.render();
+            return;
+        }
         retireHistoryCovers();
         const query = document.getElementById('historySearch').value.trim().toLocaleLowerCase();
         const sort = document.getElementById('historySort').value;
@@ -800,6 +833,9 @@
         historyGrid.replaceChildren();
         renderHistoryViewMenu();
         document.getElementById('historyEmptyState').hidden = historyBooks.length !== 0;
+        document.getElementById('historyEmptyTitle').textContent = '漫画资产还是空的';
+        document.getElementById('historyEmptyDescription').textContent = '加密或解密 `.ecomic` 后会自动加入漫画资产。';
+        document.getElementById('historyGoToComicButton').textContent = '前往漫画模式';
         for (const book of books) {
             const card = document.createElement('article');
             card.className = 'history-card';
@@ -913,7 +949,7 @@
             migrationCurrentBook = null;
             activeJobId = '';
             setBusy('');
-            setHistoryStatus('当前浏览器书架已迁移到独立目录。', 'success');
+            setHistoryStatus('当前浏览器漫画资产已迁移到独立目录。', 'success');
             scanLibraryDirectory().catch(error => setDirectorySummary(error.message, 'error'));
             return;
         }
@@ -932,11 +968,961 @@
         const saved = new Set(directoryBooks.map(book => book.bookId));
         migrationQueue = browserHistoryBooks.filter(book => !saved.has(book.bookId));
         if (!migrationQueue.length) {
-            setHistoryStatus('浏览器书架中的漫画已经全部存在于独立目录。', 'success');
+            setHistoryStatus('浏览器资产中的漫画已经全部存在于独立目录。', 'success');
             return;
         }
         setHistoryStatus(`准备迁移 ${migrationQueue.length} 本漫画。迁移期间请保持页面打开。`);
         startNextMigration();
+    }
+
+    function waitForRemoteStatus() {
+        return new Promise(resolve => root.setTimeout(resolve, 60));
+    }
+
+    function decodeBase64Chunk(value) {
+        const binary = root.atob(value);
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index++) {
+            bytes[index] = binary.charCodeAt(index);
+        }
+        return bytes;
+    }
+
+    function concatByteChunks(chunks, size) {
+        const output = new Uint8Array(size);
+        let offset = 0;
+        for (const chunk of chunks) {
+            output.set(chunk, offset);
+            offset += chunk.length;
+        }
+        return output;
+    }
+
+    function decodeHtmlBytes(bytes, contentType) {
+        const charset = /charset\s*=\s*["']?([^;"'\s]+)/i.exec(contentType || '')?.[1] || 'utf-8';
+        try {
+            return new TextDecoder(charset).decode(bytes);
+        } catch (error) {
+            return new TextDecoder('utf-8').decode(bytes);
+        }
+    }
+
+    async function awaitNativeRemoteFetch(token, signal) {
+        activeRemoteFetchTokens.add(token);
+        const cancel = () => {
+            try {
+                androidNetwork.cancelRemoteFetch(token);
+            } catch (error) {
+                // The task may already have finished.
+            }
+        };
+        signal?.addEventListener('abort', cancel, { once: true });
+        try {
+            while (true) {
+                if (signal?.aborted) {
+                    throw new DOMException('操作已取消', 'AbortError');
+                }
+                const info = JSON.parse(androidNetwork.getRemoteFetchStatus(token) || '{}');
+                if (info.state === 'ready') {
+                    return info;
+                }
+                if (info.state === 'error' || info.state === 'cancelled' || !info.state) {
+                    throw new Error(info.error || '网络请求失败');
+                }
+                await waitForRemoteStatus();
+            }
+        } finally {
+            signal?.removeEventListener('abort', cancel);
+        }
+    }
+
+    function releaseNativeRemoteFetch(token) {
+        activeRemoteFetchTokens.delete(token);
+        try {
+            androidNetwork.releaseRemoteFetch(token);
+        } catch (error) {
+            // Native cold-start cleanup is the fallback.
+        }
+    }
+
+    function releaseRenderedPageCapture() {
+        if (!webImportRenderedToken || typeof androidNetwork?.releaseRenderedPageCapture !== 'function') {
+            webImportRenderedToken = '';
+            return;
+        }
+        try {
+            androidNetwork.releaseRenderedPageCapture(webImportRenderedToken);
+        } catch (error) {
+            // Native Activity cleanup is the final fallback.
+        }
+        webImportRenderedToken = '';
+    }
+
+    async function captureRenderedPage(url, maximum, signal) {
+        if (!isAndroidRuntime || typeof androidNetwork?.beginRenderedPageCapture !== 'function') {
+            throw new Error('网页依赖脚本生成图片；请使用支持动态网页分析的 Android APK');
+        }
+        const token = androidNetwork.beginRenderedPageCapture(url, maximum);
+        if (!token) {
+            throw new Error('无法启动动态网页分析');
+        }
+        webImportRenderedToken = token;
+        const cancel = () => {
+            try {
+                androidNetwork.releaseRenderedPageCapture(token);
+            } catch (error) {
+                // Native cleanup also runs when the Activity closes.
+            }
+        };
+        signal.addEventListener('abort', cancel, { once: true });
+        try {
+            while (true) {
+                if (signal.aborted) {
+                    throw new DOMException('操作已取消', 'AbortError');
+                }
+                const status = JSON.parse(androidNetwork.getRenderedPageCaptureStatus(token) || '{}');
+                if (status.state === 'ready') {
+                    return status;
+                }
+                if (status.state === 'error' || status.state === 'cancelled') {
+                    throw new Error(status.error || '动态网页分析失败');
+                }
+                await new Promise(resolve => root.setTimeout(resolve, 350));
+            }
+        } catch (error) {
+            releaseRenderedPageCapture();
+            throw error;
+        } finally {
+            signal.removeEventListener('abort', cancel);
+        }
+    }
+
+    async function fetchHtmlForImport(url, signal) {
+        const maximumBytes = 5 * 1024 * 1024;
+        if (isAndroidRuntime) {
+            if (!androidNetwork) {
+                throw new Error('当前 APK 缺少网页导入网络桥，请安装 1.0.11 或更高版本');
+            }
+            const token = androidNetwork.beginRemoteFetch(url, 'html', '');
+            if (!token) {
+                throw new Error('无法启动网页请求');
+            }
+            try {
+                const info = await awaitNativeRemoteFetch(token, signal);
+                const chunks = [];
+                let size = 0;
+                while (true) {
+                    const encoded = androidNetwork.readRemoteFetchChunk(token, 768 * 1024);
+                    if (!encoded) {
+                        break;
+                    }
+                    const chunk = decodeBase64Chunk(encoded);
+                    size += chunk.length;
+                    if (size > maximumBytes) {
+                        throw new Error('网页 HTML 不能超过 5 MiB');
+                    }
+                    chunks.push(chunk);
+                }
+                return {
+                    html: decodeHtmlBytes(concatByteChunks(chunks, size), info.contentType),
+                    finalUrl: info.finalUrl || url
+                };
+            } finally {
+                releaseNativeRemoteFetch(token);
+            }
+        }
+
+        let response;
+        try {
+            response = await root.fetch(url, {
+                cache: 'no-store',
+                credentials: 'omit',
+                mode: 'cors',
+                redirect: 'follow',
+                signal,
+                headers: { Accept: 'text/html,application/xhtml+xml' }
+            });
+        } catch (error) {
+            if (error.name === 'AbortError') {
+                throw error;
+            }
+            throw new Error('浏览器受跨域限制，无法读取该网页；请改用 Android APK');
+        }
+        if (!response.ok) {
+            throw new Error(`网页请求失败：HTTP ${response.status}`);
+        }
+        if (!webImportCore.normalizeHttpsUrl(response.url, response.url)) {
+            throw new Error('网页重定向到了非 HTTPS 地址');
+        }
+        const reader = response.body?.getReader();
+        if (!reader) {
+            throw new Error('当前浏览器不支持流式读取网页');
+        }
+        const chunks = [];
+        let size = 0;
+        while (true) {
+            const result = await reader.read();
+            if (result.done) {
+                break;
+            }
+            size += result.value.length;
+            if (size > maximumBytes) {
+                await reader.cancel();
+                throw new Error('网页 HTML 不能超过 5 MiB');
+            }
+            chunks.push(result.value);
+        }
+        return {
+            html: decodeHtmlBytes(concatByteChunks(chunks, size), response.headers.get('content-type')),
+            finalUrl: response.url
+        };
+    }
+
+    function createWebTempName(index) {
+        return `ecryptees-temp-web-${Date.now().toString(36)}-${index}-${Math.random().toString(36).slice(2)}.image`;
+    }
+
+    async function removeWebTemp(entryName) {
+        if (!entryName || !root.navigator.storage?.getDirectory) {
+            return;
+        }
+        try {
+            const storageRoot = await root.navigator.storage.getDirectory();
+            await storageRoot.removeEntry(entryName);
+        } catch (error) {
+            // Worker cold-start cleanup is the fallback.
+        }
+    }
+
+    function deriveRemoteFileName(finalUrl, detected, index, usedNames) {
+        let candidate = '';
+        try {
+            candidate = decodeURIComponent(new URL(finalUrl).pathname.split('/').pop() || '');
+        } catch (error) {
+            candidate = '';
+        }
+        candidate = sanitizeDownloadName(candidate, `page-${String(index + 1).padStart(3, '0')}.${detected.extension}`);
+        if (!/\.[a-z0-9]{2,5}$/i.test(candidate)) {
+            candidate += `.${detected.extension}`;
+        }
+        const dot = candidate.lastIndexOf('.');
+        const stem = dot > 0 ? candidate.slice(0, dot) : candidate;
+        const extension = dot > 0 ? candidate.slice(dot) : `.${detected.extension}`;
+        let unique = candidate;
+        let suffix = 2;
+        while (usedNames.has(unique.toLowerCase())) {
+            unique = `${stem}-${suffix}${extension}`;
+            suffix += 1;
+        }
+        usedNames.add(unique.toLowerCase());
+        return unique;
+    }
+
+    async function streamBrowserImageToWritable(candidate, writable, signal, budget) {
+        let response;
+        try {
+            response = await root.fetch(candidate.url, {
+                cache: 'no-store',
+                credentials: 'omit',
+                mode: 'cors',
+                redirect: 'follow',
+                signal,
+                headers: { Accept: 'image/*' }
+            });
+        } catch (error) {
+            if (error.name === 'AbortError') {
+                throw error;
+            }
+            throw new Error('图片服务器不允许浏览器跨域读取，请改用 Android APK');
+        }
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        if (!webImportCore.normalizeHttpsUrl(response.url, response.url)) {
+            throw new Error('图片重定向到了非 HTTPS 地址');
+        }
+        const reader = response.body?.getReader();
+        if (!reader) {
+            throw new Error('当前浏览器不支持流式下载图片');
+        }
+        let localBytes = 0;
+        try {
+            while (true) {
+                const result = await reader.read();
+                if (result.done) {
+                    break;
+                }
+                localBytes += result.value.length;
+                budget.bytes += result.value.length;
+                if (budget.bytes > budget.limit) {
+                    await reader.cancel();
+                    throw new Error('漫画原图总体积不能超过 500 MiB');
+                }
+                await writable.write(result.value);
+            }
+            return { finalUrl: response.url, bytes: localBytes };
+        } catch (error) {
+            budget.bytes -= localBytes;
+            throw error;
+        }
+    }
+
+    async function streamNativeImageToWritable(candidate, writable, signal, budget) {
+        const token = androidNetwork.beginRemoteFetch(candidate.url, 'image', webImportFinalUrl);
+        if (!token) {
+            throw new Error('无法启动图片请求');
+        }
+        let localBytes = 0;
+        try {
+            const info = await awaitNativeRemoteFetch(token, signal);
+            while (true) {
+                const encoded = androidNetwork.readRemoteFetchChunk(token, 768 * 1024);
+                if (!encoded) {
+                    break;
+                }
+                const chunk = decodeBase64Chunk(encoded);
+                localBytes += chunk.length;
+                budget.bytes += chunk.length;
+                if (budget.bytes > budget.limit) {
+                    throw new Error('漫画原图总体积不能超过 500 MiB');
+                }
+                await writable.write(chunk);
+            }
+            return { finalUrl: info.finalUrl || candidate.url, bytes: localBytes };
+        } catch (error) {
+            budget.bytes -= localBytes;
+            throw error;
+        } finally {
+            releaseNativeRemoteFetch(token);
+        }
+    }
+
+    async function streamCapturedImageToWritable(candidate, writable, signal, budget) {
+        if (!webImportRenderedToken || typeof androidNetwork?.readRenderedPageImageChunk !== 'function') {
+            throw new Error('动态网页图片已经释放，请重新分析网页');
+        }
+        let localBytes = 0;
+        try {
+            while (true) {
+                if (signal.aborted) {
+                    throw new DOMException('操作已取消', 'AbortError');
+                }
+                const encoded = androidNetwork.readRenderedPageImageChunk(
+                    webImportRenderedToken,
+                    candidate.capturedIndex,
+                    localBytes,
+                    768 * 1024
+                );
+                if (!encoded) {
+                    break;
+                }
+                const chunk = decodeBase64Chunk(encoded);
+                localBytes += chunk.length;
+                budget.bytes += chunk.length;
+                if (budget.bytes > budget.limit) {
+                    throw new Error('漫画原图总体积不能超过 500 MiB');
+                }
+                await writable.write(chunk);
+            }
+            if (localBytes !== candidate.capturedSize) {
+                throw new Error('动态网页图片读取不完整');
+            }
+            return {
+                finalUrl: `https://capture.invalid/${encodeURIComponent(candidate.capturedName || 'page.jpg')}`,
+                bytes: localBytes
+            };
+        } catch (error) {
+            budget.bytes -= localBytes;
+            throw error;
+        }
+    }
+
+    async function canvasToImageBlob(canvas, mime) {
+        if (typeof canvas.convertToBlob === 'function') {
+            return canvas.convertToBlob({ type: mime, quality: 1 });
+        }
+        return new Promise((resolve, reject) => {
+            canvas.toBlob(blob => {
+                if (blob) {
+                    resolve(blob);
+                } else {
+                    reject(new Error('还原后的图片编码失败'));
+                }
+            }, mime, 1);
+        });
+    }
+
+    async function materializeWebImage(stored, detected, transform, signal) {
+        if (!transform || transform.kind !== '18comic-scramble') {
+            return null;
+        }
+        if (signal.aborted) {
+            throw new DOMException('操作已取消', 'AbortError');
+        }
+        let bitmap;
+        try {
+            bitmap = await root.createImageBitmap(stored, { imageOrientation: 'from-image' });
+        } catch (error) {
+            bitmap = await root.createImageBitmap(stored);
+        }
+        try {
+            const width = bitmap.width;
+            const height = bitmap.height;
+            const slices = Math.max(2, Math.min(20, Math.trunc(transform.slices)));
+            if (!width || !height || width * height > core.config.MAX_IMAGE_PIXELS) {
+                throw new Error('网页图片像素尺寸无效或超过处理限制');
+            }
+            const canvas = typeof root.OffscreenCanvas === 'function'
+                ? new root.OffscreenCanvas(width, height)
+                : Object.assign(document.createElement('canvas'), { width, height });
+            const context = canvas.getContext('2d');
+            if (!context) {
+                throw new Error('当前设备无法还原分段漫画图片');
+            }
+            const remainder = height % slices;
+            const stripHeight = Math.floor(height / slices);
+            for (let index = 0; index < slices; index += 1) {
+                let copyHeight = stripHeight;
+                let destinationY = stripHeight * index;
+                const sourceY = height - stripHeight * (index + 1) - remainder;
+                if (index === 0) {
+                    copyHeight += remainder;
+                } else {
+                    destinationY += remainder;
+                }
+                context.drawImage(
+                    bitmap,
+                    0,
+                    sourceY,
+                    width,
+                    copyHeight,
+                    0,
+                    destinationY,
+                    width,
+                    copyHeight
+                );
+            }
+            const outputMime = ['image/jpeg', 'image/png', 'image/webp'].includes(detected.mime)
+                ? detected.mime
+                : 'image/png';
+            let blob = await canvasToImageBlob(canvas, outputMime);
+            if (!blob.size && outputMime !== 'image/png') {
+                blob = await canvasToImageBlob(canvas, 'image/png');
+            }
+            if (!blob.size) {
+                throw new Error('还原后的图片为空');
+            }
+            return blob;
+        } finally {
+            bitmap.close?.();
+        }
+    }
+
+    async function downloadWebCandidate(candidate, index, signal, budget, usedNames) {
+        const storageRoot = await root.navigator.storage.getDirectory();
+        const entryName = createWebTempName(index);
+        const handle = await storageRoot.getFileHandle(entryName, { create: true });
+        let writable;
+        let completedBytes = 0;
+        try {
+            writable = await handle.createWritable();
+            const result = candidate.capturedIndex >= 0
+                ? await streamCapturedImageToWritable(candidate, writable, signal, budget)
+                : (isAndroidRuntime
+                    ? await streamNativeImageToWritable(candidate, writable, signal, budget)
+                    : await streamBrowserImageToWritable(candidate, writable, signal, budget));
+            completedBytes = result.bytes;
+            await writable.close();
+            writable = null;
+            let stored = await handle.getFile();
+            if (stored.size <= 0) {
+                throw new Error('下载结果为空');
+            }
+            let prefix = new Uint8Array(await stored.slice(0, 64).arrayBuffer());
+            let detected = core.image.sniffImageType(prefix);
+            if (!detected || !format.SUPPORTED_MIME_TYPES.includes(detected.mime)) {
+                throw new Error('下载内容不是支持的漫画图片');
+            }
+            const materialized = await materializeWebImage(stored, detected, candidate.transform, signal);
+            if (materialized) {
+                const projectedBytes = budget.bytes - stored.size + materialized.size;
+                if (projectedBytes > budget.limit) {
+                    throw new Error('还原后的漫画原图总体积不能超过 500 MiB');
+                }
+                budget.bytes = projectedBytes;
+                completedBytes = materialized.size;
+                writable = await handle.createWritable();
+                await writable.write(materialized);
+                await writable.close();
+                writable = null;
+                stored = await handle.getFile();
+                prefix = new Uint8Array(await stored.slice(0, 64).arrayBuffer());
+                detected = core.image.sniffImageType(prefix);
+                if (!detected || !format.SUPPORTED_MIME_TYPES.includes(detected.mime)) {
+                    throw new Error('还原后的内容不是支持的漫画图片');
+                }
+            }
+            const fileName = deriveRemoteFileName(result.finalUrl, detected, index, usedNames);
+            const file = new File([stored], fileName, { type: detected.mime, lastModified: Date.now() });
+            const item = await prepareComicItem(file, detected);
+            item.sourceUrl = candidate.url;
+            item.tempEntryName = entryName;
+            return item;
+        } catch (error) {
+            if (completedBytes) {
+                budget.bytes = Math.max(0, budget.bytes - completedBytes);
+            }
+            try {
+                await writable?.abort(error);
+            } catch (abortError) {
+                // Preserve the original failure.
+            }
+            await removeWebTemp(entryName);
+            throw error;
+        }
+    }
+
+    function releasePreparedCandidate(candidate) {
+        if (!candidate?.prepared) {
+            if (candidate) {
+                candidate.loading = false;
+            }
+            return;
+        }
+        revokeItem(candidate.prepared);
+        candidate.prepared = null;
+        candidate.loading = false;
+    }
+
+    function clearWebImportCandidates(message = '') {
+        webImportCandidates.forEach(releasePreparedCandidate);
+        releaseRenderedPageCapture();
+        webImportCandidates = [];
+        webImportFinalUrl = '';
+        document.getElementById('webImportList').replaceChildren();
+        document.getElementById('webImportResults').hidden = true;
+        if (message) {
+            setStatus(message);
+        }
+        setBusy(activeJobType);
+    }
+
+    function clearWebImportSession() {
+        const cancellingWebTask = activeJobType === 'webAnalyze'
+            || activeJobType === 'webPreview'
+            || activeJobType === 'webDownload';
+        if (cancellingWebTask) {
+            webImportAbortController?.abort();
+            webImportAbortController = null;
+            activeJobType = '';
+        }
+        clearWebImportCandidates();
+        const retained = [];
+        for (const item of items) {
+            if (webImportSessionId && item.webImportSessionId === webImportSessionId) {
+                revokeItem(item);
+            } else {
+                retained.push(item);
+            }
+        }
+        items = retained;
+        webImportSessionId = '';
+        document.getElementById('webImportUrl').value = '';
+        renderFileList();
+        updateSelectionSummary();
+        resetProgress();
+        setBusy('');
+        setStatus('网页链接和本次网页任务已清除；本地导入页面已保留。');
+        document.getElementById('webImportUrl').focus();
+    }
+
+    function selectedWebCandidates() {
+        return webImportCandidates.filter(candidate => candidate.selected && !candidate.duplicate);
+    }
+
+    function updateWebImportSummary() {
+        const usable = webImportCandidates.filter(candidate => !candidate.duplicate).length;
+        const duplicates = webImportCandidates.length - usable;
+        const selectedCandidates = selectedWebCandidates();
+        const selected = selectedCandidates.length;
+        const ready = selectedCandidates.filter(candidate => candidate.prepared).length;
+        document.getElementById('webImportSummary').textContent = `找到 ${usable} 张 · 已选 ${selected} · 已预览 ${ready}${duplicates ? ` · 忽略重复 ${duplicates}` : ''}`;
+        const action = document.getElementById('downloadWebImportButton');
+        action.textContent = selected === 0
+            ? '请先选择图片'
+            : (ready === selected ? '加入漫画' : '重试并加入漫画');
+        setBusy(activeJobType);
+    }
+
+    function renderWebImportCandidates() {
+        const list = document.getElementById('webImportList');
+        list.replaceChildren();
+        webImportCandidates.forEach((candidate, index) => {
+            const item = document.createElement('li');
+            item.className = 'web-import-item';
+            item.dataset.candidateId = candidate.id;
+            item.dataset.duplicate = String(candidate.duplicate);
+            item.dataset.error = String(!!candidate.error);
+            item.draggable = !candidate.duplicate && !activeJobType;
+
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.checked = candidate.selected;
+            checkbox.disabled = candidate.duplicate || !!activeJobType;
+            checkbox.setAttribute('aria-label', `选择第 ${index + 1} 个图片地址`);
+            checkbox.addEventListener('change', () => {
+                const maximum = Math.max(0, format.MAX_PAGES - items.length);
+                if (checkbox.checked && selectedWebCandidates().length >= maximum) {
+                    checkbox.checked = false;
+                    setStatus(`当前漫画最多还能加入 ${maximum} 张图片`, 'error');
+                    return;
+                }
+                candidate.selected = checkbox.checked;
+                candidate.error = '';
+                if (!candidate.selected) {
+                    releasePreparedCandidate(candidate);
+                    renderWebImportCandidates();
+                } else {
+                    renderWebImportCandidates();
+                    previewWebCandidates([candidate]);
+                }
+            });
+
+            const number = document.createElement('span');
+            number.className = 'web-import-index';
+            number.textContent = String(index + 1).padStart(2, '0');
+
+            const preview = document.createElement('span');
+            preview.className = 'web-import-preview';
+            preview.dataset.state = candidate.duplicate
+                ? 'duplicate'
+                : (candidate.loading ? 'loading' : (candidate.prepared ? 'ready' : (candidate.error ? 'error' : 'waiting')));
+            if (candidate.prepared) {
+                const image = document.createElement('img');
+                image.src = candidate.prepared.url;
+                image.alt = `第 ${index + 1} 张网页图片预览`;
+                image.loading = 'lazy';
+                image.decoding = 'async';
+                preview.append(image);
+            } else {
+                preview.setAttribute('role', 'img');
+                preview.setAttribute('aria-label', candidate.duplicate
+                    ? `第 ${index + 1} 个地址重复，未加载预览`
+                    : (candidate.error ? `第 ${index + 1} 张预览加载失败` : `第 ${index + 1} 张预览尚未完成`));
+            }
+
+            const info = document.createElement('span');
+            info.className = 'web-import-info';
+            const addressRow = document.createElement('span');
+            addressRow.className = 'web-import-address-row';
+            const address = document.createElement('span');
+            address.className = 'web-import-url';
+            address.textContent = candidate.url;
+            address.title = candidate.url;
+            const host = document.createElement('span');
+            host.className = 'web-import-host';
+            host.textContent = candidate.duplicate
+                ? `重复地址，已忽略 · ${new URL(candidate.url).host}`
+                : (candidate.prepared ? `已下载 · ${formatBytes(candidate.prepared.file.size)}` : new URL(candidate.url).host);
+            addressRow.append(number, address);
+            info.append(addressRow, host);
+            if (candidate.error) {
+                const error = document.createElement('span');
+                error.className = 'web-import-error';
+                error.textContent = candidate.error;
+                info.append(error);
+            }
+
+            const actions = document.createElement('span');
+            actions.className = 'web-import-row-actions';
+            for (const [action, label] of [['up', '↑'], ['down', '↓'], ['remove', '删除']]) {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.textContent = label;
+                button.dataset.webAction = action;
+                button.dataset.candidateId = candidate.id;
+                button.disabled = !!activeJobType
+                    || (action === 'up' && index === 0)
+                    || (action === 'down' && index === webImportCandidates.length - 1);
+                actions.append(button);
+            }
+            item.append(checkbox, preview, info, actions);
+            item.addEventListener('dragstart', event => {
+                webImportDragId = candidate.id;
+                event.dataTransfer.effectAllowed = 'move';
+            });
+            item.addEventListener('dragover', event => {
+                if (webImportDragId && webImportDragId !== candidate.id) {
+                    event.preventDefault();
+                }
+            });
+            item.addEventListener('drop', event => {
+                event.preventDefault();
+                moveWebImportCandidate(webImportDragId, index);
+            });
+            item.addEventListener('dragend', () => {
+                webImportDragId = '';
+            });
+            list.append(item);
+        });
+        document.getElementById('webImportResults').hidden = webImportCandidates.length === 0;
+        updateWebImportSummary();
+    }
+
+    function moveWebImportCandidate(id, targetIndex) {
+        if (!id || activeJobType) {
+            return;
+        }
+        const sourceIndex = webImportCandidates.findIndex(candidate => candidate.id === id);
+        if (sourceIndex < 0 || sourceIndex === targetIndex) {
+            return;
+        }
+        const [candidate] = webImportCandidates.splice(sourceIndex, 1);
+        webImportCandidates.splice(Math.max(0, Math.min(targetIndex, webImportCandidates.length)), 0, candidate);
+        renderWebImportCandidates();
+    }
+
+    async function prepareWebCandidates(candidates, signal) {
+        const selected = candidates.filter(candidate => candidate.selected && !candidate.duplicate);
+        if (!selected.length) {
+            return [];
+        }
+        const existingBytes = items.reduce((sum, item) => sum + item.file.size, 0);
+        const preparedBytes = selectedWebCandidates().reduce(
+            (sum, candidate) => sum + (candidate.prepared?.file.size || 0),
+            0
+        );
+        const budget = { bytes: preparedBytes, limit: format.MAX_TOTAL_BYTES - existingBytes };
+        if (budget.bytes > budget.limit) {
+            throw new Error('漫画原图总体积不能超过 500 MiB');
+        }
+        const usedNames = new Set([
+            ...items.map(item => item.file.name.toLowerCase()),
+            ...webImportCandidates
+                .filter(candidate => candidate.prepared)
+                .map(candidate => candidate.prepared.file.name.toLowerCase())
+        ]);
+        let nextIndex = 0;
+        let completed = selected.filter(candidate => candidate.prepared).length;
+        setProgress(completed, selected.length);
+
+        async function lane() {
+            while (true) {
+                const index = nextIndex++;
+                if (index >= selected.length || signal.aborted) {
+                    return;
+                }
+                const candidate = selected[index];
+                if (candidate.prepared) {
+                    continue;
+                }
+                candidate.error = '';
+                candidate.loading = true;
+                renderWebImportCandidates();
+                try {
+                    candidate.prepared = await downloadWebCandidate(
+                        candidate,
+                        webImportCandidates.indexOf(candidate),
+                        signal,
+                        budget,
+                        usedNames
+                    );
+                    completed += 1;
+                    setProgress(completed, selected.length);
+                } catch (error) {
+                    candidate.error = error.name === 'AbortError' ? '已取消' : (error.message || '下载失败');
+                } finally {
+                    candidate.loading = false;
+                    renderWebImportCandidates();
+                }
+            }
+        }
+
+        const laneCount = Math.min(selected.length, getComicParallelism());
+        await Promise.all(Array.from({ length: laneCount }, lane));
+        if (signal.aborted) {
+            throw new DOMException('操作已取消', 'AbortError');
+        }
+        return selected.filter(candidate => !candidate.prepared);
+    }
+
+    async function previewWebCandidates(candidates) {
+        if (activeJobType) {
+            return;
+        }
+        const selected = candidates.filter(candidate => candidate.selected && !candidate.duplicate && !candidate.prepared);
+        if (!selected.length) {
+            return;
+        }
+        webImportAbortController = new AbortController();
+        activeJobType = 'webPreview';
+        setBusy(activeJobType);
+        setStatus(`正在加载 ${selected.length} 张图片预览…`);
+        try {
+            const failures = await prepareWebCandidates(selected, webImportAbortController.signal);
+            if (failures.length) {
+                progressGroup.dataset.kind = 'error';
+                setStatus(`${failures.length} 张图片预览失败；可以重试或取消勾选。`, 'error');
+            } else {
+                setProgress(selected.length, selected.length, 'success');
+                setStatus(`已加载 ${selected.length} 张图片预览。`, 'success');
+            }
+        } catch (error) {
+            setStatus(error.name === 'AbortError' ? '网页图片预览已取消。' : (error.message || '网页图片预览失败'), error.name === 'AbortError' ? 'info' : 'error');
+        } finally {
+            activeJobType = '';
+            webImportAbortController = null;
+            setBusy('');
+            renderWebImportCandidates();
+        }
+    }
+
+    async function analyzeWebImport() {
+        if (activeJobType) {
+            return;
+        }
+        const rawUrl = document.getElementById('webImportUrl').value.trim();
+        const url = webImportCore.normalizeHttpsUrl(rawUrl, rawUrl);
+        if (!url) {
+            setStatus('请输入有效的 HTTPS 网页链接', 'error');
+            return;
+        }
+        resetArchiveAction();
+        clearWebImportCandidates();
+        webImportSessionId = nextJobId('web-session');
+        webImportAbortController = new AbortController();
+        activeJobType = 'webAnalyze';
+        setBusy(activeJobType);
+        setProgress(0, 1);
+        setStatus('正在读取网页 HTML…');
+        try {
+            const result = await fetchHtmlForImport(url, webImportAbortController.signal);
+            let extracted = webImportCore.extractImageCandidates(result.html, result.finalUrl);
+            webImportFinalUrl = result.finalUrl;
+            const maximumSelected = Math.max(0, format.MAX_PAGES - items.length);
+            if (!extracted.length) {
+                if (!maximumSelected) {
+                    throw new Error('当前漫画已经没有可用页数');
+                }
+                setStatus('静态 HTML 没有图片，正在隔离运行页面并等待漫画内容加载…');
+                const captured = await captureRenderedPage(result.finalUrl, maximumSelected, webImportAbortController.signal);
+                webImportFinalUrl = captured.finalUrl || result.finalUrl;
+                extracted = (captured.images || []).map(image => ({
+                    url: `${webImportFinalUrl}#dynamic-page-${image.index + 1}`,
+                    duplicateOf: -1,
+                    capturedIndex: Number(image.index),
+                    capturedName: String(image.name || `page-${image.index + 1}.jpg`),
+                    capturedMime: String(image.mime || ''),
+                    capturedSize: Number(image.size) || 0
+                }));
+                if (!extracted.length) {
+                    throw new Error('页面运行完成后仍未找到漫画图片');
+                }
+            }
+            let selectedCount = 0;
+            webImportCandidates = extracted.map((candidate, index) => {
+                const duplicate = candidate.duplicateOf >= 0;
+                const shouldSelect = !duplicate && selectedCount < maximumSelected;
+                if (shouldSelect) {
+                    selectedCount += 1;
+                }
+                return {
+                    id: nextJobId('web-image'),
+                    url: candidate.url,
+                    transform: webImportCore.resolve18ComicTransform(result.finalUrl, candidate.url, result.html),
+                    capturedIndex: Number.isInteger(candidate.capturedIndex) ? candidate.capturedIndex : -1,
+                    capturedName: candidate.capturedName || '',
+                    capturedMime: candidate.capturedMime || '',
+                    capturedSize: candidate.capturedSize || 0,
+                    duplicate,
+                    selected: shouldSelect,
+                    prepared: null,
+                    loading: false,
+                    error: '',
+                    originalIndex: index
+                };
+            });
+            renderWebImportCandidates();
+            const selectedCandidates = selectedWebCandidates();
+            if (!selectedCandidates.length) {
+                setProgress(1, 1, 'success');
+                setStatus('分析完成，但当前漫画已经没有可用页数。', 'info');
+            } else {
+                activeJobType = 'webPreview';
+                setBusy(activeJobType);
+                setStatus(`分析完成，正在自动加载 ${selectedCandidates.length} 张图片预览…`);
+                const failures = await prepareWebCandidates(selectedCandidates, webImportAbortController.signal);
+                if (failures.length) {
+                    progressGroup.dataset.kind = 'error';
+                    setStatus(`分析完成：已预览 ${selectedCandidates.length - failures.length} 张，${failures.length} 张失败。`, 'error');
+                } else {
+                    releaseRenderedPageCapture();
+                    setProgress(selectedCandidates.length, selectedCandidates.length, 'success');
+                    setStatus(`分析完成：已按网页顺序加载 ${selectedCandidates.length} 张图片预览。`, 'success');
+                }
+            }
+        } catch (error) {
+            resetProgress();
+            setStatus(error.name === 'AbortError' ? '网页分析已取消。' : (error.message || '网页分析失败'), error.name === 'AbortError' ? 'info' : 'error');
+        } finally {
+            activeJobType = '';
+            webImportAbortController = null;
+            setBusy('');
+            renderWebImportCandidates();
+        }
+    }
+
+    async function downloadWebImport() {
+        if (activeJobType) {
+            return;
+        }
+        const selected = selectedWebCandidates();
+        if (!selected.length) {
+            setStatus('请先选择要加入漫画的网页图片', 'error');
+            return;
+        }
+        if (items.length + selected.length > format.MAX_PAGES) {
+            setStatus(`漫画最多包含 ${format.MAX_PAGES} 张图片`, 'error');
+            return;
+        }
+        webImportAbortController = new AbortController();
+        activeJobType = 'webDownload';
+        setBusy(activeJobType);
+        setStatus(selected.every(candidate => candidate.prepared)
+            ? '正在把已预览图片加入漫画…'
+            : '正在重试未完成的图片并加入漫画…');
+        try {
+            const failures = await prepareWebCandidates(selected, webImportAbortController.signal);
+            if (failures.length) {
+                setStatus(`${failures.length} 张图片预览失败；可重试，或取消勾选后继续。漫画列表尚未改变。`, 'error');
+                progressGroup.dataset.kind = 'error';
+                return;
+            }
+            const preparedItems = selected.map(candidate => {
+                candidate.prepared.webImportSessionId = webImportSessionId;
+                return candidate.prepared;
+            });
+            for (const candidate of selected) {
+                candidate.prepared = null;
+            }
+            items.push(...preparedItems);
+            webImportCandidates.forEach(releasePreparedCandidate);
+            releaseRenderedPageCapture();
+            webImportCandidates = [];
+            webImportFinalUrl = '';
+            renderFileList();
+            updateSelectionSummary();
+            document.getElementById('webImportResults').hidden = true;
+            setProgress(selected.length, selected.length, 'success');
+            setStatus(`已按网页顺序加入 ${selected.length} 张已勾选图片；未勾选项已清除。确认顺序后可加密并写入资产。`, 'success');
+        } catch (error) {
+            setStatus(error.name === 'AbortError' ? '网页图片下载已取消。' : (error.message || '网页图片下载失败'), error.name === 'AbortError' ? 'info' : 'error');
+        } finally {
+            activeJobType = '';
+            webImportAbortController = null;
+            setBusy('');
+            renderWebImportCandidates();
+        }
     }
 
     function updateSelectionSummary() {
@@ -952,6 +1938,10 @@
     function revokeItem(item) {
         if (item && item.url) {
             URL.revokeObjectURL(item.url);
+        }
+        if (item?.tempEntryName) {
+            removeWebTemp(item.tempEntryName);
+            item.tempEntryName = '';
         }
     }
 
@@ -1404,10 +2394,10 @@
         pendingHistoryStart = restart;
         if (book.directoryOnly && book.archiveFile) {
             openingDirectoryBookId = bookId;
-            startJob('open', '正在从独立书架目录打开漫画…', { file: book.archiveFile });
+            startJob('open', '正在从独立漫画目录打开漫画…', { file: book.archiveFile });
             return;
         }
-        startJob('historyOpen', '正在从本地书架打开漫画…', { bookId });
+        startJob('historyOpen', '正在从本地资产打开漫画…', { bookId });
     }
 
     function downloadLongImageFile(file, name, opfsName = '', storageKind = '') {
@@ -1512,7 +2502,7 @@
         const cached = browserHistoryBooks.some(item => item.bookId === bookId);
         const external = directoryBooks.some(item => item.bookId === bookId);
         if (!cached && external) {
-            if (!root.confirm(`确定删除独立书架目录中的《${book.title}》吗？这会删除其中的 .ecomic、PNG 和封面文件，无法撤销。`)) {
+            if (!root.confirm(`确定删除独立漫画目录中的《${book.title}》吗？这会删除其中的 .ecomic、PNG 和封面文件，无法撤销。`)) {
                 return;
             }
             try {
@@ -1521,19 +2511,19 @@
                 }
                 await deleteDirectoryBook(bookId);
                 await removeHistoryMemberships(bookId);
-                setHistoryStatus(`已从独立书架目录删除《${book.title}》。`, 'success');
+                setHistoryStatus(`已从独立漫画目录删除《${book.title}》。`, 'success');
             } catch (error) {
                 setHistoryStatus(`删除失败：${error.message}`, 'error');
             }
             return;
         }
         const deletePrompt = isAndroidRuntime
-            ? `确定从应用书架删除《${book.title}》吗？原始页面、封面、元数据和阅读进度都会被删除，无法撤销。`
-            : `确定从浏览器书架移除《${book.title}》吗？`;
+            ? `确定从应用资产删除《${book.title}》吗？原始页面、封面、元数据和阅读进度都会被删除，无法撤销。`
+            : `确定从浏览器资产移除《${book.title}》吗？`;
         if (!root.confirm(deletePrompt)) {
             return;
         }
-        const deleteExternal = external && root.confirm('这本漫画也保存在独立目录中。是否同时删除目录里的原件？\n\n选择“取消”只清理浏览器缓存，独立目录中的漫画仍会显示在书架。');
+        const deleteExternal = external && root.confirm('这本漫画也保存在独立目录中。是否同时删除目录里的原件？\n\n选择“取消”只清理浏览器缓存，独立目录中的漫画仍会显示在资产中。');
         pendingDirectoryDeletion = { bookId, deleteExternal };
         startJob('historyDelete', '正在删除漫画…', { bookId });
     }
@@ -1543,28 +2533,28 @@
             return;
         }
         if (!browserHistoryBooks.length) {
-            if (!root.confirm('确定删除独立书架目录中的全部漫画吗？其中的 .ecomic、PNG 和封面文件都会被删除，无法撤销。')) {
+            if (!root.confirm('确定删除独立漫画目录中的全部漫画吗？其中的 .ecomic、PNG 和封面文件都会被删除，无法撤销。')) {
                 return;
             }
             try {
                 closeReaderSession(false);
                 await deleteAllDirectoryBooks();
                 await removeHistoryMemberships('*');
-                setHistoryStatus('独立书架目录已清空。', 'success');
+                setHistoryStatus('独立漫画目录已清空。', 'success');
             } catch (error) {
                 setHistoryStatus(`清空失败：${error.message}`, 'error');
             }
             return;
         }
         const clearPrompt = isAndroidRuntime
-            ? '确定清空应用书架吗？全部漫画的原始页面、封面、元数据和阅读进度都会被删除，无法撤销。'
+            ? '确定清空应用漫画资产吗？全部漫画的原始页面、封面、元数据和阅读进度都会被删除，无法撤销。'
             : '确定清空当前浏览器中的全部漫画缓存吗？此操作无法撤销。';
         if (!root.confirm(clearPrompt)) {
             return;
         }
-        const deleteExternal = directoryBooks.length > 0 && root.confirm('是否同时删除独立书架目录中的全部漫画原件？\n\n选择“取消”只清理浏览器缓存，目录中的漫画仍会显示在书架。');
+        const deleteExternal = directoryBooks.length > 0 && root.confirm('是否同时删除独立漫画目录中的全部漫画原件？\n\n选择“取消”只清理浏览器缓存，目录中的漫画仍会显示在资产中。');
         pendingDirectoryDeletion = { bookId: '*', deleteExternal };
-        startJob('historyDelete', '正在清空漫画书架…', { bookId: '*' });
+        startJob('historyDelete', '正在清空漫画资产…', { bookId: '*' });
     }
 
     function showReaderNotice(message) {
@@ -1787,7 +2777,7 @@
         }
         const historyBook = historyBooks.find(book => book.bookId === currentHistoryBookId);
         const outputName = (historyBook?.title || selectedArchive?.name || 'comic').replace(/\.ecomic$/i, '');
-        startJob('historySave', '正在把原始页面和封面加入书架…', {
+        startJob('historySave', '正在把原始页面和封面加入资产…', {
             sessionId,
             outputName,
             sourceName: selectedArchive?.name || ''
@@ -2002,7 +2992,7 @@
                 setHistoryStatus(deletion?.deleteExternal
                     ? '浏览器缓存和独立目录原件均已删除。'
                     : (isAndroidRuntime
-                        ? (message.count ? '应用书架数据已删除。' : '这本漫画已不在应用书架中。')
+                        ? (message.count ? '应用漫画资产已删除。' : '这本漫画已不在应用资产中。')
                         : (message.count ? '浏览器缓存已删除，独立目录原件已保留。' : '这本漫画已不在浏览器缓存中。')), 'success');
             } catch (error) {
                 setHistoryStatus(`浏览器缓存已删除，但目录原件删除失败：${error.message}`, 'error');
@@ -2026,7 +3016,7 @@
             prepareArchiveDownload(message);
             pendingArchiveForDirectory = { file: message.file, name: message.name };
             setStatus(`漫画归档已生成：${message.pages} 页 · ${formatBytes(message.size)}。正在保存原始页面和封面…`, 'success');
-            setHistoryStatus('正在把本次上传的原始页面加入书架…');
+            setHistoryStatus('正在把本次上传的原始页面加入资产…');
             return;
         }
         if (message.type === 'portableArchive' && message.jobId === activeJobId) {
@@ -2076,9 +3066,9 @@
             } : message);
             setProgress(1, 1, 'success');
             if (directoryBookId) {
-                setHistoryStatus('已从独立书架目录打开漫画。', 'success');
+                setHistoryStatus('已从独立漫画目录打开漫画。', 'success');
             } else if (message.bookId) {
-                setHistoryStatus('已从本地书架恢复高清阅读。', 'success');
+                setHistoryStatus('已从本地资产恢复高清阅读。', 'success');
                 requestHistoryList();
             } else {
                 setStatus('漫画归档验证成功，正在保存原始页面和封面。', 'success');
@@ -2093,12 +3083,16 @@
         if (message.type === 'historySaved' && message.jobId === activeJobId) {
             const completedJobType = activeJobType;
             setProgress(1, 1, 'success');
-            setStatus(`漫画已加入书架：${message.pages} 页 · ${formatBytes(message.size)}。`, 'success');
+            setStatus(`漫画已加入资产：${message.pages} 页 · ${formatBytes(message.size)}。`, 'success');
             showReaderNotice('原始页面和封面已保存；长图将在导出时生成。');
             const existingDirectoryBook = directoryBooks.find(book => book.bookId === message.bookId);
             const directoryBook = message.book
                 || historyBooks.find(book => book.bookId === message.bookId)
                 || existingDirectoryBook;
+            if (message.book && !directoryPermissionGranted) {
+                browserHistoryBooks = [message.book, ...browserHistoryBooks.filter(book => book.bookId !== message.bookId)];
+                mergeHistorySources();
+            }
             if (directoryPermissionGranted && message.bookId && directoryBook) {
                 try {
                     await syncBookToDirectory(directoryBook, {
@@ -2107,7 +3101,7 @@
                             || selectedArchive,
                         coverFile: message.coverFile || existingDirectoryBook?.coverFile || directoryBook.coverFile
                     });
-                    setHistoryStatus(`已加入独立书架目录“${libraryDirectoryHandle.name}”。`, 'success');
+                    setHistoryStatus(`已加入独立漫画目录“${libraryDirectoryHandle.name}”。`, 'success');
                 } catch (error) {
                     setDirectorySummary(`漫画已保存到浏览器，但目录写入失败：${error.message}`, 'error');
                 }
@@ -2117,19 +3111,23 @@
                 currentHistoryBookId = message.bookId;
                 if (!directoryPermissionGranted) {
                     setHistoryStatus(isAndroidRuntime
-                        ? '已加入应用书架。'
-                        : '已加入浏览器书架。连接独立目录后可获得可迁移备份。', 'success');
+                        ? '已加入应用资产。'
+                        : '已加入浏览器资产。连接独立目录后可获得可迁移备份。', 'success');
                 }
                 requestHistoryList();
             }
             if (completedJobType === 'encrypt') {
-                revealArchiveDownload();
+                releaseOutput('archive');
+                revealSavedComic(message.bookId);
             }
             if (completedJobType === 'historySave') {
                 releaseSelectedArchiveTemp();
             }
             activeJobId = '';
             setBusy('');
+            if (completedJobType === 'encrypt') {
+                revealSavedComic(message.bookId);
+            }
             return;
         }
         if (message.type === 'cancelled') {
@@ -2152,13 +3150,13 @@
                 if (cancelledType === 'historyArchive') {
                     migrationQueue = [];
                     migrationCurrentBook = null;
-                    setHistoryStatus('书架迁移已取消。');
+                    setHistoryStatus('漫画资产迁移已取消。');
                 } else if (cancelledType === 'historyExportArchive') {
                     setHistoryStatus('已取消导出 .ecomic。');
                 } else if (cancelledType === 'historyExportLongImage') {
                     setHistoryStatus('已取消导出长图。');
                 } else if (cancelledType === 'historySave') {
-                    setHistoryStatus('已取消加入书架。');
+                    setHistoryStatus('已取消加入资产。');
                 }
                 if (cancelledType === 'open' || cancelledType === 'historySave') {
                     releaseSelectedArchiveTemp();
@@ -2166,7 +3164,7 @@
                 setBusy('');
                 resetProgress();
                 setStatus(archiveWasCreated
-                    ? '漫画归档已生成，加入书架的后续处理已取消；仍可下载 .ecomic。'
+                    ? '漫画归档已生成，加入资产的后续处理已取消；仍可下载 .ecomic。'
                     : '操作已取消。');
                 if (archiveWasCreated) {
                     revealArchiveDownload();
@@ -2206,7 +3204,7 @@
                 } else if (failedType === 'historyExportLongImage') {
                     setHistoryStatus(`导出长图失败：${message.message || '未知错误'}`, 'error');
                 } else if (failedType === 'historySave') {
-                    setHistoryStatus(`加入书架失败：${message.message || '未知错误'}`, 'error');
+                    setHistoryStatus(`加入资产失败：${message.message || '未知错误'}`, 'error');
                 }
                 if (failedType === 'open' || failedType === 'historySave') {
                     releaseSelectedArchiveTemp();
@@ -2214,7 +3212,7 @@
                 setBusy('');
                 progressGroup.dataset.kind = 'error';
                 setStatus(archiveWasCreated
-                    ? `漫画归档已生成，但加入书架失败：${message.message || '未知错误'}。仍可下载 .ecomic。`
+                    ? `漫画归档已生成，但加入资产失败：${message.message || '未知错误'}。仍可下载 .ecomic。`
                     : (message.message || '漫画处理失败'), 'error');
                 if (archiveWasCreated) {
                     revealArchiveDownload();
@@ -2265,7 +3263,7 @@
             readerPages = [];
             reader.replaceChildren();
             setBusy('');
-            setStatus('漫画后台已重新启动，正在恢复书架阅读…');
+            setStatus('漫画后台已重新启动，正在恢复资产阅读…');
             root.setTimeout(() => {
                 startWorker(recoverBookId, false);
                 recoveringWorker = false;
@@ -2294,11 +3292,11 @@
 
         if (isAndroidRuntime) {
             document.getElementById('historyDirectoryPanel').hidden = true;
-            document.getElementById('historyDescription').textContent = '书架保存在应用私有数据中；覆盖更新会保留，清除应用数据或卸载会删除。';
-            document.getElementById('historyEmptyDescription').textContent = '加密图片或打开 `.ecomic` 后，漫画会自动加入应用书架。';
+            document.getElementById('historyDescription').textContent = '资产保存在应用私有数据中；覆盖更新会保留，清除应用数据或卸载会删除。';
+            document.getElementById('historyEmptyDescription').textContent = '加密图片或打开 `.ecomic` 后，漫画会自动加入应用资产。';
         }
         loadHistoryGroupState().catch(error => {
-            setHistoryStatus(error.message || '书架文件夹读取失败。', 'error');
+            setHistoryStatus(error.message || '漫画文件夹读取失败。', 'error');
         });
         startWorker('', true);
         if (!isAndroidRuntime) {
@@ -2313,9 +3311,80 @@
 
     comicFilesInput.addEventListener('change', handleFilesSelected);
     archiveInput.addEventListener('change', handleArchiveSelected);
+    document.getElementById('localComicSourceButton').addEventListener('click', () => {
+        document.getElementById('localComicSourcePanel').hidden = false;
+        document.getElementById('webComicSourcePanel').hidden = true;
+        document.getElementById('localComicSourceButton').classList.add('is-active');
+        document.getElementById('localComicSourceButton').setAttribute('aria-pressed', 'true');
+        document.getElementById('webComicSourceButton').classList.remove('is-active');
+        document.getElementById('webComicSourceButton').setAttribute('aria-pressed', 'false');
+        document.getElementById('appModeBadge').textContent = '本地处理';
+    });
+    document.getElementById('webComicSourceButton').addEventListener('click', () => {
+        document.getElementById('localComicSourcePanel').hidden = true;
+        document.getElementById('webComicSourcePanel').hidden = false;
+        document.getElementById('webComicSourceButton').classList.add('is-active');
+        document.getElementById('webComicSourceButton').setAttribute('aria-pressed', 'true');
+        document.getElementById('localComicSourceButton').classList.remove('is-active');
+        document.getElementById('localComicSourceButton').setAttribute('aria-pressed', 'false');
+        document.getElementById('appModeBadge').textContent = '网页导入需联网';
+        document.getElementById('webImportUrl').focus();
+    });
+    document.getElementById('analyzeWebImportButton').addEventListener('click', analyzeWebImport);
+    document.getElementById('clearWebImportUrlButton').addEventListener('click', clearWebImportSession);
+    document.getElementById('webImportUrl').addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            analyzeWebImport();
+        }
+    });
+    document.getElementById('downloadWebImportButton').addEventListener('click', downloadWebImport);
+    document.getElementById('clearWebImportButton').addEventListener('click', () => clearWebImportCandidates('网页分析结果已清除。'));
+    document.getElementById('webImportSelectAllButton').addEventListener('click', () => {
+        const maximum = Math.max(0, format.MAX_PAGES - items.length);
+        let selected = 0;
+        for (const candidate of webImportCandidates) {
+            const shouldSelect = !candidate.duplicate && selected < maximum;
+            if (!shouldSelect && candidate.selected) {
+                releasePreparedCandidate(candidate);
+            }
+            candidate.selected = shouldSelect;
+            candidate.error = '';
+            if (shouldSelect) {
+                selected += 1;
+            }
+        }
+        renderWebImportCandidates();
+        previewWebCandidates(selectedWebCandidates());
+    });
+    document.getElementById('webImportList').addEventListener('click', event => {
+        const button = event.target.closest('button[data-web-action]');
+        if (!button || activeJobType) {
+            return;
+        }
+        const index = webImportCandidates.findIndex(candidate => candidate.id === button.dataset.candidateId);
+        if (index < 0) {
+            return;
+        }
+        if (button.dataset.webAction === 'up') {
+            moveWebImportCandidate(button.dataset.candidateId, index - 1);
+        } else if (button.dataset.webAction === 'down') {
+            moveWebImportCandidate(button.dataset.candidateId, index + 1);
+        } else if (button.dataset.webAction === 'remove') {
+            releasePreparedCandidate(webImportCandidates[index]);
+            webImportCandidates.splice(index, 1);
+            renderWebImportCandidates();
+        }
+    });
     document.getElementById('comicFilesPicker').addEventListener('keydown', event => activateFilePicker(event, comicFilesInput));
     document.getElementById('comicArchiveFilePicker').addEventListener('keydown', event => activateFilePicker(event, archiveInput));
     document.getElementById('encryptComicButton').addEventListener('click', encryptComic);
+    document.getElementById('viewSavedComicButton').addEventListener('click', () => {
+        if (!savedComicBookId) return;
+        root.EcrypteesImageAssetsUI && document.getElementById('assetTypeComicButton').click();
+        document.getElementById('historyTab').click();
+        root.setTimeout(() => openHistoryBook(savedComicBookId, false), 0);
+    });
     document.getElementById('comicArchiveName').addEventListener('input', () => resetArchiveAction());
     document.getElementById('downloadComicArchive').addEventListener('click', event => {
         if (event.currentTarget.getAttribute('aria-disabled') === 'true') {
@@ -2343,6 +3412,11 @@
         closeReaderDialog();
     });
     document.getElementById('cancelComicButton').addEventListener('click', () => {
+        if ((activeJobType === 'webAnalyze' || activeJobType === 'webPreview' || activeJobType === 'webDownload') && webImportAbortController) {
+            webImportAbortController.abort();
+            setStatus('正在取消网页导入…');
+            return;
+        }
         if (worker && activeJobId) {
             worker.postMessage({ type: 'cancel', jobId: activeJobId });
             setStatus('正在取消当前操作…');
@@ -2452,12 +3526,23 @@
     document.getElementById('migrateHistoryButton').addEventListener('click', migrateCurrentShelf);
     document.getElementById('historySearch').addEventListener('input', renderHistory);
     document.getElementById('historySort').addEventListener('change', () => {
-        document.getElementById('historyViewMenu').open = false;
+        document.getElementById('assetSortMenu').open = false;
         renderHistory();
     });
     document.getElementById('historyGoToComicButton').addEventListener('click', () => document.getElementById('comicTab').click());
     document.getElementById('historyTab').addEventListener('click', requestHistoryList);
     root.addEventListener('pageshow', () => requestHistoryList());
+    root.addEventListener('pagehide', () => {
+        webImportAbortController?.abort();
+        releaseRenderedPageCapture();
+        for (const token of activeRemoteFetchTokens) {
+            try {
+                androidNetwork?.cancelRemoteFetch(token);
+            } catch (error) {
+                // Native cleanup also runs when the Activity is destroyed.
+            }
+        }
+    });
     document.addEventListener('ecryptees-open-archive', event => {
         const detail = event.detail || {};
         const file = detail.file;
@@ -2522,5 +3607,8 @@
         worker?.terminate();
     });
 
-    initialize();
+    const securityGate = root.EcrypteesAppSecurity?.whenUnlocked || Promise.resolve();
+    securityGate.then(initialize).catch(error => {
+        console.error('应用解锁后初始化漫画功能失败', error);
+    });
 })(globalThis);

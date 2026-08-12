@@ -51,6 +51,12 @@
         const lower = String(name || '').toLowerCase();
         if (lower.endsWith('.png')) return 'image/png';
         if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+        if (lower.endsWith('.gif')) return 'image/gif';
+        if (lower.endsWith('.webp')) return 'image/webp';
+        if (lower.endsWith('.bmp')) return 'image/bmp';
+        if (lower.endsWith('.avif')) return 'image/avif';
+        if (lower.endsWith('.heic')) return 'image/heic';
+        if (lower.endsWith('.heif')) return 'image/heif';
         if (lower.endsWith('.txt')) return 'text/plain';
         if (lower.endsWith('.ecomic')) return ECOMIC_MIME_TYPE;
         return 'application/octet-stream';
@@ -85,6 +91,14 @@
     async function receiveIncomingDocument() {
         if (incomingBusy || typeof bridge.claimIncomingDocument !== 'function') {
             return;
+        }
+        if (document.body.dataset.lockState !== 'unlocked') {
+            const security = globalThis.EcrypteesAppSecurity;
+            if (security?.whenUnlocked) {
+                await security.whenUnlocked;
+            } else {
+                await new Promise(resolve => document.addEventListener('ecryptees-app-unlocked', resolve, { once: true }));
+            }
         }
         let metadata;
         try {

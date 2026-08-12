@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE_NAME = 'ecryptees-app-v10';
+const CACHE_NAME = 'ecryptees-app-v13';
 const APP_SHELL = [
     './',
     './index.html',
@@ -12,9 +12,13 @@ const APP_SHELL = [
     './js/core.js',
     './js/comic-core.js',
     './js/history-core.js',
+    './js/web-import-core.js',
+    './js/settings.js',
+    './js/image-assets.js',
     './js/app.js',
     './js/comic-worker.js',
     './js/comic-app.js',
+    './js/image-assets-app.js',
     './js/pwa.js',
     './js/android-bridge.js'
 ];

@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Ecryptees</string>
+    <string name="calculator_name">计算器</string>
     <string name="file_chooser_unavailable">无法打开系统文件选择器</string>
     <string name="download_busy">请先完成当前文件的保存</string>
     <string name="download_saved">文件已保存</string>

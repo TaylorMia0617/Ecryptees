@@ -3,7 +3,9 @@ package com.ecryptees.offline;
 import android.annotation.SuppressLint;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
+import android.content.ComponentName;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -19,6 +21,7 @@ import android.util.Base64;
 import android.util.Size;
 import android.view.ViewGroup;
 import android.webkit.JavascriptInterface;
+import android.webkit.CookieManager;
 import android.webkit.MimeTypeMap;
 import android.webkit.RenderProcessGoneDetail;
 import android.webkit.ValueCallback;
@@ -26,6 +29,7 @@ import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
+import android.webkit.WebStorage;
 import android.webkit.WebView;
 import android.widget.FrameLayout;
 import android.widget.Toast;
@@ -38,14 +42,21 @@ import androidx.webkit.WebViewAssetLoader;
 import androidx.webkit.WebViewClientCompat;
 
 import org.json.JSONObject;
+import org.json.JSONArray;
 
 import java.io.File;
+import java.io.ByteArrayOutputStream;
 import java.io.FileOutputStream;
+import java.io.FileInputStream;
+import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Locale;
 import java.util.UUID;
@@ -64,6 +75,9 @@ public final class MainActivity extends ComponentActivity {
     private static final long MAX_INCOMING_ARCHIVE_BYTES = 512L * 1024L * 1024L;
     private static final int MAX_NATIVE_CHUNK_BYTES = 1024 * 1024;
     private static final String HEIC_CACHE_PREFIX = "ecryptees-heic-";
+    private static final String REMOTE_CACHE_PREFIX = "ecryptees-fetch-";
+    private static final String RENDER_CACHE_PREFIX = "ecryptees-render-";
+    private static final long MAX_REMOTE_HTML_BYTES = 5L * 1024L * 1024L;
     private static final String ECOMIC_MIME_TYPE = "application/vnd.ecryptees.ecomic";
 
     private FrameLayout rootView;
@@ -71,6 +85,7 @@ public final class MainActivity extends ComponentActivity {
     private ValueCallback<Uri[]> fileChooserCallback;
     private boolean imageDocumentChooser;
     private final FileBridge fileBridge = new FileBridge();
+    private final RemoteNetworkBridge remoteNetworkBridge = new RemoteNetworkBridge();
     private PendingDownload pendingDownload;
     private OutputStream downloadStream;
     private Uri downloadUri;
@@ -86,6 +101,8 @@ public final class MainActivity extends ComponentActivity {
         getWindow().setStatusBarColor(Color.rgb(255, 64, 129));
         getWindow().setNavigationBarColor(Color.rgb(252, 228, 236));
         cleanupStaleHeicFiles();
+        cleanupStaleRemoteFiles();
+        cleanupStaleRenderedFiles();
         rootView = new FrameLayout(this);
         setContentView(rootView);
         createWebView(savedInstanceState);
@@ -135,6 +152,7 @@ public final class MainActivity extends ComponentActivity {
 
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG);
         webView.addJavascriptInterface(fileBridge, "AndroidFileBridge");
+        webView.addJavascriptInterface(remoteNetworkBridge, "AndroidNetworkBridge");
         webView.setWebViewClient(new WebViewClientCompat() {
             @Nullable
             @Override
@@ -176,6 +194,7 @@ public final class MainActivity extends ComponentActivity {
                 fileBridge.abortIncomingDocument(null);
                 fileBridge.abortCurrentDownload(false);
                 fileBridge.abortAllHeicDecodes();
+                remoteNetworkBridge.abortAll();
                 rootView.removeView(view);
                 view.destroy();
                 Toast.makeText(MainActivity.this, R.string.webview_crashed, Toast.LENGTH_LONG).show();
@@ -467,7 +486,8 @@ public final class MainActivity extends ComponentActivity {
             return;
         }
         webView.evaluateJavascript(
-                "(() => { const dialog = document.querySelector('dialog[open]');"
+                "(() => { if (globalThis.EcrypteesAppNavigation?.closeDrawer?.()) return true;"
+                        + "const dialog = document.querySelector('dialog[open]');"
                         + "if (!dialog) return false;"
                         + "document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));"
                         + "return true; })()",
@@ -495,9 +515,11 @@ public final class MainActivity extends ComponentActivity {
         fileBridge.abortIncomingDocument(null);
         fileBridge.abortCurrentDownload(false);
         fileBridge.shutdownHeicDecodes();
+        remoteNetworkBridge.shutdown();
         if (webView != null) {
             rootView.removeView(webView);
             webView.removeJavascriptInterface("AndroidFileBridge");
+            webView.removeJavascriptInterface("AndroidNetworkBridge");
             webView.destroy();
             webView = null;
         }
@@ -523,6 +545,30 @@ public final class MainActivity extends ComponentActivity {
         }
         for (File file : files) {
             file.delete();
+        }
+    }
+
+    private void cleanupStaleRemoteFiles() {
+        File[] files = getCacheDir().listFiles((directory, name) -> name.startsWith(REMOTE_CACHE_PREFIX));
+        if (files == null) {
+            return;
+        }
+        for (File file : files) {
+            if (file.isFile()) {
+                file.delete();
+            }
+        }
+    }
+
+    private void cleanupStaleRenderedFiles() {
+        File[] files = getCacheDir().listFiles((directory, name) -> name.startsWith(RENDER_CACHE_PREFIX));
+        if (files == null) {
+            return;
+        }
+        for (File file : files) {
+            if (file.isFile()) {
+                file.delete();
+            }
         }
     }
 
@@ -579,10 +625,747 @@ public final class MainActivity extends ComponentActivity {
         return bitmap;
     }
 
+    public final class RemoteNetworkBridge {
+        private final Map<String, RemoteFetchTask> tasks = new ConcurrentHashMap<>();
+        private final Map<String, RenderedPageTask> renderedTasks = new ConcurrentHashMap<>();
+        private final ExecutorService executor = Executors.newFixedThreadPool(2);
+        private final RenderedCaptureReceiver renderedCaptureReceiver = new RenderedCaptureReceiver();
+
+        @JavascriptInterface
+        public String beginRenderedPageCapture(String rawUrl, int requestedMaximum) {
+            String url = normalizeHttpsUrl(rawUrl);
+            if (url == null) {
+                return "";
+            }
+            int maximum = Math.max(1, Math.min(80, requestedMaximum));
+            String token = UUID.randomUUID().toString();
+            RenderedPageTask task = new RenderedPageTask(token, url, maximum);
+            renderedTasks.put(token, task);
+            runOnUiThread(() -> createRenderedWebView(task));
+            return token;
+        }
+
+        @JavascriptInterface
+        public String getRenderedPageCaptureStatus(String token) {
+            RenderedPageTask task = renderedTasks.get(token);
+            JSONObject result = new JSONObject();
+            try {
+                if (task == null) {
+                    result.put("state", "error");
+                    result.put("error", "动态网页任务不存在或已经释放");
+                    return result.toString();
+                }
+                result.put("state", task.state);
+                result.put("error", task.error);
+                result.put("finalUrl", task.finalUrl);
+                JSONArray images = new JSONArray();
+                synchronized (task) {
+                    for (CapturedRenderedImage image : task.images) {
+                        JSONObject item = new JSONObject();
+                        item.put("index", image.index);
+                        item.put("name", image.name);
+                        item.put("mime", image.mime);
+                        item.put("size", image.size);
+                        images.put(item);
+                    }
+                }
+                result.put("images", images);
+                return result.toString();
+            } catch (Exception error) {
+                return "{\"state\":\"error\",\"error\":\"无法读取动态网页状态\"}";
+            }
+        }
+
+        @JavascriptInterface
+        public String readRenderedPageImageChunk(String token, int index, long offset, int requestedBytes) {
+            RenderedPageTask task = renderedTasks.get(token);
+            CapturedRenderedImage image = task == null ? null : task.findImage(index);
+            if (image == null || !"ready".equals(task.state)) {
+                return "";
+            }
+            int length = Math.max(1, Math.min(MAX_NATIVE_CHUNK_BYTES, requestedBytes));
+            synchronized (image) {
+                try {
+                    if (image.reader == null) {
+                        image.reader = new RandomAccessFile(image.file, "r");
+                    }
+                    image.reader.seek(Math.max(0, offset));
+                    byte[] bytes = new byte[length];
+                    int count = image.reader.read(bytes);
+                    return count < 0 ? "" : Base64.encodeToString(bytes, 0, count, Base64.NO_WRAP);
+                } catch (IOException error) {
+                    task.fail("读取动态网页图片失败");
+                    return "";
+                }
+            }
+        }
+
+        @JavascriptInterface
+        public void releaseRenderedPageCapture(String token) {
+            RenderedPageTask task = renderedTasks.remove(token);
+            if (task != null) {
+                task.cancelAndCleanup();
+            }
+        }
+
+        @JavascriptInterface
+        public boolean beginRenderedImage(String token, int index, String rawName, String rawMime, long expectedSize) {
+            RenderedPageTask task = renderedTasks.get(token);
+            if (task == null || index != task.images.size() || index >= task.maximum
+                    || expectedSize <= 0 || expectedSize > MAX_NATIVE_INPUT_BYTES
+                    || task.totalBytes + expectedSize > MAX_NATIVE_INPUT_BYTES) {
+                return false;
+            }
+            String name = rawName == null ? "page-" + (index + 1) + ".jpg" : rawName;
+            name = name.replaceAll("[\\\\/:*?\"<>|\\p{Cntrl}]", "_");
+            String mime = rawMime != null && rawMime.startsWith("image/") ? rawMime : "application/octet-stream";
+            File file = new File(getCacheDir(), RENDER_CACHE_PREFIX + token + "-" + index + ".tmp");
+            try {
+                CapturedRenderedImage image = new CapturedRenderedImage(index, name, mime, expectedSize, file);
+                image.output = new FileOutputStream(file, false);
+                synchronized (task) {
+                    task.images.add(image);
+                    task.totalBytes += expectedSize;
+                }
+                return true;
+            } catch (IOException error) {
+                file.delete();
+                task.fail("无法创建动态网页图片临时文件");
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public boolean writeRenderedImageChunk(String token, int index, String encoded) {
+            RenderedPageTask task = renderedTasks.get(token);
+            CapturedRenderedImage image = task == null ? null : task.findImage(index);
+            if (image == null || image.output == null || encoded == null) {
+                return false;
+            }
+            try {
+                byte[] bytes = Base64.decode(encoded, Base64.DEFAULT);
+                if (image.written + bytes.length > image.size) {
+                    throw new IOException("Dynamic image is larger than declared");
+                }
+                image.output.write(bytes);
+                image.written += bytes.length;
+                return true;
+            } catch (Exception error) {
+                task.fail("动态网页图片写入失败");
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public boolean finishRenderedImage(String token, int index) {
+            RenderedPageTask task = renderedTasks.get(token);
+            CapturedRenderedImage image = task == null ? null : task.findImage(index);
+            if (image == null || image.output == null) {
+                return false;
+            }
+            try {
+                image.output.flush();
+                image.output.close();
+                image.output = null;
+                if (image.written != image.size) {
+                    throw new IOException("Dynamic image is incomplete");
+                }
+                return true;
+            } catch (IOException error) {
+                task.fail("动态网页图片写入不完整");
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public void finishRenderedPage(String token, int count) {
+            RenderedPageTask task = renderedTasks.get(token);
+            if (task == null) {
+                return;
+            }
+            synchronized (task) {
+                if (count <= 0 || task.images.size() != count
+                        || task.images.stream().anyMatch(image -> image.output != null || image.written != image.size)) {
+                    task.fail("动态网页图片捕获不完整");
+                    return;
+                }
+                task.state = "ready";
+            }
+            destroyRenderedWebView(task);
+        }
+
+        @JavascriptInterface
+        public void failRenderedPage(String token, String message) {
+            RenderedPageTask task = renderedTasks.get(token);
+            if (task != null) {
+                task.fail(message == null || message.isEmpty() ? "动态网页分析失败" : message);
+            }
+        }
+
+        @JavascriptInterface
+        public String beginRemoteFetch(String rawUrl, String kind, String rawReferer) {
+            if (!"html".equals(kind) && !"image".equals(kind)) {
+                return "";
+            }
+            String url = normalizeHttpsUrl(rawUrl);
+            if (url == null) {
+                return "";
+            }
+            String referer = normalizeHttpsUrl(rawReferer);
+            if (referer == null) {
+                referer = "";
+            }
+            String token = UUID.randomUUID().toString();
+            File file = new File(getCacheDir(), REMOTE_CACHE_PREFIX + token + ".tmp");
+            RemoteFetchTask task = new RemoteFetchTask(token, url, kind, referer, file);
+            tasks.put(token, task);
+            task.future = executor.submit(() -> runRemoteFetch(task));
+            return token;
+        }
+
+        @JavascriptInterface
+        public String getRemoteFetchStatus(String token) {
+            RemoteFetchTask task = tasks.get(token);
+            JSONObject status = new JSONObject();
+            try {
+                if (task == null) {
+                    status.put("state", "error");
+                    status.put("error", "网络任务不存在或已经释放");
+                    return status.toString();
+                }
+                status.put("state", task.state);
+                status.put("finalUrl", task.finalUrl);
+                status.put("contentType", task.contentType);
+                status.put("contentLength", task.contentLength);
+                status.put("bytesRead", task.bytesRead);
+                status.put("error", task.error);
+                return status.toString();
+            } catch (Exception error) {
+                return "{\"state\":\"error\",\"error\":\"网络状态读取失败\"}";
+            }
+        }
+
+        @JavascriptInterface
+        public String readRemoteFetchChunk(String token, int requestedBytes) {
+            RemoteFetchTask task = tasks.get(token);
+            if (task == null || !"ready".equals(task.state)) {
+                return "";
+            }
+            int length = Math.max(1, Math.min(MAX_NATIVE_CHUNK_BYTES, requestedBytes));
+            synchronized (task) {
+                try {
+                    if (task.reader == null) {
+                        task.reader = new RandomAccessFile(task.file, "r");
+                    }
+                    byte[] buffer = new byte[length];
+                    int count = task.reader.read(buffer);
+                    if (count < 0) {
+                        return "";
+                    }
+                    return Base64.encodeToString(buffer, 0, count, Base64.NO_WRAP);
+                } catch (IOException error) {
+                    task.state = "error";
+                    task.error = "读取网络临时文件失败";
+                    return "";
+                }
+            }
+        }
+
+        @JavascriptInterface
+        public void cancelRemoteFetch(String token) {
+            RemoteFetchTask task = tasks.get(token);
+            if (task != null) {
+                task.cancel();
+            }
+        }
+
+        @JavascriptInterface
+        public void releaseRemoteFetch(String token) {
+            RemoteFetchTask task = tasks.remove(token);
+            if (task != null) {
+                task.cancelAndCleanup();
+            }
+        }
+
+        private void runRemoteFetch(RemoteFetchTask task) {
+            task.state = "running";
+            String currentUrl = task.initialUrl;
+            try {
+                for (int redirect = 0; redirect <= 5; redirect++) {
+                    if (task.cancelled || Thread.currentThread().isInterrupted()) {
+                        throw new IOException("请求已取消");
+                    }
+                    URL url = new URL(currentUrl);
+                    HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+                    task.connection = connection;
+                    connection.setInstanceFollowRedirects(false);
+                    connection.setConnectTimeout(15_000);
+                    connection.setReadTimeout(30_000);
+                    connection.setUseCaches(false);
+                    connection.setRequestProperty("Accept-Encoding", "identity");
+                    connection.setRequestProperty("User-Agent", "Ecryptees/1.0.13 Android");
+                    connection.setRequestProperty(
+                            "Accept",
+                            "html".equals(task.kind)
+                                    ? "text/html,application/xhtml+xml"
+                                    : "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
+                    );
+                    if ("image".equals(task.kind) && !task.referer.isEmpty()) {
+                        connection.setRequestProperty("Referer", task.referer);
+                    }
+                    int status = connection.getResponseCode();
+                    if (status >= 300 && status < 400) {
+                        String location = connection.getHeaderField("Location");
+                        connection.disconnect();
+                        task.connection = null;
+                        if (location == null || location.isEmpty() || redirect == 5) {
+                            throw new IOException("网页重定向次数过多或地址无效");
+                        }
+                        String redirected = normalizeHttpsUrl(new URL(url, location).toString());
+                        if (redirected == null) {
+                            throw new IOException("请求重定向到了非 HTTPS 地址");
+                        }
+                        currentUrl = redirected;
+                        continue;
+                    }
+                    if (status < 200 || status >= 300) {
+                        connection.disconnect();
+                        task.connection = null;
+                        throw new IOException("HTTP " + status);
+                    }
+                    task.finalUrl = currentUrl;
+                    task.contentType = connection.getContentType() == null ? "" : connection.getContentType();
+                    task.contentLength = connection.getContentLengthLong();
+                    long maximum = "html".equals(task.kind) ? MAX_REMOTE_HTML_BYTES : MAX_NATIVE_INPUT_BYTES;
+                    if (task.contentLength > maximum) {
+                        throw new IOException("html".equals(task.kind)
+                                ? "网页 HTML 不能超过 5 MiB"
+                                : "图片体积不能超过 500 MiB");
+                    }
+                    try (InputStream input = new BufferedInputStream(connection.getInputStream());
+                         OutputStream output = new FileOutputStream(task.file, false)) {
+                        byte[] buffer = new byte[64 * 1024];
+                        long total = 0;
+                        while (true) {
+                            if (task.cancelled || Thread.currentThread().isInterrupted()) {
+                                throw new IOException("请求已取消");
+                            }
+                            int count = input.read(buffer);
+                            if (count < 0) {
+                                break;
+                            }
+                            total += count;
+                            if (total > maximum) {
+                                throw new IOException("html".equals(task.kind)
+                                        ? "网页 HTML 不能超过 5 MiB"
+                                        : "图片体积不能超过 500 MiB");
+                            }
+                            output.write(buffer, 0, count);
+                            task.bytesRead = total;
+                        }
+                        output.flush();
+                    } finally {
+                        connection.disconnect();
+                        task.connection = null;
+                    }
+                    if (task.cancelled) {
+                        throw new IOException("请求已取消");
+                    }
+                    task.contentLength = task.bytesRead;
+                    task.state = "ready";
+                    return;
+                }
+            } catch (Exception error) {
+                HttpURLConnection activeConnection = task.connection;
+                if (activeConnection != null) {
+                    activeConnection.disconnect();
+                }
+                task.error = error.getMessage() == null ? "网络请求失败" : error.getMessage();
+                task.state = task.cancelled ? "cancelled" : "error";
+                task.cleanupFile();
+            } finally {
+                task.connection = null;
+            }
+        }
+
+        @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
+        private void createRenderedWebView(RenderedPageTask task) {
+            if (!renderedTasks.containsKey(task.token) || isFinishing() || isDestroyed()) {
+                task.fail("应用已经关闭");
+                return;
+            }
+            CookieManager.getInstance().removeAllCookies(null);
+            WebView rendered = new WebView(MainActivity.this);
+            task.webView = rendered;
+            rendered.setAlpha(0.01f);
+            rendered.setClickable(false);
+            rendered.setFocusable(false);
+            rendered.setLayoutParams(new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+            ));
+            rootView.addView(rendered, 0);
+            WebSettings settings = rendered.getSettings();
+            settings.setJavaScriptEnabled(true);
+            settings.setDomStorageEnabled(true);
+            settings.setDatabaseEnabled(false);
+            settings.setAllowFileAccess(false);
+            settings.setAllowContentAccess(false);
+            settings.setAllowFileAccessFromFileURLs(false);
+            settings.setAllowUniversalAccessFromFileURLs(false);
+            settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+            settings.setMediaPlaybackRequiresUserGesture(true);
+            settings.setGeolocationEnabled(false);
+            settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
+            settings.setUserAgentString(settings.getUserAgentString() + " EcrypteesCapture/1.0");
+            CookieManager.getInstance().setAcceptThirdPartyCookies(rendered, false);
+            rendered.addJavascriptInterface(renderedCaptureReceiver, "AndroidRenderedCapture");
+            rendered.setWebViewClient(new WebViewClientCompat() {
+                @Override
+                public boolean shouldOverrideUrlLoading(@NonNull WebView view, @NonNull WebResourceRequest request) {
+                    Uri uri = request.getUrl();
+                    if (!"https".equalsIgnoreCase(uri.getScheme())) {
+                        return true;
+                    }
+                    if (request.isForMainFrame()) {
+                        task.redirects += 1;
+                        if (task.redirects > 5) {
+                            task.fail("动态网页重定向次数过多");
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+
+                @Override
+                public void onPageFinished(@NonNull WebView view, @NonNull String url) {
+                    super.onPageFinished(view, url);
+                    if (!renderedTasks.containsKey(task.token) || !"loading".equals(task.state)) {
+                        return;
+                    }
+                    task.finalUrl = url;
+                    view.postDelayed(() -> injectRenderedCapture(task), 1200);
+                }
+
+                @Override
+                public boolean onRenderProcessGone(
+                        @NonNull WebView view,
+                        @NonNull RenderProcessGoneDetail detail
+                ) {
+                    task.fail("动态网页进程意外退出");
+                    return true;
+                }
+            });
+            rendered.loadUrl(task.initialUrl);
+            rendered.postDelayed(() -> {
+                if ("loading".equals(task.state) || "capturing".equals(task.state)) {
+                    task.fail("动态网页等待图片超时");
+                }
+            }, 240_000);
+        }
+
+        private void injectRenderedCapture(RenderedPageTask task) {
+            WebView rendered = task.webView;
+            if (rendered == null || !"loading".equals(task.state)) {
+                return;
+            }
+            try (InputStream input = getAssets().open("js/render-capture.js");
+                 ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+                byte[] buffer = new byte[16 * 1024];
+                int count;
+                while ((count = input.read(buffer)) >= 0) {
+                    output.write(buffer, 0, count);
+                }
+                String source = output.toString("UTF-8");
+                String bootstrap = "globalThis.__ECRYPTEES_CAPTURE_TOKEN__="
+                        + JSONObject.quote(task.token)
+                        + ";globalThis.__ECRYPTEES_CAPTURE_MAXIMUM__=" + task.maximum + ";";
+                task.state = "capturing";
+                rendered.evaluateJavascript(bootstrap + source, null);
+            } catch (IOException error) {
+                task.fail("无法载入动态网页捕获程序");
+            }
+        }
+
+        private void destroyRenderedWebView(RenderedPageTask task) {
+            runOnUiThread(() -> {
+                WebView rendered = task.webView;
+                task.webView = null;
+                if (rendered != null) {
+                    rendered.stopLoading();
+                    rendered.loadUrl("about:blank");
+                    rendered.clearHistory();
+                    rendered.clearCache(true);
+                    rendered.removeJavascriptInterface("AndroidRenderedCapture");
+                    rootView.removeView(rendered);
+                    rendered.destroy();
+                }
+                try {
+                    Uri uri = Uri.parse(task.finalUrl.isEmpty() ? task.initialUrl : task.finalUrl);
+                    String origin = uri.getScheme() + "://" + uri.getAuthority();
+                    WebStorage.getInstance().deleteOrigin(origin);
+                } catch (Exception ignored) {
+                    // Ephemeral WebView cleanup is best-effort.
+                }
+                CookieManager.getInstance().removeAllCookies(null);
+            });
+        }
+
+        private String normalizeHttpsUrl(String value) {
+            if (value == null || value.trim().isEmpty()) {
+                return null;
+            }
+            try {
+                URL url = new URL(value.trim());
+                if (!"https".equalsIgnoreCase(url.getProtocol()) || url.getHost().isEmpty()) {
+                    return null;
+                }
+                return url.toString();
+            } catch (Exception error) {
+                return null;
+            }
+        }
+
+        void abortAll() {
+            for (RemoteFetchTask task : tasks.values()) {
+                task.cancelAndCleanup();
+            }
+            tasks.clear();
+            for (RenderedPageTask task : renderedTasks.values()) {
+                task.cancelAndCleanup();
+            }
+            renderedTasks.clear();
+        }
+
+        void shutdown() {
+            abortAll();
+            executor.shutdownNow();
+        }
+
+        private final class RenderedPageTask {
+            final String token;
+            final String initialUrl;
+            final int maximum;
+            final List<CapturedRenderedImage> images = new ArrayList<>();
+            volatile String state = "loading";
+            volatile String error = "";
+            volatile String finalUrl = "";
+            volatile WebView webView;
+            volatile int redirects;
+            long totalBytes;
+
+            RenderedPageTask(String token, String initialUrl, int maximum) {
+                this.token = token;
+                this.initialUrl = initialUrl;
+                this.maximum = maximum;
+            }
+
+            synchronized CapturedRenderedImage findImage(int index) {
+                return index >= 0 && index < images.size() ? images.get(index) : null;
+            }
+
+            void fail(String message) {
+                if ("ready".equals(state) || "cancelled".equals(state)) {
+                    return;
+                }
+                error = message;
+                state = "error";
+                destroyRenderedWebView(this);
+            }
+
+            void cancelAndCleanup() {
+                state = "cancelled";
+                destroyRenderedWebView(this);
+                synchronized (this) {
+                    for (CapturedRenderedImage image : images) {
+                        image.cleanup();
+                    }
+                    images.clear();
+                }
+            }
+        }
+
+        private final class RenderedCaptureReceiver {
+            @JavascriptInterface
+            public boolean beginRenderedImage(String token, int index, String name, String mime, long size) {
+                return RemoteNetworkBridge.this.beginRenderedImage(token, index, name, mime, size);
+            }
+
+            @JavascriptInterface
+            public boolean writeRenderedImageChunk(String token, int index, String encoded) {
+                return RemoteNetworkBridge.this.writeRenderedImageChunk(token, index, encoded);
+            }
+
+            @JavascriptInterface
+            public boolean finishRenderedImage(String token, int index) {
+                return RemoteNetworkBridge.this.finishRenderedImage(token, index);
+            }
+
+            @JavascriptInterface
+            public void finishRenderedPage(String token, int count) {
+                RemoteNetworkBridge.this.finishRenderedPage(token, count);
+            }
+
+            @JavascriptInterface
+            public void failRenderedPage(String token, String message) {
+                RemoteNetworkBridge.this.failRenderedPage(token, message);
+            }
+        }
+
+        private final class CapturedRenderedImage {
+            final int index;
+            final String name;
+            final String mime;
+            final long size;
+            final File file;
+            long written;
+            OutputStream output;
+            RandomAccessFile reader;
+
+            CapturedRenderedImage(int index, String name, String mime, long size, File file) {
+                this.index = index;
+                this.name = name;
+                this.mime = mime;
+                this.size = size;
+                this.file = file;
+            }
+
+            void cleanup() {
+                try {
+                    if (output != null) {
+                        output.close();
+                    }
+                } catch (IOException ignored) {
+                    // Best-effort cleanup.
+                }
+                try {
+                    if (reader != null) {
+                        reader.close();
+                    }
+                } catch (IOException ignored) {
+                    // Best-effort cleanup.
+                }
+                output = null;
+                reader = null;
+                file.delete();
+            }
+        }
+
+        private final class RemoteFetchTask {
+            final String token;
+            final String initialUrl;
+            final String kind;
+            final String referer;
+            final File file;
+            volatile String state = "queued";
+            volatile String finalUrl = "";
+            volatile String contentType = "";
+            volatile long contentLength = -1;
+            volatile long bytesRead;
+            volatile String error = "";
+            volatile boolean cancelled;
+            volatile HttpURLConnection connection;
+            Future<?> future;
+            RandomAccessFile reader;
+
+            RemoteFetchTask(String token, String initialUrl, String kind, String referer, File file) {
+                this.token = token;
+                this.initialUrl = initialUrl;
+                this.kind = kind;
+                this.referer = referer;
+                this.file = file;
+            }
+
+            void cancel() {
+                cancelled = true;
+                state = "cancelled";
+                HttpURLConnection activeConnection = connection;
+                if (activeConnection != null) {
+                    activeConnection.disconnect();
+                }
+                Future<?> activeFuture = future;
+                if (activeFuture != null) {
+                    activeFuture.cancel(true);
+                }
+            }
+
+            void cancelAndCleanup() {
+                cancel();
+                synchronized (this) {
+                    if (reader != null) {
+                        try {
+                            reader.close();
+                        } catch (IOException ignored) {
+                            // Best-effort cleanup.
+                        }
+                        reader = null;
+                    }
+                }
+                cleanupFile();
+            }
+
+            void cleanupFile() {
+                if (file.exists()) {
+                    file.delete();
+                }
+            }
+        }
+    }
+
     public final class FileBridge {
         private final Map<String, HeicTask> heicTasks = new ConcurrentHashMap<>();
         private final ExecutorService heicExecutor = Executors.newFixedThreadPool(2);
         private final Semaphore fullSizeDecodeSlot = new Semaphore(1, true);
+
+        @JavascriptInterface
+        public String getAppVersionInfo() {
+            try {
+                JSONObject result = new JSONObject();
+                result.put("versionName", BuildConfig.VERSION_NAME);
+                result.put("versionCode", BuildConfig.VERSION_CODE);
+                return result.toString();
+            } catch (Exception error) {
+                return "{\"versionName\":\"\",\"versionCode\":0}";
+            }
+        }
+
+        @JavascriptInterface
+        public boolean isLauncherDisguiseEnabled() {
+            ComponentName calculator = launcherComponent("CalculatorLauncher");
+            return getPackageManager().getComponentEnabledSetting(calculator)
+                    == PackageManager.COMPONENT_ENABLED_STATE_ENABLED;
+        }
+
+        @JavascriptInterface
+        public boolean setLauncherDisguiseEnabled(boolean enabled) {
+            ComponentName ecryptees = launcherComponent("EcrypteesLauncher");
+            ComponentName calculator = launcherComponent("CalculatorLauncher");
+            ComponentName componentToEnable = enabled ? calculator : ecryptees;
+            ComponentName componentToDisable = enabled ? ecryptees : calculator;
+            try {
+                PackageManager manager = getPackageManager();
+                manager.setComponentEnabledSetting(
+                        componentToEnable,
+                        PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                        PackageManager.DONT_KILL_APP
+                );
+                manager.setComponentEnabledSetting(
+                        componentToDisable,
+                        PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                        PackageManager.DONT_KILL_APP
+                );
+                return true;
+            } catch (RuntimeException error) {
+                return false;
+            }
+        }
+
+        private ComponentName launcherComponent(String shortName) {
+            return new ComponentName(
+                    MainActivity.this,
+                    getPackageName() + "." + shortName
+            );
+        }
 
         @JavascriptInterface
         public synchronized String claimIncomingDocument() {

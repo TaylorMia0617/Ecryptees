@@ -2,4 +2,5 @@
 <resources>
     <color name="ecryptees_primary">#FF4081</color>
     <color name="ecryptees_background">#FCE4EC</color>
+    <color name="calculator_background">#263238</color>
 </resources>

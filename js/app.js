@@ -17,13 +17,8 @@
         buildImagePrefix,
         parseImagePayload
     } = codec;
-    const {
-        sniffImageType,
-        isAnimatedImage,
-        createJpegDownloadBlob,
-        optimizeImage
-    } = image;
-    const { makeJpegDownloadName, formatBytes, sanitizeDownloadName } = utils;
+    const { sniffImageType, isAnimatedImage } = image;
+    const { formatBytes, sanitizeDownloadName } = utils;
     const androidMedia = root.EcrypteesAndroidMedia;
     const {
         LEGACY_IMAGE_VERSION,
@@ -33,26 +28,24 @@
         MAX_COMPACT_IMAGE_CODE_LENGTH,
         MAX_IMAGE_CODE_LENGTH,
         MAX_CIPHER_TEXT_FILE_BYTES,
-        COMPRESSION_PRESETS,
         legacyImageCodePrefix,
         imageCodePrefix
     } = config;
 
     let selectedImage = null;
     let sourceImageUrl = '';
-    let compressedImageUrl = '';
     let cipherTextDownloadUrl = '';
     let decodedImageUrl = '';
+    let decodedImageDownloadUrl = '';
+    let currentImageResult = null;
+    let savedImageAssetId = '';
+    let imageSourceMode = 'local';
 
     function isHeifFormat(format) {
         return format?.mime === 'image/heic' || format?.mime === 'image/heif';
     }
     let importedImageCode = '';
     let imageBusy = false;
-
-    function getCompressionMode() {
-        return document.querySelector('input[name="compressionMode"]:checked')?.value || 'balanced';
-    }
 
     function setImageStatus(message, kind = 'info') {
         const status = document.getElementById('imageStatus');
@@ -78,32 +71,6 @@
         group.dataset.kind = 'info';
         document.getElementById('imageProgress').value = 0;
         document.getElementById('imageProgressText').textContent = '0%';
-    }
-
-    function clearCompressedPreview() {
-        if (compressedImageUrl) {
-            URL.revokeObjectURL(compressedImageUrl);
-            compressedImageUrl = '';
-        }
-
-        document.getElementById('compressedImagePreview').removeAttribute('src');
-        document.getElementById('compressedImageCard').hidden = true;
-        document.getElementById('compressedImageMeta').textContent = '';
-    }
-
-    function showCompressedPreview(result) {
-        clearCompressedPreview();
-        const blob = new Blob([result.bytes], { type: result.format.mime });
-        compressedImageUrl = URL.createObjectURL(blob);
-        document.getElementById('compressedImagePreview').src = compressedImageUrl;
-
-        const reduction = selectedImage
-            ? Math.max(0, (1 - result.bytes.length / selectedImage.bytes.length) * 100)
-            : 0;
-        const dimensions = result.width && result.height ? ` · ${result.width}×${result.height}` : '';
-        const quality = result.quality === null ? '' : ` · 质量 ${Math.round(result.quality * 100)}%`;
-        document.getElementById('compressedImageMeta').textContent = `${result.outputName} · ${formatBytes(result.bytes.length)}${dimensions}${quality} · 缩减 ${reduction.toFixed(1)}%`;
-        document.getElementById('compressedImageCard').hidden = false;
     }
 
     function clearCipherTextDownload() {
@@ -133,7 +100,8 @@
 
     function invalidateImageCipherOutput(message = '') {
         clearCipherTextDownload();
-        clearCompressedPreview();
+        currentImageResult = null;
+        savedImageAssetId = '';
 
         if (message && selectedImage) {
             setImageStatus(message);
@@ -143,12 +111,13 @@
     }
 
     function updateImageButtons() {
-        document.getElementById('encodeImageButton').disabled = imageBusy || !selectedImage;
-        document.getElementById('decodeImageButton').disabled = imageBusy || importedImageCode.length === 0;
+        document.getElementById('encodeImageButton').disabled = imageBusy || imageSourceMode !== 'local' || !selectedImage;
+        document.getElementById('decodeImageButton').disabled = imageBusy || imageSourceMode !== 'cipher' || importedImageCode.length === 0;
         document.getElementById('imageFile').disabled = imageBusy;
         document.getElementById('imageCodeFile').disabled = imageBusy;
-        document.getElementById('compressionPanel').disabled = imageBusy;
         document.getElementById('downloadCipherText').setAttribute('aria-disabled', String(imageBusy || !cipherTextDownloadUrl));
+        document.getElementById('saveImageToAssets').disabled = imageBusy;
+        document.getElementById('viewSavedImageButton').disabled = imageBusy || !savedImageAssetId;
     }
 
     function updateTextCopyButton(generated = false) {
@@ -210,6 +179,34 @@
         updateImageButtons();
     }
 
+    const pageTitles = Object.freeze({ text: '文本', image: '图片', comic: '漫画', history: '资产' });
+    const drawer = document.getElementById('appDrawer');
+    const drawerBackdrop = document.getElementById('appDrawerBackdrop');
+    const menuButton = document.getElementById('appMenuButton');
+
+    function openDrawer() {
+        drawerBackdrop.hidden = false;
+        drawer.setAttribute('aria-hidden', 'false');
+        menuButton.setAttribute('aria-expanded', 'true');
+        document.body.dataset.drawerOpen = 'true';
+        const active = drawer.querySelector('[role="tab"][aria-selected="true"]');
+        root.requestAnimationFrame(() => active?.focus());
+    }
+
+    function closeDrawer(restoreFocus = true) {
+        if (drawer.getAttribute('aria-hidden') === 'true') {
+            return false;
+        }
+        drawer.setAttribute('aria-hidden', 'true');
+        drawerBackdrop.hidden = true;
+        menuButton.setAttribute('aria-expanded', 'false');
+        delete document.body.dataset.drawerOpen;
+        if (restoreFocus) {
+            menuButton.focus();
+        }
+        return true;
+    }
+
     function switchTab(mode, focusTab = false) {
         const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
         const activeTab = tabs.find(tab => tab.dataset.mode === mode) || tabs[0];
@@ -223,10 +220,86 @@
                 panel.hidden = !active;
             }
         });
+        document.getElementById('appPageTitle').textContent = pageTitles[activeTab.dataset.mode] || 'Ecryptees';
+        const webComicPanel = document.getElementById('webComicSourcePanel');
+        document.getElementById('appModeBadge').textContent = activeTab.dataset.mode === 'comic' && webComicPanel && !webComicPanel.hidden
+            ? '网页导入需联网'
+            : '本地处理';
 
         if (focusTab) {
             activeTab.focus();
         }
+    }
+
+    function extensionForFormat(format) {
+        return format?.extension || ({
+            'image/png': 'png',
+            'image/jpeg': 'jpg',
+            'image/gif': 'gif',
+            'image/webp': 'webp',
+            'image/bmp': 'bmp',
+            'image/avif': 'avif',
+            'image/heic': 'heic',
+            'image/heif': 'heif'
+        }[format?.mime] || 'img');
+    }
+
+    function originalDownloadName(name, format) {
+        const extension = extensionForFormat(format);
+        const baseName = String(name || 'image').replace(/\.[^.]*$/, '') || 'image';
+        return sanitizeDownloadName(`${baseName}.${extension}`, extension);
+    }
+
+    function triggerBlobDownload(link) {
+        if (link?.href?.startsWith('blob:')) {
+            link.click();
+        }
+    }
+
+    async function saveCurrentImageResult() {
+        if (!currentImageResult || savedImageAssetId || !document.getElementById('saveImageToAssets').checked) {
+            return savedImageAssetId;
+        }
+        if (!root.EcrypteesImageAssets) {
+            throw new Error('图片资产功能不可用');
+        }
+        const asset = await root.EcrypteesImageAssets.saveImageAsset({
+            blob: currentImageResult.blob,
+            fileName: currentImageResult.fileName,
+            mime: currentImageResult.format.mime,
+            width: currentImageResult.width,
+            height: currentImageResult.height
+        });
+        savedImageAssetId = asset.assetId;
+        document.dispatchEvent(new CustomEvent('ecryptees-image-asset-saved', { detail: { asset } }));
+        updateImageButtons();
+        return savedImageAssetId;
+    }
+
+    function setImageSourceMode(mode) {
+        const nextMode = mode === 'cipher' ? 'cipher' : 'local';
+        const changed = nextMode !== imageSourceMode;
+        if (changed) {
+            currentImageResult = null;
+            savedImageAssetId = '';
+            document.getElementById('saveImageToAssets').checked = false;
+            document.getElementById('decodedImageCard').hidden = true;
+        }
+        imageSourceMode = nextMode;
+        const local = imageSourceMode === 'local';
+        document.getElementById('localImageSourcePanel').hidden = !local;
+        document.getElementById('sourceImageCard').hidden = !local || !selectedImage;
+        document.getElementById('cipherImageSourcePanel').hidden = local;
+        document.getElementById('encodeImageButton').hidden = !local;
+        document.getElementById('decodeImageButton').hidden = local;
+        if (local) {
+            document.getElementById('decodedImageCard').hidden = true;
+        }
+        document.getElementById('localImageSourceButton').classList.toggle('is-active', local);
+        document.getElementById('localImageSourceButton').setAttribute('aria-pressed', String(local));
+        document.getElementById('cipherImageSourceButton').classList.toggle('is-active', !local);
+        document.getElementById('cipherImageSourceButton').setAttribute('aria-pressed', String(!local));
+        updateImageButtons();
     }
 
     async function handleImageSelection(event) {
@@ -281,15 +354,14 @@
             const dimensions = width && height ? ` · ${width}×${height}` : '';
             document.getElementById('sourceImageMeta').textContent = `${file.name} · ${format.label} · ${formatBytes(file.size)}${dimensions}${animated ? ' · 动画' : ''}`;
             document.getElementById('sourceImageCard').hidden = false;
-            importedImageCode = '';
-            document.getElementById('imageCodeFile').value = '';
-            document.getElementById('imageCodeFileMeta').textContent = '尚未选择 TXT';
             clearCipherTextDownload();
-            clearCompressedPreview();
+            currentImageResult = null;
+            savedImageAssetId = '';
+            document.getElementById('saveImageToAssets').checked = false;
             resetImageProgress();
             setImageStatus(animated
-                ? '检测到动画：将取首帧压缩为 JPG 后编码。'
-                : '图片已准备好，将按所选档位压缩为 JPG 后编码。');
+                ? '图片已准备好；动画及原始字节将无损写入密文。'
+                : '图片已准备好，将保持原始格式和画质生成密文。');
         } catch (error) {
             event.target.value = '';
             setImageStatus(error.message, 'error');
@@ -336,6 +408,9 @@
             }
 
             importedImageCode = input;
+            currentImageResult = null;
+            savedImageAssetId = '';
+            document.getElementById('saveImageToAssets').checked = false;
             document.getElementById('imageCodeFileMeta').textContent = `${file.name} · ${formatBytes(file.size)} · ${input.length.toLocaleString()} 字符`;
             resetImageProgress();
             setImageStatus('密文 TXT 已读取，可以开始解码。');
@@ -390,22 +465,35 @@
         await waitForNextFrame();
 
         try {
-            const mode = getCompressionMode();
-            setImageProgress(8);
-            setImageStatus('图片验证完成，正在准备压缩… 8%');
-            const processedImage = await optimizeImage(selectedImage, mode, info => {
-                const overallProgress = 10 + Math.round(info.percent * 0.55);
+            const sourceName = selectedImage.sourceFile?.name || selectedImage.file.name;
+            const originalImage = {
+                file: selectedImage.sourceFile || selectedImage.file,
+                bytes: selectedImage.bytes,
+                format: selectedImage.format,
+                metadata: {
+                    name: sourceName,
+                    type: selectedImage.format.mime,
+                    size: selectedImage.bytes.length,
+                    source: {
+                        name: sourceName,
+                        type: selectedImage.format.mime,
+                        size: selectedImage.bytes.length,
+                        width: selectedImage.width || null,
+                        height: selectedImage.height || null,
+                        animated: selectedImage.animated
+                    }
+                }
+            };
+            setImageProgress(10);
+            setImageStatus('图片验证完成，正在计算完整性校验… 10%');
+            const imageCrc32 = await calculateCrc32Chunked(originalImage.bytes, progress => {
+                const overallProgress = 10 + Math.round(progress * 0.2);
                 setImageProgress(overallProgress);
-                setImageStatus(`${info.message}… ${overallProgress}%`);
+                setImageStatus(`正在校验原始图片… ${overallProgress}%`);
             });
-            const imageCrc32 = await calculateCrc32Chunked(processedImage.bytes, progress => {
-                const overallProgress = 65 + Math.round(progress * 0.1);
-                setImageProgress(overallProgress);
-                setImageStatus(`正在校验压缩结果… ${overallProgress}%`);
-            });
-            const prefix = buildImagePrefix(processedImage, imageCrc32);
-            const encoded = await encodeImageByteSegmentsChunked([prefix, processedImage.bytes], progress => {
-                const overallProgress = 75 + Math.round(progress * 0.22);
+            const prefix = buildImagePrefix(originalImage, imageCrc32);
+            const encoded = await encodeImageByteSegmentsChunked([prefix, originalImage.bytes], progress => {
+                const overallProgress = 30 + Math.round(progress * 0.67);
                 setImageProgress(overallProgress);
                 setImageStatus(`正在编码图片… ${overallProgress}%`);
             });
@@ -413,13 +501,21 @@
             setImageProgress(98);
             setImageStatus('正在生成密文 TXT 文件… 98%');
             await waitForNextFrame();
-            const textFile = createCipherTextDownload(encoded, selectedImage.sourceFile?.name || selectedImage.file.name);
-            showCompressedPreview(processedImage);
+            const textFile = createCipherTextDownload(encoded, sourceName);
+            currentImageResult = {
+                blob: new Blob([selectedImage.bytes], { type: selectedImage.format.mime }),
+                fileName: sourceName,
+                format: selectedImage.format,
+                width: selectedImage.width,
+                height: selectedImage.height
+            };
+            await saveCurrentImageResult();
             setImageProgress(100, 'success');
-            const reduction = Math.max(0, (1 - processedImage.bytes.length / selectedImage.bytes.length) * 100);
-            const animationNote = processedImage.animation === 'first-frame' ? '，动画已转换为首帧' : '';
             document.getElementById('imageCodeFileMeta').textContent = `${textFile.fileName} · ${formatBytes(textFile.byteLength)} · ${encoded.length.toLocaleString()} 字符`;
-            setImageStatus(`编码完成：${formatBytes(selectedImage.bytes.length)} → ${formatBytes(processedImage.bytes.length)}，TXT 共 ${encoded.length.toLocaleString()} 个密文字符，图片缩减 ${reduction.toFixed(1)}%${animationNote}。请下载密文文件。`, 'success');
+            setImageStatus(savedImageAssetId
+                ? `无损编码完成并已保存到资产：${formatBytes(selectedImage.bytes.length)}。`
+                : `无损编码完成：保留 ${formatBytes(selectedImage.bytes.length)} 原始图片字节。`, 'success');
+            triggerBlobDownload(document.getElementById('downloadCipherText'));
         } catch (error) {
             document.getElementById('imageProgressGroup').dataset.kind = 'error';
             setImageStatus(error.message || '图片编码失败', 'error');
@@ -471,28 +567,41 @@
             }
             const result = parseImagePayload(decoded.payload);
             setImageProgress(98);
-            setImageStatus(result.format.mime === 'image/jpeg' ? '正在准备 JPG… 98%' : '正在转换为 JPG… 98%');
-            const jpegBlob = await createJpegDownloadBlob(result.imageBytes, result.format.mime);
-            const nextUrl = URL.createObjectURL(jpegBlob);
-            const downloadName = makeJpegDownloadName(result.metadata.name);
+            setImageStatus('正在准备原始图片… 98%');
+            const originalBlob = new Blob([result.imageBytes], { type: result.format.mime });
+            let previewBlob = originalBlob;
+            if (isHeifFormat(result.format) && androidMedia?.isHeicSupported()) {
+                previewBlob = (await androidMedia.decodeHeic(originalBlob, { name: result.metadata.name })).file;
+            }
+            const nextUrl = URL.createObjectURL(previewBlob);
+            const downloadName = originalDownloadName(result.metadata.name, result.format);
 
             if (decodedImageUrl) {
                 URL.revokeObjectURL(decodedImageUrl);
             }
+            if (decodedImageDownloadUrl) {
+                URL.revokeObjectURL(decodedImageDownloadUrl);
+            }
 
             decodedImageUrl = nextUrl;
+            decodedImageDownloadUrl = URL.createObjectURL(originalBlob);
             document.getElementById('decodedImagePreview').src = decodedImageUrl;
-            const compression = result.metadata.compression;
-            const compressionLabel = compression && typeof compression.mode === 'string'
-                ? ` · ${COMPRESSION_PRESETS[compression.mode]?.label || compression.mode}`
-                : '';
-            document.getElementById('decodedImageMeta').textContent = `${downloadName} · JPG · ${formatBytes(jpegBlob.size)}${compressionLabel}`;
+            document.getElementById('decodedImageMeta').textContent = `${downloadName} · ${result.format.label} · ${formatBytes(originalBlob.size)}`;
             const download = document.getElementById('downloadImage');
-            download.href = decodedImageUrl;
+            download.href = decodedImageDownloadUrl;
             download.download = downloadName;
             document.getElementById('decodedImageCard').hidden = false;
+            currentImageResult = {
+                blob: originalBlob,
+                fileName: downloadName,
+                format: result.format,
+                width: Number(result.metadata?.source?.width) || 0,
+                height: Number(result.metadata?.source?.height) || 0
+            };
+            await saveCurrentImageResult();
             setImageProgress(100, 'success');
-            setImageStatus('图片解码成功，可以预览或下载。', 'success');
+            setImageStatus(savedImageAssetId ? '图片认证成功、已按原始字节保存到资产。' : '图片认证成功，已恢复原始格式和字节。', 'success');
+            triggerBlobDownload(download);
         } catch (error) {
             document.getElementById('imageProgressGroup').dataset.kind = 'error';
             setImageStatus(error.message || '图片解码失败', 'error');
@@ -503,7 +612,10 @@
 
     const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
     tabs.forEach((tab, index) => {
-        tab.addEventListener('click', () => switchTab(tab.dataset.mode));
+        tab.addEventListener('click', () => {
+            switchTab(tab.dataset.mode);
+            closeDrawer();
+        });
         tab.addEventListener('keydown', event => {
             let targetIndex = null;
 
@@ -523,6 +635,20 @@
             }
         });
     });
+    menuButton.addEventListener('click', () => {
+        if (drawer.getAttribute('aria-hidden') === 'true') {
+            openDrawer();
+        } else {
+            closeDrawer();
+        }
+    });
+    drawerBackdrop.addEventListener('click', () => closeDrawer());
+    document.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && closeDrawer()) {
+            event.preventDefault();
+        }
+    });
+    root.EcrypteesAppNavigation = Object.freeze({ closeDrawer });
 
     const imageFileInput = document.getElementById('imageFile');
     imageFileInput.addEventListener('change', handleImageSelection);
@@ -533,12 +659,28 @@
         }
     });
 
-    document.querySelectorAll('input[name="compressionMode"]').forEach(input => {
-        input.addEventListener('change', () => {
-            const preset = COMPRESSION_PRESETS[getCompressionMode()];
-            document.getElementById('compressionDetail').textContent = preset.description;
-            invalidateImageCipherOutput('压缩档位已改变，请重新编码图片。');
-        });
+    document.getElementById('localImageSourceButton').addEventListener('click', () => setImageSourceMode('local'));
+    document.getElementById('cipherImageSourceButton').addEventListener('click', () => setImageSourceMode('cipher'));
+    document.getElementById('saveImageToAssets').addEventListener('change', async event => {
+        if (!event.currentTarget.checked || !currentImageResult || savedImageAssetId) {
+            updateImageButtons();
+            return;
+        }
+        try {
+            setImageBusy(true);
+            await saveCurrentImageResult();
+            setImageStatus('图片已保存到资产。', 'success');
+        } catch (error) {
+            event.currentTarget.checked = false;
+            setImageStatus(error.message || '图片资产保存失败', 'error');
+        } finally {
+            setImageBusy(false);
+        }
+    });
+    document.getElementById('viewSavedImageButton').addEventListener('click', () => {
+        if (savedImageAssetId) {
+            root.EcrypteesImageAssetsUI?.openAsset(savedImageAssetId);
+        }
     });
     const imageCodeFileInput = document.getElementById('imageCodeFile');
     imageCodeFileInput.addEventListener('change', handleCipherTextSelection);
@@ -553,14 +695,14 @@
         if (sourceImageUrl) {
             URL.revokeObjectURL(sourceImageUrl);
         }
-        if (compressedImageUrl) {
-            URL.revokeObjectURL(compressedImageUrl);
-        }
         if (cipherTextDownloadUrl) {
             URL.revokeObjectURL(cipherTextDownloadUrl);
         }
         if (decodedImageUrl) {
             URL.revokeObjectURL(decodedImageUrl);
+        }
+        if (decodedImageDownloadUrl) {
+            URL.revokeObjectURL(decodedImageDownloadUrl);
         }
     });
 
@@ -571,5 +713,6 @@
     document.getElementById('decodeTextButton').addEventListener('click', decode);
     document.getElementById('encodeImageButton').addEventListener('click', encodeImage);
     document.getElementById('decodeImageButton').addEventListener('click', decodeImage);
+    setImageSourceMode('local');
     updateImageButtons();
 })(globalThis);

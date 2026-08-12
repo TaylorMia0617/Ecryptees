@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#ff4081">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
@@ -13,55 +13,45 @@
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="stylesheet" href="css/styles.css">
 </head>
-<body>
+<body data-lock-state="checking">
+    <header class="app-topbar">
+        <button class="app-menu-button" id="appMenuButton" type="button" aria-label="打开导航" aria-controls="appDrawer" aria-expanded="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v2H4V6Zm0 5h16v2H4v-2Zm0 5h16v2H4v-2Z"/></svg>
+        </button>
+        <strong id="appPageTitle">文本</strong>
+        <span class="app-offline-badge" id="appModeBadge">本地处理</span>
+    </header>
+    <div class="app-drawer-backdrop" id="appDrawerBackdrop" hidden></div>
+    <aside class="app-drawer" id="appDrawer" aria-label="主导航" aria-hidden="true">
+        <div class="app-drawer-brand">
+            <div class="app-drawer-brand-heading">
+                <strong>Ecryptees</strong>
+                <button class="app-settings-button" id="appSettingsButton" type="button" aria-label="打开设置" title="设置">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 13a7.8 7.8 0 0 0 .1-1 7.8 7.8 0 0 0-.1-1l2.1-1.6-2-3.4-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3.3h-4L10.6 6a7.4 7.4 0 0 0-1.7 1L6.4 6l-2 3.4L6.5 11a7.8 7.8 0 0 0-.1 1 7.8 7.8 0 0 0 .1 1l-2.1 1.6 2 3.4 2.5-1a7.4 7.4 0 0 0 1.7 1l.4 2.7h4l.4-2.7a7.4 7.4 0 0 0 1.7-1l2.5 1 2-3.4-2.2-1.6ZM13 15.5A3.5 3.5 0 1 1 13 8a3.5 3.5 0 0 1 0 7.5Z"/></svg>
+                </button>
+            </div>
+            <span>本地优先的加密漫画工具</span>
+        </div>
+        <span class="app-drawer-label app-drawer-label--offline">离线工具</span>
+        <div class="tabs app-drawer-nav" role="tablist" aria-label="编解码类型">
+            <button class="tab" id="textTab" type="button" role="tab" aria-selected="true" aria-controls="textPanel" tabindex="0" data-mode="text"><span aria-hidden="true">文</span>文本</button>
+            <button class="tab" id="imageTab" type="button" role="tab" aria-selected="false" aria-controls="imagePanel" tabindex="-1" data-mode="image"><span aria-hidden="true">图</span>图片</button>
+            <button class="tab" id="comicTab" type="button" role="tab" aria-selected="false" aria-controls="comicPanel" tabindex="-1" data-mode="comic"><span aria-hidden="true">漫</span>漫画</button>
+            <button class="tab" id="historyTab" type="button" role="tab" aria-selected="false" aria-controls="historyPanel" tabindex="-1" data-mode="history"><span aria-hidden="true">资</span>资产</button>
+        </div>
+        <div class="app-drawer-future">
+            <span class="app-drawer-label">通道模式 <em>未来</em></span>
+            <button type="button" disabled><span aria-hidden="true">存</span>哑存储</button>
+            <button type="button" disabled><span aria-hidden="true">连</span>打洞直连</button>
+        </div>
+        <div class="app-drawer-spacer"></div>
+        <p class="app-drawer-privacy">网页导入仅在点击“分析网页”后联网；其他功能保持本地处理。</p>
+    </aside>
     <main class="container">
-        <h1>呃嗯！呼～❤呃啊～哼！！呃嗯哈嗯～啊</h1>
+        <h1 class="sr-only">呃嗯！呼～❤呃啊～哼！！呃嗯哈嗯～啊</h1>
         <div class="install-app-row" id="installAppRow" hidden>
             <button class="install-app-button" id="installAppButton" type="button">安装到桌面</button>
             <span class="install-app-hint">安装后可像普通应用一样离线打开</span>
-        </div>
-
-        <div class="tabs" role="tablist" aria-label="编解码类型">
-            <button
-                class="tab"
-                id="textTab"
-                type="button"
-                role="tab"
-                aria-selected="true"
-                aria-controls="textPanel"
-                tabindex="0"
-                data-mode="text"
-            >文本</button>
-            <button
-                class="tab"
-                id="imageTab"
-                type="button"
-                role="tab"
-                aria-selected="false"
-                aria-controls="imagePanel"
-                tabindex="-1"
-                data-mode="image"
-            >图片</button>
-            <button
-                class="tab"
-                id="comicTab"
-                type="button"
-                role="tab"
-                aria-selected="false"
-                aria-controls="comicPanel"
-                tabindex="-1"
-                data-mode="comic"
-            >漫画</button>
-            <button
-                class="tab"
-                id="historyTab"
-                type="button"
-                role="tab"
-                aria-selected="false"
-                aria-controls="historyPanel"
-                tabindex="-1"
-                data-mode="history"
-            >书架</button>
         </div>
 
         <section id="textPanel" role="tabpanel" aria-labelledby="textTab">
@@ -91,7 +81,16 @@
         </section>
 
         <section id="imagePanel" role="tabpanel" aria-labelledby="imageTab" hidden>
-            <div class="image-upload">
+            <div class="image-workflow-card">
+                <div class="image-card-header">
+                    <strong>图片加密 / 解密</strong>
+                    <span class="image-meta">保持原始画质</span>
+                </div>
+                <div class="image-source-switch" role="group" aria-label="图片来源">
+                    <button class="image-source-option is-active" id="localImageSourceButton" type="button" aria-pressed="true">本地图片</button>
+                    <button class="image-source-option" id="cipherImageSourceButton" type="button" aria-pressed="false">密文 TXT</button>
+                </div>
+            <div class="image-upload" id="localImageSourcePanel">
                 <input
                     class="file-input"
                     id="imageFile"
@@ -99,27 +98,8 @@
                     accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,.avif,.heic,.heif,image/png,image/jpeg,image/jpg,image/gif,image/webp,image/bmp,image/avif,image/heic,image/heif"
                 >
                 <label class="file-picker" for="imageFile" tabindex="0">选择本地图片</label>
-                <p class="hint">支持 PNG、JPEG、GIF、WebP、BMP、AVIF、HEIC、HEIF，最大 15 MiB。图片只在本地处理。</p>
+                <p class="hint">支持 PNG、JPEG、GIF、WebP、BMP、AVIF、HEIC、HEIF，最大 15 MiB。</p>
             </div>
-
-            <fieldset class="compression-panel" id="compressionPanel">
-                <legend class="compression-title">压缩强度</legend>
-                <div class="compression-options" role="radiogroup" aria-label="图片压缩强度">
-                    <label class="compression-option">
-                        <input type="radio" name="compressionMode" value="clear">
-                        <span>清晰</span>
-                    </label>
-                    <label class="compression-option">
-                        <input type="radio" name="compressionMode" value="balanced" checked>
-                        <span>平衡</span>
-                    </label>
-                    <label class="compression-option">
-                        <input type="radio" name="compressionMode" value="extreme">
-                        <span>极限</span>
-                    </label>
-                </div>
-                <p class="compression-detail" id="compressionDetail">最长边 1440px，JPG 初始质量 72%，自动多轮缩减。</p>
-            </fieldset>
 
             <div class="image-card" id="sourceImageCard" hidden>
                 <div class="image-card-header">
@@ -129,30 +109,28 @@
                 <img class="image-preview" id="sourceImagePreview" alt="待编码图片预览">
             </div>
 
-            <div class="image-card" id="compressedImageCard" hidden>
-                <div class="image-card-header">
-                    <strong>压缩结果</strong>
-                    <span class="image-meta" id="compressedImageMeta"></span>
-                </div>
-                <img class="image-preview" id="compressedImagePreview" alt="压缩后的图片预览">
-            </div>
-
-            <div class="image-card cipher-file-card">
+            <div class="image-card cipher-file-card" id="cipherImageSourcePanel" hidden>
                 <div class="image-card-header">
                     <strong>图片密文文件</strong>
                     <span class="image-meta" id="imageCodeFileMeta">尚未选择 TXT</span>
                 </div>
                 <div class="cipher-file-actions">
-                    <a class="download-button" id="downloadCipherText" href="#" download aria-disabled="true">下载密文 TXT</a>
+                    <a class="download-button" id="downloadCipherText" href="#" download aria-disabled="true" hidden>下载密文 TXT</a>
                     <input class="file-input" id="imageCodeFile" type="file" accept=".txt,text/plain">
                     <label class="file-picker" id="imageCodeFilePicker" for="imageCodeFile" tabindex="0">选择密文 TXT</label>
                 </div>
-                <p class="hint">编码后下载 TXT；解码时选择本工具生成的 TXT 文件。不会写入剪贴板。</p>
+                <p class="hint">只有校验完整通过才会显示和保存图片。</p>
             </div>
 
+            <label class="image-save-asset-option" for="saveImageToAssets">
+                <input id="saveImageToAssets" type="checkbox">
+                <span>同时保存到资产</span>
+            </label>
+
             <div class="button-group image-actions">
-                <button id="encodeImageButton" type="button"  disabled>编码图片</button>
-                <button id="decodeImageButton" type="button"  disabled>解码图片</button>
+                <button id="encodeImageButton" type="button" disabled>生成并下载 .txt</button>
+                <button id="decodeImageButton" type="button" disabled hidden>解密并下载图片</button>
+                <button class="secondary-button image-go-view" id="viewSavedImageButton" type="button" disabled><span aria-hidden="true">✈</span> 去查看</button>
             </div>
 
             <div class="image-progress" id="imageProgressGroup" hidden>
@@ -171,6 +149,8 @@
                     <a class="download-button" id="downloadImage" href="#" download>下载图片</a>
                 </div>
             </div>
+            <p class="image-local-note">保持原始画质，仅在本地处理</p>
+            </div>
         </section>
 
         <section id="comicPanel" role="tabpanel" aria-labelledby="comicTab" hidden>
@@ -181,7 +161,11 @@
                     <strong>创建漫画归档</strong>
                     <span class="image-meta" id="comicSelectionSummary">尚未选择图片</span>
                 </div>
-                <div class="image-upload">
+                <div class="comic-source-switch" role="group" aria-label="漫画图片来源">
+                    <button class="comic-source-option is-active" id="localComicSourceButton" type="button" aria-pressed="true">本地图片</button>
+                    <button class="comic-source-option" id="webComicSourceButton" type="button" aria-pressed="false">网页链接</button>
+                </div>
+                <div class="image-upload" id="localComicSourcePanel">
                     <input
                         class="file-input"
                         id="comicFiles"
@@ -195,6 +179,30 @@
                         <span class="comic-hint-detail">不压缩、不转格式；输出会因清单和校验信息略大于原图总量。</span>
                     </p>
                 </div>
+                <div class="web-import-panel" id="webComicSourcePanel" hidden>
+                    <div class="web-import-intro">
+                        <strong>从网页导入图片</strong>
+                        <p>读取静态 HTML 中的全部图片，根据顺序导入</p>
+                    </div>
+                    <label for="webImportUrl">HTTPS 网页链接</label>
+                    <div class="web-import-url-row">
+                        <input id="webImportUrl" type="url" inputmode="url" autocomplete="url" placeholder="https://example.com/comic/123">
+                        <button class="web-import-clear-url" id="clearWebImportUrlButton" type="button" aria-label="清除网页链接和当前网页任务" title="清除网页链接和当前网页任务">×</button>
+                        <button id="analyzeWebImportButton" type="button">分析网页</button>
+                    </div>
+                    <p class="web-import-network-note">仅点击“分析网页”后联网；静态 HTML 没有图片时，Android 会在隔离临时页运行网页脚本并等待图片加载。需要开启 VPN 或 Clash。</p>
+                    <div class="web-import-results" id="webImportResults" hidden>
+                        <div class="web-import-results-header">
+                            <strong id="webImportSummary">尚未分析</strong>
+                            <button class="secondary-button" id="webImportSelectAllButton" type="button">全选</button>
+                        </div>
+                        <ol class="web-import-list" id="webImportList" aria-label="网页图片顺序"></ol>
+                        <div class="web-import-actions">
+                            <button class="secondary-button" id="clearWebImportButton" type="button">清除结果</button>
+                            <button id="downloadWebImportButton" type="button">下载并加入漫画</button>
+                        </div>
+                    </div>
+                </div>
 
                 <ol class="comic-file-list" id="comicFileList" aria-label="漫画页面顺序"></ol>
 
@@ -205,7 +213,8 @@
 
                 <p class="comic-security-note">内置码表随应用公开，只能隐藏内容并检测损坏，不等同于私人密码。未来版本可增加外部密码本。</p>
                 <div class="button-group comic-actions">
-                    <button id="encryptComicButton" type="button" disabled>加密并加入书架</button>
+                    <button id="encryptComicButton" type="button" disabled>加密并加入资产</button>
+                    <button id="viewSavedComicButton" type="button" hidden><span aria-hidden="true">✈</span> 去查看</button>
                     <a class="download-button" id="downloadComicArchive" href="#" aria-disabled="true" hidden>下载 .ecomic</a>
                     <button class="secondary-button" id="clearComicFilesButton" type="button" disabled>清空列表</button>
                     <button class="secondary-button" id="cancelComicButton" type="button" hidden>取消任务</button>
@@ -235,50 +244,55 @@
         <section id="historyPanel" role="tabpanel" aria-labelledby="historyTab" hidden>
             <div class="history-header">
                 <div>
-                    <h2>漫画书架</h2>
-                    <p class="hint" id="historyDescription">独立目录保存永久文件；浏览器数据库只作为可重建的阅读缓存。</p>
+                    <h2>资产</h2>
+                    <p class="hint" id="historyDescription">独立目录保存永久漫画；浏览器数据库只作为可重建的阅读缓存。</p>
                 </div>
-                <button class="secondary-button history-clear" id="clearHistoryButton" type="button" disabled>清空书架</button>
+                <button class="secondary-button history-clear" id="clearHistoryButton" type="button" disabled>清空漫画</button>
+            </div>
+            <div class="asset-type-switch" role="group" aria-label="资产类型">
+                <button class="is-active" id="assetTypeComicButton" type="button" aria-pressed="true">漫画</button>
+                <button id="assetTypeImageButton" type="button" aria-pressed="false">图片</button>
             </div>
             <div class="history-directory" id="historyDirectoryPanel">
                 <div>
-                    <strong id="historyDirectoryTitle">独立书架目录</strong>
+                    <strong id="historyDirectoryTitle">独立漫画目录</strong>
                     <span id="historyDirectorySummary">尚未连接；选择的目录可直接备份或打包为 ZIP</span>
                 </div>
                 <div class="history-directory-actions">
-                    <button id="selectHistoryDirectoryButton" type="button">选择书架目录</button>
-                    <button class="secondary-button" id="migrateHistoryButton" type="button" disabled>迁移当前书架</button>
+                    <button id="selectHistoryDirectoryButton" type="button">选择漫画目录</button>
+                    <button class="secondary-button" id="migrateHistoryButton" type="button" disabled>迁移当前漫画</button>
                 </div>
             </div>
             <div class="history-toolbar">
-                <label class="sr-only" for="historySearch">搜索漫画标题</label>
-                <input id="historySearch" type="search" placeholder="搜索漫画标题">
-                <div class="history-sort-actions">
-                    <details class="history-view-menu" id="historyViewMenu">
-                        <summary id="historyViewSummary">最近阅读 · 全部</summary>
-                        <div class="history-view-menu-panel">
-                            <label for="historySort">排序方式</label>
-                            <select id="historySort">
-                                <option value="recent">最近阅读</option>
-                                <option value="converted">最近转存</option>
-                                <option value="title">标题</option>
-                            </select>
-                            <label for="historyGroupFilterSelect">文件夹</label>
-                            <select id="historyGroupFilterSelect">
-                                <option value="all">全部</option>
-                                <option value="ungrouped">未分组</option>
-                            </select>
-                        </div>
-                    </details>
+                <div class="history-sort-actions asset-toolbar-actions">
+                    <label class="history-view-menu" id="historyViewMenu" for="historyGroupFilterSelect">
+                        <span class="sr-only" id="historyViewSummary">全部文件夹</span>
+                        <select id="historyGroupFilterSelect" aria-label="选择文件夹">
+                            <option value="all">全部文件夹</option>
+                            <option value="ungrouped">未分组</option>
+                        </select>
+                    </label>
                     <button class="history-folder-add" id="addHistoryFolderButton" type="button" aria-label="添加文件夹" title="添加文件夹">
                         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 4l2 2h7a2 2 0 0 1 2 2v3h-2V8h-7.8l-2-2H5v12h7v2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h5Zm7 8v3h3v2h-3v3h-2v-3h-3v-2h3v-3h2Z"/></svg>
                     </button>
+                    <label class="asset-sort-menu" id="assetSortMenu" for="historySort" title="排序方式">
+                        <span class="asset-sort-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 6h16v2H4V6Zm0 5h11v2H4v-2Zm0 5h7v2H4v-2Z"/></svg></span>
+                        <select id="historySort" aria-label="排序方式">
+                            <option value="recent">最近阅读</option>
+                            <option value="converted">最近加入</option>
+                            <option value="title">标题</option>
+                        </select>
+                    </label>
                 </div>
+            </div>
+            <div class="history-search-row">
+                <label class="sr-only" for="historySearch">搜索资产标题</label>
+                <input id="historySearch" type="search" placeholder="搜索资产标题">
             </div>
             <div class="history-storage" id="historyStorageSummary">正在读取本地存储空间…</div>
             <div class="history-empty" id="historyEmptyState" hidden>
-                <strong>书架还是空的</strong>
-                <p id="historyEmptyDescription">连接书架目录可恢复已有漫画；加密或解密 `.ecomic` 后也会自动加入。</p>
+                <strong id="historyEmptyTitle">资产还是空的</strong>
+                <p id="historyEmptyDescription">连接漫画目录可恢复已有漫画；加密或解密 `.ecomic` 后也会自动加入资产。</p>
                 <button id="historyGoToComicButton" type="button">前往漫画模式</button>
             </div>
             <div class="history-grid" id="historyGrid" aria-live="polite"></div>
@@ -286,6 +300,72 @@
         </section>
         <p class="sr-only" id="copyStatus" role="status" aria-live="polite"></p>
     </main>
+
+    <dialog class="app-settings-dialog" id="appSettingsDialog" aria-labelledby="appSettingsTitle">
+        <div class="app-settings-shell">
+            <header class="app-settings-header">
+                <h2 id="appSettingsTitle">设置</h2>
+                <button class="app-settings-close" id="appSettingsCloseButton" type="button" aria-label="关闭设置" title="关闭">×</button>
+            </header>
+            <section class="app-settings-section" aria-labelledby="privacySettingsTitle">
+                <h3 id="privacySettingsTitle">隐私</h3>
+                <div class="app-setting-row">
+                    <div>
+                        <strong>应用锁</strong>
+                        <span id="appLockSummary">正在读取设置…</span>
+                    </div>
+                    <button id="configureAppLockButton" type="button">设置应用锁</button>
+                </div>
+                <button class="secondary-button app-lock-disable" id="disableAppLockButton" type="button" hidden>关闭应用锁</button>
+                <label class="app-setting-row app-setting-switch" for="launcherDisguiseToggle">
+                    <span>
+                        <strong>应用伪装</strong>
+                        <span id="launcherDisguiseSummary">Android 桌面显示为“计算器”</span>
+                    </span>
+                    <input id="launcherDisguiseToggle" type="checkbox" role="switch">
+                </label>
+            </section>
+            <section class="app-settings-section" aria-labelledby="versionSettingsTitle">
+                <h3 id="versionSettingsTitle">应用信息</h3>
+                <div class="app-version-row">
+                    <span>版本</span>
+                    <strong id="appVersionInfo">1.0.13 · code 14</strong>
+                </div>
+            </section>
+        </div>
+    </dialog>
+
+    <dialog class="app-pin-dialog" id="appPinDialog" aria-labelledby="appPinDialogTitle">
+        <form class="app-pin-shell" id="appPinForm">
+            <h2 id="appPinDialogTitle">设置应用锁</h2>
+            <p class="app-pin-description" id="appPinDescription">请输入并确认四位数字密码。</p>
+            <label id="currentPinField" for="currentAppPin" hidden>当前密码</label>
+            <input id="currentAppPin" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="current-password" hidden>
+            <label id="newPinField" for="newAppPin">新密码</label>
+            <input id="newAppPin" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="new-password">
+            <label id="confirmPinField" for="confirmAppPin">确认新密码</label>
+            <input id="confirmAppPin" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="new-password">
+            <p class="app-pin-warning">忘记密码只能清除应用数据或卸载重装；这也会删除应用私有资产及阅读进度。</p>
+            <p class="history-dialog-error" id="appPinError" role="alert" hidden></p>
+            <div class="history-dialog-actions">
+                <button class="secondary-button" id="appPinCancelButton" type="button">取消</button>
+                <button id="appPinSubmitButton" type="submit">保存</button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog class="app-unlock-dialog" id="appUnlockDialog" aria-labelledby="appUnlockTitle">
+        <form class="app-unlock-shell" id="appUnlockForm">
+            <span class="app-unlock-mark" aria-hidden="true">E</span>
+            <h2 id="appUnlockTitle">应用已锁定</h2>
+            <p>输入四位数字密码以继续。</p>
+            <label class="sr-only" for="unlockAppPin">四位数字密码</label>
+            <input id="unlockAppPin" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="current-password" autofocus>
+            <p class="history-dialog-error" id="appUnlockError" role="alert" hidden></p>
+            <button id="unlockAppButton" type="submit">解锁</button>
+            <small>忘记密码只能清除应用数据或卸载；应用私有资产也会同时删除。</small>
+        </form>
+    </dialog>
 
     <dialog class="history-action-dialog" id="historyBookMenuDialog" aria-labelledby="historyBookMenuTitle">
         <div class="history-dialog-shell">
@@ -324,6 +404,37 @@
         </form>
     </dialog>
 
+    <dialog class="history-action-dialog" id="imageAssetMenuDialog" aria-labelledby="imageAssetMenuTitle">
+        <div class="history-dialog-shell">
+            <h2 id="imageAssetMenuTitle">图片操作</h2>
+            <div class="history-menu-actions">
+                <button id="imageAssetRenameButton" type="button">修改名称</button>
+                <button id="imageAssetGroupButton" class="secondary-button" type="button">添加分组</button>
+                <button id="imageAssetMenuCancelButton" class="secondary-button" type="button">取消</button>
+            </div>
+        </div>
+    </dialog>
+
+    <dialog class="history-action-dialog" id="imageAssetGroupDialog" aria-labelledby="imageAssetGroupTitle">
+        <form class="history-dialog-shell" id="imageAssetGroupForm" method="dialog">
+            <h2 id="imageAssetGroupTitle">添加分组</h2>
+            <label for="imageAssetGroupSelect">选择文件夹</label>
+            <select id="imageAssetGroupSelect"></select>
+            <div class="history-dialog-actions">
+                <button class="secondary-button" id="imageAssetGroupCancelButton" type="button">取消</button>
+                <button type="submit">保存</button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog class="image-asset-viewer-dialog" id="imageAssetViewerDialog" aria-labelledby="imageAssetViewerTitle">
+        <div class="image-asset-viewer-shell">
+            <header><strong id="imageAssetViewerTitle">图片</strong><button id="closeImageAssetViewerButton" type="button" aria-label="关闭图片查看">×</button></header>
+            <img id="imageAssetViewerImage" alt="图片资产预览">
+            <p id="imageAssetViewerMessage" role="status"></p>
+        </div>
+    </dialog>
+
     <dialog
         class="comic-reader-dialog"
         id="comicReaderDialog"
@@ -335,7 +446,7 @@
                 <div class="comic-reader-heading">
                     <strong id="comicReaderTitle">连续阅读</strong>
                     <span class="comic-reader-meta" id="comicReaderMeta"></span>
-                    <span class="comic-reader-hint" id="comicReaderHint">书架保存原始页面和封面；长图仅在导出时生成</span>
+                    <span class="comic-reader-hint" id="comicReaderHint">资产保存原始页面和封面；长图仅在导出时生成</span>
                 </div>
                 <div class="comic-reader-actions">
                     <button class="reader-icon-button" id="collapseComicReaderHeaderButton" type="button" aria-label="收起阅读器顶部栏" aria-expanded="true" title="收起顶部栏">
@@ -362,10 +473,14 @@
     <script src="js/core.js" defer></script>
     <script src="js/comic-core.js" defer></script>
     <script src="js/history-core.js" defer></script>
+    <script src="js/web-import-core.js" defer></script>
     <script src="js/android-bridge.js" defer></script>
+    <script src="js/settings.js" defer></script>
+    <script src="js/image-assets.js" defer></script>
     <script src="js/app.js" defer></script>
     <script src="js/comic-worker.js" defer></script>
     <script src="js/comic-app.js" defer></script>
+    <script src="js/image-assets-app.js" defer></script>
     <script src="js/pwa.js" defer></script>
 </body>
 </html>

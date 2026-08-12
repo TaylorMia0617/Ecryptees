@@ -119,6 +119,28 @@ test('payload parser rejects corrupt metadata, MIME mismatch, and CRC damage', (
     assert.throws(() => codec.parseImagePayload(crcDamage), /校验失败/);
 });
 
+test('lossless image assets preserve original bytes and remain separate from comic storage', () => {
+    const index = fs.readFileSync(path.join(repositoryRoot, 'index.html'), 'utf8');
+    const app = fs.readFileSync(path.join(repositoryRoot, 'js', 'app.js'), 'utf8');
+    const imageAssets = fs.readFileSync(path.join(repositoryRoot, 'js', 'image-assets.js'), 'utf8');
+    const imageAssetsApp = fs.readFileSync(path.join(repositoryRoot, 'js', 'image-assets-app.js'), 'utf8');
+
+    assert.match(index, /id="saveImageToAssets" type="checkbox"/);
+    assert.match(index, /id="encodeImageButton"[^>]*>生成并下载 \.txt</);
+    assert.doesNotMatch(index, /id="compressionPanel"/);
+    assert.doesNotMatch(index, /id="compressedImageCard"/);
+    assert.match(app, /buildImagePrefix\(originalImage, imageCrc32\)/);
+    assert.match(app, /\[prefix, originalImage\.bytes\]/);
+    assert.doesNotMatch(app, /optimizeImage\(/);
+    assert.doesNotMatch(app, /createJpegDownloadBlob\(/);
+    assert.match(imageAssets, /ecryptees-image-assets-v1/);
+    assert.match(imageAssets, /function saveImageAsset/);
+    assert.match(imageAssets, /function setImageAssetFolder/);
+    assert.match(imageAssetsApp, /\['recent', '最近查看'\]/);
+    assert.match(imageAssetsApp, /'导出 TXT', 'exportTxt'/);
+    assert.match(imageAssetsApp, /'导出图片', 'exportImage'/);
+});
+
 test('static entry point references ordered external files without inline handlers', () => {
     const index = fs.readFileSync(path.join(repositoryRoot, 'index.html'), 'utf8');
     const styles = fs.readFileSync(path.join(repositoryRoot, 'css', 'styles.css'), 'utf8');
@@ -127,9 +149,13 @@ test('static entry point references ordered external files without inline handle
     const corePosition = index.indexOf('src="js/core.js"');
     const comicCorePosition = index.indexOf('src="js/comic-core.js"');
     const historyCorePosition = index.indexOf('src="js/history-core.js"');
+    const webImportCorePosition = index.indexOf('src="js/web-import-core.js"');
+    const settingsPosition = index.indexOf('src="js/settings.js"');
+    const imageAssetsPosition = index.indexOf('src="js/image-assets.js"');
     const appPosition = index.indexOf('src="js/app.js"');
     const comicWorkerPosition = index.indexOf('src="js/comic-worker.js"');
     const comicAppPosition = index.indexOf('src="js/comic-app.js"');
+    const imageAssetsAppPosition = index.indexOf('src="js/image-assets-app.js"');
     const pwaPosition = index.indexOf('src="js/pwa.js"');
     const androidBridgePosition = index.indexOf('src="js/android-bridge.js"');
 
@@ -137,27 +163,35 @@ test('static entry point references ordered external files without inline handle
         corePosition >= 0
             && comicCorePosition > corePosition
             && historyCorePosition > comicCorePosition
-            && androidBridgePosition > historyCorePosition
-            && appPosition > androidBridgePosition
+            && webImportCorePosition > historyCorePosition
+            && androidBridgePosition > webImportCorePosition
+            && settingsPosition > androidBridgePosition
+            && imageAssetsPosition > settingsPosition
+            && appPosition > imageAssetsPosition
             && comicWorkerPosition > appPosition
             && comicAppPosition > comicWorkerPosition
-            && pwaPosition > comicAppPosition,
-        'scripts must load in core, comic-core, history-core, android-bridge, app, comic-worker, comic-app, pwa order'
+            && imageAssetsAppPosition > comicAppPosition
+            && pwaPosition > imageAssetsAppPosition,
+        'scripts must load in the declared classic-script dependency order'
     );
     assert.match(index, /href="css\/styles\.css"/);
     assert.match(index, /<script src="js\/core\.js" defer><\/script>/);
     assert.match(index, /<script src="js\/comic-core\.js" defer><\/script>/);
     assert.match(index, /<script src="js\/history-core\.js" defer><\/script>/);
+    assert.match(index, /<script src="js\/web-import-core\.js" defer><\/script>/);
+    assert.match(index, /<script src="js\/settings\.js" defer><\/script>/);
+    assert.match(index, /<script src="js\/image-assets\.js" defer><\/script>/);
     assert.match(index, /<script src="js\/app\.js" defer><\/script>/);
     assert.match(index, /<script src="js\/comic-worker\.js" defer><\/script>/);
     assert.match(index, /<script src="js\/comic-app\.js" defer><\/script>/);
+    assert.match(index, /<script src="js\/image-assets-app\.js" defer><\/script>/);
     assert.match(index, /<script src="js\/pwa\.js" defer><\/script>/);
     assert.match(index, /<script src="js\/android-bridge\.js" defer><\/script>/);
     assert.doesNotMatch(index, /<style\b/);
     assert.doesNotMatch(index, /<script(?![^>]*\bsrc=)/);
     assert.doesNotMatch(index, /onclick\s*=/);
     assert.match(index, /<dialog[\s\S]*id="comicReaderDialog"/);
-    assert.match(index, /id="comicReaderHint">书架保存原始页面和封面；长图仅在导出时生成/);
+    assert.match(index, /id="comicReaderHint">资产保存原始页面和封面；长图仅在导出时生成/);
     assert.match(index, /最多 80 张 · 500 MiB · 原图无损封装/);
     assert.doesNotMatch(index, /id="exportComicLongImageButton"/);
     assert.doesNotMatch(index, /id="downloadComicLongImage"/);
@@ -172,7 +206,14 @@ test('static entry point references ordered external files without inline handle
     assert.match(index, /id="openComicButton"[^>]*>解密、转存并阅读</);
     assert.match(index, /id="comicArchiveFile"[^>]*accept="\.ecomic,application\/vnd\.ecryptees\.ecomic"/);
     assert.doesNotMatch(index, /id="comicArchiveFile"[^>]*application\/octet-stream/);
-    assert.match(index, /id="encryptComicButton"[^>]*>加密并加入书架</);
+    assert.match(index, /id="encryptComicButton"[^>]*>加密并加入资产</);
+    assert.match(index, /id="viewSavedComicButton"[^>]*>[\s\S]*去查看/);
+    assert.match(index, /id="clearWebImportUrlButton"[^>]*aria-label="清除网页链接和当前网页任务"/);
+    assert.match(index, /id="appDrawer"[^>]*aria-hidden="true"/);
+    assert.match(index, /id="localComicSourceButton"[^>]*>本地图片</);
+    assert.match(index, /id="webComicSourceButton"[^>]*>网页链接</);
+    assert.match(index, /id="analyzeWebImportButton"[^>]*>分析网页</);
+    assert.match(index, /读取静态 HTML 中的全部图片，根据顺序导入/);
     assert.match(index, /class="button-group comic-actions"[\s\S]*id="downloadComicArchive"/);
     assert.doesNotMatch(index, /id="comicArchiveDownloadRow"/);
     assert.doesNotMatch(index, /id="exportComicZipButton"/);
@@ -221,7 +262,9 @@ test('static entry point references ordered external files without inline handle
     assert.match(comicWorker, /size: 0,\s*generatedAt: 0,\s*entryName: ''/);
     assert.doesNotMatch(comicApp, /historyAction === 'rename'|history-progress-track|history-more/);
     assert.match(index, /id="addHistoryFolderButton"[^>]*aria-label="添加文件夹"/);
-    assert.match(index, /id="historyViewMenu"[\s\S]*id="historySort"[\s\S]*id="historyGroupFilterSelect"/);
+    assert.match(index, /id="historyViewMenu"[\s\S]*id="historyGroupFilterSelect"[\s\S]*id="assetSortMenu"[\s\S]*id="historySort"/);
+    assert.doesNotMatch(index, /<details[^>]+id="(?:historyViewMenu|assetSortMenu)"/);
+    assert.match(index, /id="historyGroupFilterSelect"[\s\S]*id="historySort"[\s\S]*id="historySearch"[\s\S]*id="historyStorageSummary"/);
     assert.doesNotMatch(index, /id="historyGroupFilters"|class="history-group-filters"/);
     assert.match(comicApp, /function renderHistoryViewMenu\(\)/);
     assert.doesNotMatch(comicApp, /renderHistoryGroupFilters|data-history-group-filter/);
@@ -244,6 +287,38 @@ test('static entry point references ordered external files without inline handle
         crypto.createHash('sha256').update(background).digest('hex'),
         '742807f8331c790cc92e679ff270202a614b733fb14ceef9d5922d3eb6977505'
     );
+});
+
+test('web image previews stay local and navigation uses the expanded full-width layout', () => {
+    const index = fs.readFileSync(path.join(repositoryRoot, 'index.html'), 'utf8');
+    const styles = fs.readFileSync(path.join(repositoryRoot, 'css', 'styles.css'), 'utf8');
+    const comicApp = fs.readFileSync(path.join(repositoryRoot, 'js', 'comic-app.js'), 'utf8');
+
+    assert.match(index, /content="width=device-width, initial-scale=1, viewport-fit=cover"/);
+    assert.match(index, /class="app-drawer-label app-drawer-label--offline">离线工具/);
+    assert.match(styles, /--app-topbar-height: 80px/);
+    assert.match(styles, /min-height: calc\(var\(--app-topbar-height\) \+ env\(safe-area-inset-top\)\)/);
+    assert.match(styles, /\.app-drawer-label--offline\s*\{[^}]*text-align: right/s);
+    assert.match(styles, /\.app-drawer-nav\.tabs\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\)[^}]*justify-items: stretch/s);
+    assert.match(styles, /\.web-import-preview img\s*\{[^}]*object-fit: contain/s);
+    assert.match(comicApp, /activeJobType = 'webPreview'/);
+    assert.match(comicApp, /prepareWebCandidates\(selectedCandidates, webImportAbortController\.signal\)/);
+    assert.match(comicApp, /image\.src = candidate\.prepared\.url/);
+    assert.match(comicApp, /image\.loading = 'lazy'/);
+    assert.doesNotMatch(comicApp, /image\.src = candidate\.url/);
+    assert.match(comicApp, /ready === selected \? '加入漫画' : '重试并加入漫画'/);
+    assert.match(comicApp, /selected\.every\(candidate => candidate\.prepared\)/);
+    assert.match(comicApp, /releasePreparedCandidate\(candidate\)/);
+    assert.match(comicApp, /candidate\.prepared\.webImportSessionId = webImportSessionId/);
+    assert.match(comicApp, /items\.push\(\.\.\.preparedItems\)/);
+    assert.match(comicApp, /webImportCandidates\.forEach\(releasePreparedCandidate\)/);
+    assert.match(comicApp, /未勾选项已清除。确认顺序后可加密并写入资产/);
+    assert.match(comicApp, /function clearWebImportSession\(\)/);
+    assert.match(comicApp, /item\.webImportSessionId === webImportSessionId/);
+    assert.match(comicApp, /静态 HTML 没有图片，正在隔离运行页面并等待漫画内容加载/);
+    assert.match(comicApp, /beginRenderedPageCapture/);
+    assert.match(comicApp, /readRenderedPageImageChunk/);
+    assert.match(comicApp, /releaseRenderedPageCapture/);
 });
 
 test('PWA entry point is installable and caches only the application shell', () => {
@@ -270,7 +345,45 @@ test('PWA entry point is installable and caches only the application shell', () 
     assert.match(serviceWorker, /const APP_SHELL = \[/);
     assert.match(serviceWorker, /'\.\/js\/comic-worker\.js'/);
     assert.match(serviceWorker, /'\.\/js\/android-bridge\.js'/);
+    assert.match(serviceWorker, /'\.\/js\/web-import-core\.js'/);
+    assert.match(serviceWorker, /'\.\/js\/settings\.js'/);
     assert.doesNotMatch(serviceWorker, /\.ecomic|long\.png|blob:/);
+});
+
+test('app lock gates shelf startup and Android launcher disguise keeps one launcher entry', () => {
+    const index = fs.readFileSync(path.join(repositoryRoot, 'index.html'), 'utf8');
+    const settings = fs.readFileSync(path.join(repositoryRoot, 'js', 'settings.js'), 'utf8');
+    const comicApp = fs.readFileSync(path.join(repositoryRoot, 'js', 'comic-app.js'), 'utf8');
+    const androidBridge = fs.readFileSync(path.join(repositoryRoot, 'js', 'android-bridge.js'), 'utf8');
+    const manifest = fs.readFileSync(
+        path.join(repositoryRoot, 'android-app', 'app', 'src', 'main', 'AndroidManifest.xml'),
+        'utf8'
+    );
+    const activity = fs.readFileSync(
+        path.join(repositoryRoot, 'android-app', 'app', 'src', 'main', 'java', 'com', 'ecryptees', 'offline', 'MainActivity.java'),
+        'utf8'
+    );
+
+    assert.match(index, /<body data-lock-state="checking">/);
+    assert.match(index, /id="appSettingsButton"/);
+    assert.match(index, /id="appUnlockDialog"/);
+    assert.match(index, /忘记密码只能清除应用数据或卸载/);
+    assert.match(settings, /name: 'PBKDF2'/);
+    assert.match(settings, /hash: 'SHA-256'/);
+    assert.match(settings, /LOCK_ITERATIONS = 210000/);
+    assert.match(settings, /getRandomValues\(new Uint8Array\(16\)\)/);
+    assert.doesNotMatch(settings, /localStorage\.setItem\([^\n]*pin/i);
+    assert.match(settings, /EcrypteesAppSecurity = Object\.freeze/);
+    assert.match(comicApp, /EcrypteesAppSecurity\?\.whenUnlocked/);
+    assert.match(androidBridge, /await security\.whenUnlocked/);
+    assert.match(manifest, /android:name="\.EcrypteesLauncher"[\s\S]*android:enabled="true"/);
+    assert.match(manifest, /android:name="\.CalculatorLauncher"[\s\S]*android:enabled="false"/);
+    assert.match(manifest, /android:label="@string\/calculator_name"/);
+    assert.match(activity, /setLauncherDisguiseEnabled\(boolean enabled\)/);
+    assert.match(activity, /COMPONENT_ENABLED_STATE_ENABLED/);
+    assert.match(activity, /COMPONENT_ENABLED_STATE_DISABLED/);
+    assert.match(activity, /PackageManager\.DONT_KILL_APP/);
+    assert.match(activity, /getAppVersionInfo\(\)/);
 });
 
 test('Android wrapper loads local HTTPS assets and streams downloads through SAF', () => {
@@ -283,10 +396,11 @@ test('Android wrapper loads local HTTPS assets and streams downloads through SAF
         'utf8'
     );
     const bridge = fs.readFileSync(path.join(repositoryRoot, 'js', 'android-bridge.js'), 'utf8');
+    const renderedCapture = fs.readFileSync(path.join(repositoryRoot, 'js', 'render-capture.js'), 'utf8');
     const appBuild = fs.readFileSync(path.join(repositoryRoot, 'android-app', 'app', 'build.gradle'), 'utf8');
     const buildScript = fs.readFileSync(path.join(repositoryRoot, 'android-app', 'build-apk.ps1'), 'utf8');
 
-    assert.doesNotMatch(manifest, /android\.permission\.INTERNET/);
+    assert.match(manifest, /android\.permission\.INTERNET/);
     assert.doesNotMatch(manifest, /READ_EXTERNAL_STORAGE|MANAGE_EXTERNAL_STORAGE/);
     assert.match(manifest, /android:allowBackup="false"/);
     assert.match(manifest, /android:launchMode="singleTop"/);
@@ -308,6 +422,26 @@ test('Android wrapper loads local HTTPS assets and streams downloads through SAF
     assert.match(activity, /getHeicDecodeStatus\(String token\)/);
     assert.match(activity, /readHeicChunk\(String token, long offset, int requestedLength\)/);
     assert.match(activity, /Executors\.newFixedThreadPool\(2\)/);
+    assert.match(activity, /addJavascriptInterface\(remoteNetworkBridge, "AndroidNetworkBridge"\)/);
+    assert.match(activity, /beginRemoteFetch\(String rawUrl, String kind, String rawReferer\)/);
+    assert.match(activity, /getRemoteFetchStatus\(String token\)/);
+    assert.match(activity, /readRemoteFetchChunk\(String token, int requestedBytes\)/);
+    assert.match(activity, /cancelRemoteFetch\(String token\)/);
+    assert.match(activity, /releaseRemoteFetch\(String token\)/);
+    assert.match(activity, /beginRenderedPageCapture\(String rawUrl, int requestedMaximum\)/);
+    assert.match(activity, /getRenderedPageCaptureStatus\(String token\)/);
+    assert.match(activity, /readRenderedPageImageChunk\(String token, int index, long offset, int requestedBytes\)/);
+    assert.match(activity, /releaseRenderedPageCapture\(String token\)/);
+    assert.match(activity, /addJavascriptInterface\(renderedCaptureReceiver, "AndroidRenderedCapture"\)/);
+    assert.match(activity, /settings\.setMixedContentMode\(WebSettings\.MIXED_CONTENT_NEVER_ALLOW\)/);
+    assert.match(activity, /CookieManager\.getInstance\(\)\.removeAllCookies/);
+    assert.match(renderedCapture, /#chapter-images/);
+    assert.match(renderedCapture, /scrollIntoView/);
+    assert.match(renderedCapture, /blob\.slice\(offset, offset \+ 192 \* 1024\)/);
+    assert.match(renderedCapture, /bridge\.finishRenderedPage/);
+    assert.match(activity, /"https"\.equalsIgnoreCase\(url\.getProtocol\(\)\)/);
+    assert.match(activity, /MAX_REMOTE_HTML_BYTES/);
+    assert.match(activity, /setInstanceFollowRedirects\(false\)/);
     assert.match(activity, /new Semaphore\(1, true\)/);
     assert.match(activity, /Bitmap\.CompressFormat\.PNG/);
     assert.match(activity, /protected void onNewIntent/);
@@ -372,9 +506,9 @@ test('JPG and JPEG remain selectable in browsers and Android document providers'
 
     assert.match(activity, /params\.getAcceptTypes\(\)/);
     assert.match(activity, /createImageDocumentIntent\(params\)/);
-    assert.match(appBuild, /versionCode 11/);
-    assert.match(appBuild, /versionName '1\.0\.10'/);
-    assert.match(serviceWorker, /const CACHE_NAME = 'ecryptees-app-v10'/);
+    assert.match(appBuild, /versionCode 14/);
+    assert.match(appBuild, /versionName '1\.0\.13'/);
+    assert.match(serviceWorker, /const CACHE_NAME = 'ecryptees-app-v13'/);
 });
 
 test('Android comic picker returns every readable document without trusting provider MIME metadata', () => {
@@ -390,6 +524,6 @@ test('Android comic picker returns every readable document without trusting prov
     assert.match(activity, /data\.getClipData\(\)/);
     assert.match(activity, /getContentResolver\(\)\.openFileDescriptor\(uri, "r"\)/);
     assert.match(activity, /parseImageDocumentResult\(resultCode, data\)/);
-    assert.match(appBuild, /versionCode 11/);
-    assert.match(appBuild, /versionName '1\.0\.10'/);
+    assert.match(appBuild, /versionCode 14/);
+    assert.match(appBuild, /versionName '1\.0\.13'/);
 });
