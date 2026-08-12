@@ -183,6 +183,15 @@
     const drawer = document.getElementById('appDrawer');
     const drawerBackdrop = document.getElementById('appDrawerBackdrop');
     const menuButton = document.getElementById('appMenuButton');
+    const assetGroups = document.getElementById('appDrawerAssetGroups');
+    const assetGroupsToggle = document.getElementById('appDrawerAssetsToggle');
+
+    function setAssetGroupsExpanded(expanded) {
+        assetGroups.hidden = !expanded;
+        assetGroupsToggle.setAttribute('aria-expanded', String(expanded));
+        assetGroupsToggle.setAttribute('aria-label', expanded ? '收起资产分组' : '展开资产分组');
+        assetGroupsToggle.title = expanded ? '收起资产分组' : '展开资产分组';
+    }
 
     function openDrawer() {
         drawerBackdrop.hidden = false;
@@ -641,6 +650,18 @@
         } else {
             closeDrawer();
         }
+    });
+    assetGroupsToggle.addEventListener('click', () => {
+        setAssetGroupsExpanded(assetGroupsToggle.getAttribute('aria-expanded') !== 'true');
+    });
+    document.getElementById('drawerComicAssetsButton').addEventListener('click', () => {
+        document.getElementById('assetTypeComicButton').click();
+        closeDrawer();
+    });
+    document.getElementById('drawerImageAssetsButton').addEventListener('click', () => {
+        document.getElementById('historyTab').click();
+        document.getElementById('assetTypeImageButton').click();
+        closeDrawer();
     });
     drawerBackdrop.addEventListener('click', () => closeDrawer());
     document.addEventListener('keydown', event => {

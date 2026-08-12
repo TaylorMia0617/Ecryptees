@@ -213,7 +213,7 @@ test('static entry point references ordered external files without inline handle
     assert.match(index, /id="localComicSourceButton"[^>]*>本地图片</);
     assert.match(index, /id="webComicSourceButton"[^>]*>网页链接</);
     assert.match(index, /id="analyzeWebImportButton"[^>]*>分析网页</);
-    assert.match(index, /读取静态 HTML 中的全部图片，根据顺序导入/);
+    assert.match(index, /识别网页图片清单、滚动列表或翻页阅读器，根据顺序导入/);
     assert.match(index, /class="button-group comic-actions"[\s\S]*id="downloadComicArchive"/);
     assert.doesNotMatch(index, /id="comicArchiveDownloadRow"/);
     assert.doesNotMatch(index, /id="exportComicZipButton"/);
@@ -295,10 +295,14 @@ test('web image previews stay local and navigation uses the expanded full-width 
     const comicApp = fs.readFileSync(path.join(repositoryRoot, 'js', 'comic-app.js'), 'utf8');
 
     assert.match(index, /content="width=device-width, initial-scale=1, viewport-fit=cover"/);
-    assert.match(index, /class="app-drawer-label app-drawer-label--offline">离线工具/);
+    assert.match(index, /id="historyTab"[\s\S]*>资产<[\s\S]*id="appDrawerAssetsToggle"/);
+    assert.match(index, /id="appDrawerAssetGroups"[\s\S]*漫画资产[\s\S]*图片资产/);
+    assert.match(index, /id="webImportSelectionMenuButton"[\s\S]*data-web-selection="all"[\s\S]*data-web-selection="none"[\s\S]*data-web-selection="invert"/);
+    assert.match(index, /class="app-drawer-label">工具/);
+    assert.doesNotMatch(index, /通道模式|哑存储|打洞直连|app-drawer-future/);
     assert.match(styles, /--app-topbar-height: 80px/);
     assert.match(styles, /min-height: calc\(var\(--app-topbar-height\) \+ env\(safe-area-inset-top\)\)/);
-    assert.match(styles, /\.app-drawer-label--offline\s*\{[^}]*text-align: right/s);
+    assert.match(styles, /\.app-drawer-assets-heading\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\) 44px/s);
     assert.match(styles, /\.app-drawer-nav\.tabs\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\)[^}]*justify-items: stretch/s);
     assert.match(styles, /\.web-import-preview img\s*\{[^}]*object-fit: contain/s);
     assert.match(comicApp, /activeJobType = 'webPreview'/);
@@ -306,7 +310,10 @@ test('web image previews stay local and navigation uses the expanded full-width 
     assert.match(comicApp, /image\.src = candidate\.prepared\.url/);
     assert.match(comicApp, /image\.loading = 'lazy'/);
     assert.doesNotMatch(comicApp, /image\.src = candidate\.url/);
-    assert.match(comicApp, /ready === selected \? '加入漫画' : '重试并加入漫画'/);
+    assert.match(comicApp, /textContent = `\$\{totalAfterImport\}\/\$\{format\.MAX_PAGES\}`/);
+    assert.match(comicApp, /function applyWebImportSelection\(mode\)/);
+    assert.match(comicApp, /invertedCandidates/);
+    assert.match(comicApp, /candidate\.abortController\?\.abort\(\)/);
     assert.match(comicApp, /selected\.every\(candidate => candidate\.prepared\)/);
     assert.match(comicApp, /releasePreparedCandidate\(candidate\)/);
     assert.match(comicApp, /candidate\.prepared\.webImportSessionId = webImportSessionId/);
@@ -315,10 +322,13 @@ test('web image previews stay local and navigation uses the expanded full-width 
     assert.match(comicApp, /未勾选项已清除。确认顺序后可加密并写入资产/);
     assert.match(comicApp, /function clearWebImportSession\(\)/);
     assert.match(comicApp, /item\.webImportSessionId === webImportSessionId/);
-    assert.match(comicApp, /静态 HTML 没有图片，正在隔离运行页面并等待漫画内容加载/);
+    assert.match(comicApp, /检测到阅读器或少量预览图，正在隔离运行页面并收集完整页序/);
+    assert.match(comicApp, /extractEmbeddedImageCandidates/);
+    assert.match(comicApp, /shouldCaptureRenderedPage/);
     assert.match(comicApp, /beginRenderedPageCapture/);
     assert.match(comicApp, /readRenderedPageImageChunk/);
     assert.match(comicApp, /releaseRenderedPageCapture/);
+    assert.match(styles, /\.web-import-selection-options\s*\{/);
 });
 
 test('PWA entry point is installable and caches only the application shell', () => {
@@ -428,14 +438,25 @@ test('Android wrapper loads local HTTPS assets and streams downloads through SAF
     assert.match(activity, /readRemoteFetchChunk\(String token, int requestedBytes\)/);
     assert.match(activity, /cancelRemoteFetch\(String token\)/);
     assert.match(activity, /releaseRemoteFetch\(String token\)/);
+    assert.match(renderedCapture, /new MutationObserver/);
+    assert.match(renderedCapture, /pendingReaderImages\(\)/);
+    assert.match(renderedCapture, /stableBottomCycles >= 3/);
     assert.match(activity, /beginRenderedPageCapture\(String rawUrl, int requestedMaximum\)/);
+    assert.match(activity, /navigateRenderedPage\(String token, String rawUrl\)/);
+    assert.match(activity, /getRenderedImageCount\(String token\)/);
+    assert.match(activity, /"capturing"\.equals\(task\.state\)[\s\S]*task\.state = "loading"/);
     assert.match(activity, /getRenderedPageCaptureStatus\(String token\)/);
     assert.match(activity, /readRenderedPageImageChunk\(String token, int index, long offset, int requestedBytes\)/);
     assert.match(activity, /releaseRenderedPageCapture\(String token\)/);
     assert.match(activity, /addJavascriptInterface\(renderedCaptureReceiver, "AndroidRenderedCapture"\)/);
     assert.match(activity, /settings\.setMixedContentMode\(WebSettings\.MIXED_CONTENT_NEVER_ALLOW\)/);
     assert.match(activity, /CookieManager\.getInstance\(\)\.removeAllCookies/);
-    assert.match(renderedCapture, /#chapter-images/);
+    assert.match(renderedCapture, /findPageSelect/);
+    assert.match(renderedCapture, /findReaderLink/);
+    assert.match(renderedCapture, /findNextControl/);
+    assert.match(renderedCapture, /navigateRenderedPage/);
+    assert.match(renderedCapture, /resumeIndex/);
+    assert.match(renderedCapture, /getRenderedImageCount/);
     assert.match(renderedCapture, /scrollIntoView/);
     assert.match(renderedCapture, /blob\.slice\(offset, offset \+ 192 \* 1024\)/);
     assert.match(renderedCapture, /bridge\.finishRenderedPage/);
@@ -506,9 +527,9 @@ test('JPG and JPEG remain selectable in browsers and Android document providers'
 
     assert.match(activity, /params\.getAcceptTypes\(\)/);
     assert.match(activity, /createImageDocumentIntent\(params\)/);
-    assert.match(appBuild, /versionCode 14/);
-    assert.match(appBuild, /versionName '1\.0\.13'/);
-    assert.match(serviceWorker, /const CACHE_NAME = 'ecryptees-app-v13'/);
+    assert.match(appBuild, /versionCode 15/);
+    assert.match(appBuild, /versionName '1\.0\.14'/);
+    assert.match(serviceWorker, /const CACHE_NAME = 'ecryptees-app-v14'/);
 });
 
 test('Android comic picker returns every readable document without trusting provider MIME metadata', () => {
@@ -524,6 +545,6 @@ test('Android comic picker returns every readable document without trusting prov
     assert.match(activity, /data\.getClipData\(\)/);
     assert.match(activity, /getContentResolver\(\)\.openFileDescriptor\(uri, "r"\)/);
     assert.match(activity, /parseImageDocumentResult\(resultCode, data\)/);
-    assert.match(appBuild, /versionCode 14/);
-    assert.match(appBuild, /versionName '1\.0\.13'/);
+    assert.match(appBuild, /versionCode 15/);
+    assert.match(appBuild, /versionName '1\.0\.14'/);
 });

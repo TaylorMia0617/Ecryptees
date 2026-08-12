@@ -129,6 +129,7 @@
     function setBusy(type = '') {
         activeJobType = type;
         const busy = !!type;
+        const previewingWebImages = type === 'webPreview';
         comicFilesInput.disabled = busy || !runtimeSupported;
         archiveInput.disabled = busy || !runtimeSupported;
         document.getElementById('comicArchiveName').disabled = busy || !runtimeSupported;
@@ -137,11 +138,13 @@
         document.getElementById('webImportUrl').disabled = busy;
         document.getElementById('clearWebImportUrlButton').disabled = false;
         document.getElementById('analyzeWebImportButton').disabled = busy || !runtimeSupported;
-        document.getElementById('webImportSelectAllButton').disabled = busy;
+        document.getElementById('webImportSelectionMenuButton').disabled = busy && !previewingWebImages;
         document.getElementById('clearWebImportButton').disabled = busy;
+        const selectedWebImages = webImportCandidates.filter(candidate => candidate.selected && !candidate.duplicate);
         document.getElementById('downloadWebImportButton').disabled = busy
             || !runtimeSupported
-            || !webImportCandidates.some(candidate => candidate.selected && !candidate.duplicate);
+            || !selectedWebImages.length
+            || selectedWebImages.some(candidate => !candidate.prepared);
         const encryptButton = document.getElementById('encryptComicButton');
         encryptButton.disabled = busy || !runtimeSupported || items.length === 0;
         encryptButton.textContent = type === 'encrypt' ? '正在加密并加入资产…' : '加密并加入资产';
@@ -1483,15 +1486,18 @@
     }
 
     function releasePreparedCandidate(candidate) {
+        candidate?.abortController?.abort();
         if (!candidate?.prepared) {
             if (candidate) {
                 candidate.loading = false;
+                candidate.abortController = null;
             }
             return;
         }
         revokeItem(candidate.prepared);
         candidate.prepared = null;
         candidate.loading = false;
+        candidate.abortController = null;
     }
 
     function clearWebImportCandidates(message = '') {
@@ -1540,17 +1546,53 @@
         return webImportCandidates.filter(candidate => candidate.selected && !candidate.duplicate);
     }
 
+    function closeWebImportSelectionMenu() {
+        const menu = document.getElementById('webImportSelectionMenu');
+        const trigger = document.getElementById('webImportSelectionMenuButton');
+        menu.hidden = true;
+        trigger.setAttribute('aria-expanded', 'false');
+    }
+
+    function applyWebImportSelection(mode) {
+        const maximum = Math.max(0, format.MAX_PAGES - items.length);
+        const eligible = webImportCandidates.filter(candidate => !candidate.duplicate);
+        const invertedCandidates = mode === 'invert'
+            ? eligible.filter(candidate => !candidate.selected)
+            : [];
+        const desired = new Set();
+        if (mode === 'all') {
+            eligible.slice(0, maximum).forEach(candidate => desired.add(candidate));
+        } else if (mode === 'invert') {
+            invertedCandidates
+                .slice(0, maximum)
+                .forEach(candidate => desired.add(candidate));
+        }
+        for (const candidate of eligible) {
+            const shouldSelect = desired.has(candidate);
+            if (!shouldSelect && candidate.selected) {
+                releasePreparedCandidate(candidate);
+            }
+            candidate.selected = shouldSelect;
+            if (shouldSelect) {
+                candidate.error = '';
+            }
+        }
+        renderWebImportCandidates();
+        previewWebCandidates(selectedWebCandidates());
+        if (mode === 'invert' && invertedCandidates.length > maximum) {
+            setStatus(`反转结果超过剩余页数，已按列表顺序选择前 ${maximum} 张。`, 'info');
+        }
+    }
+
     function updateWebImportSummary() {
-        const usable = webImportCandidates.filter(candidate => !candidate.duplicate).length;
-        const duplicates = webImportCandidates.length - usable;
         const selectedCandidates = selectedWebCandidates();
-        const selected = selectedCandidates.length;
+        const totalAfterImport = Math.min(format.MAX_PAGES, items.length + selectedCandidates.length);
         const ready = selectedCandidates.filter(candidate => candidate.prepared).length;
-        document.getElementById('webImportSummary').textContent = `找到 ${usable} 张 · 已选 ${selected} · 已预览 ${ready}${duplicates ? ` · 忽略重复 ${duplicates}` : ''}`;
+        document.getElementById('webImportSummary').textContent = `${totalAfterImport}/${format.MAX_PAGES}`;
         const action = document.getElementById('downloadWebImportButton');
-        action.textContent = selected === 0
+        action.textContent = selectedCandidates.length === 0
             ? '请先选择图片'
-            : (ready === selected ? '加入漫画' : '重试并加入漫画');
+            : (ready === selectedCandidates.length ? '加入漫画' : `正在预览 ${ready}/${selectedCandidates.length}`);
         setBusy(activeJobType);
     }
 
@@ -1563,12 +1605,12 @@
             item.dataset.candidateId = candidate.id;
             item.dataset.duplicate = String(candidate.duplicate);
             item.dataset.error = String(!!candidate.error);
-            item.draggable = !candidate.duplicate && !activeJobType;
+            item.draggable = !candidate.duplicate && activeJobType !== 'webAnalyze' && activeJobType !== 'webDownload';
 
             const checkbox = document.createElement('input');
             checkbox.type = 'checkbox';
             checkbox.checked = candidate.selected;
-            checkbox.disabled = candidate.duplicate || !!activeJobType;
+            checkbox.disabled = candidate.duplicate || activeJobType === 'webAnalyze' || activeJobType === 'webDownload';
             checkbox.setAttribute('aria-label', `选择第 ${index + 1} 个图片地址`);
             checkbox.addEventListener('change', () => {
                 const maximum = Math.max(0, format.MAX_PAGES - items.length);
@@ -1578,14 +1620,13 @@
                     return;
                 }
                 candidate.selected = checkbox.checked;
-                candidate.error = '';
                 if (!candidate.selected) {
                     releasePreparedCandidate(candidate);
-                    renderWebImportCandidates();
                 } else {
-                    renderWebImportCandidates();
+                    candidate.error = '';
                     previewWebCandidates([candidate]);
                 }
+                renderWebImportCandidates();
             });
 
             const number = document.createElement('span');
@@ -1641,7 +1682,7 @@
                 button.textContent = label;
                 button.dataset.webAction = action;
                 button.dataset.candidateId = candidate.id;
-                button.disabled = !!activeJobType
+                button.disabled = activeJobType === 'webAnalyze' || activeJobType === 'webDownload'
                     || (action === 'up' && index === 0)
                     || (action === 'down' && index === webImportCandidates.length - 1);
                 actions.append(button);
@@ -1670,7 +1711,7 @@
     }
 
     function moveWebImportCandidate(id, targetIndex) {
-        if (!id || activeJobType) {
+        if (!id || activeJobType === 'webAnalyze' || activeJobType === 'webDownload') {
             return;
         }
         const sourceIndex = webImportCandidates.findIndex(candidate => candidate.id === id);
@@ -1718,20 +1759,31 @@
                 }
                 candidate.error = '';
                 candidate.loading = true;
+                candidate.abortController = new AbortController();
+                const abortCandidate = () => candidate.abortController?.abort();
+                signal.addEventListener('abort', abortCandidate, { once: true });
                 renderWebImportCandidates();
                 try {
                     candidate.prepared = await downloadWebCandidate(
                         candidate,
                         webImportCandidates.indexOf(candidate),
-                        signal,
+                        candidate.abortController.signal,
                         budget,
                         usedNames
                     );
-                    completed += 1;
-                    setProgress(completed, selected.length);
+                    if (!candidate.selected) {
+                        releasePreparedCandidate(candidate);
+                    } else {
+                        completed += 1;
+                        setProgress(completed, selected.length);
+                    }
                 } catch (error) {
-                    candidate.error = error.name === 'AbortError' ? '已取消' : (error.message || '下载失败');
+                    if (candidate.selected) {
+                        candidate.error = error.name === 'AbortError' ? '已取消' : (error.message || '下载失败');
+                    }
                 } finally {
+                    signal.removeEventListener('abort', abortCandidate);
+                    candidate.abortController = null;
                     candidate.loading = false;
                     renderWebImportCandidates();
                 }
@@ -1743,15 +1795,18 @@
         if (signal.aborted) {
             throw new DOMException('操作已取消', 'AbortError');
         }
-        return selected.filter(candidate => !candidate.prepared);
+        return selected.filter(candidate => candidate.selected && !candidate.prepared);
     }
 
     async function previewWebCandidates(candidates) {
-        if (activeJobType) {
+        if (activeJobType && activeJobType !== 'webPreview') {
             return;
         }
         const selected = candidates.filter(candidate => candidate.selected && !candidate.duplicate && !candidate.prepared);
         if (!selected.length) {
+            return;
+        }
+        if (activeJobType === 'webPreview') {
             return;
         }
         webImportAbortController = new AbortController();
@@ -1759,13 +1814,21 @@
         setBusy(activeJobType);
         setStatus(`正在加载 ${selected.length} 张图片预览…`);
         try {
-            const failures = await prepareWebCandidates(selected, webImportAbortController.signal);
+            let failures = await prepareWebCandidates(selected, webImportAbortController.signal);
+            while (!webImportAbortController.signal.aborted) {
+                const queued = selectedWebCandidates().filter(candidate => !candidate.prepared && !candidate.loading && !candidate.error);
+                if (!queued.length) {
+                    break;
+                }
+                failures = await prepareWebCandidates(queued, webImportAbortController.signal);
+            }
             if (failures.length) {
                 progressGroup.dataset.kind = 'error';
                 setStatus(`${failures.length} 张图片预览失败；可以重试或取消勾选。`, 'error');
             } else {
-                setProgress(selected.length, selected.length, 'success');
-                setStatus(`已加载 ${selected.length} 张图片预览。`, 'success');
+                const ready = selectedWebCandidates().filter(candidate => candidate.prepared).length;
+                setProgress(ready, Math.max(1, selectedWebCandidates().length), 'success');
+                setStatus(`已加载 ${ready} 张图片预览。`, 'success');
             }
         } catch (error) {
             setStatus(error.name === 'AbortError' ? '网页图片预览已取消。' : (error.message || '网页图片预览失败'), error.name === 'AbortError' ? 'info' : 'error');
@@ -1774,6 +1837,10 @@
             webImportAbortController = null;
             setBusy('');
             renderWebImportCandidates();
+            const queued = selectedWebCandidates().filter(candidate => !candidate.prepared && !candidate.loading && !candidate.error);
+            if (queued.length) {
+                root.queueMicrotask(() => previewWebCandidates(queued));
+            }
         }
     }
 
@@ -1797,24 +1864,39 @@
         setStatus('正在读取网页 HTML…');
         try {
             const result = await fetchHtmlForImport(url, webImportAbortController.signal);
-            let extracted = webImportCore.extractImageCandidates(result.html, result.finalUrl);
+            const elementCandidates = webImportCore.extractImageCandidates(result.html, result.finalUrl);
+            const embeddedCandidates = webImportCore.extractEmbeddedImageCandidates(result.html, result.finalUrl);
+            let extracted = webImportCore.selectBestCandidateSet(elementCandidates, embeddedCandidates);
             webImportFinalUrl = result.finalUrl;
             const maximumSelected = Math.max(0, format.MAX_PAGES - items.length);
-            if (!extracted.length) {
+            if (webImportCore.shouldCaptureRenderedPage(extracted, result.html)) {
                 if (!maximumSelected) {
                     throw new Error('当前漫画已经没有可用页数');
                 }
-                setStatus('静态 HTML 没有图片，正在隔离运行页面并等待漫画内容加载…');
-                const captured = await captureRenderedPage(result.finalUrl, maximumSelected, webImportAbortController.signal);
-                webImportFinalUrl = captured.finalUrl || result.finalUrl;
-                extracted = (captured.images || []).map(image => ({
-                    url: `${webImportFinalUrl}#dynamic-page-${image.index + 1}`,
-                    duplicateOf: -1,
-                    capturedIndex: Number(image.index),
-                    capturedName: String(image.name || `page-${image.index + 1}.jpg`),
-                    capturedMime: String(image.mime || ''),
-                    capturedSize: Number(image.size) || 0
-                }));
+                setStatus(extracted.length
+                    ? '检测到阅读器或少量预览图，正在隔离运行页面并收集完整页序…'
+                    : '静态 HTML 没有图片，正在隔离运行页面并等待漫画内容加载…');
+                try {
+                    const captured = await captureRenderedPage(result.finalUrl, maximumSelected, webImportAbortController.signal);
+                    const renderedCandidates = (captured.images || []).map(image => ({
+                        url: `${captured.finalUrl || result.finalUrl}#dynamic-page-${image.index + 1}`,
+                        duplicateOf: -1,
+                        capturedIndex: Number(image.index),
+                        capturedName: String(image.name || `page-${image.index + 1}.jpg`),
+                        capturedMime: String(image.mime || ''),
+                        capturedSize: Number(image.size) || 0
+                    }));
+                    if (renderedCandidates.length > extracted.filter(candidate => candidate.duplicateOf < 0).length) {
+                        extracted = renderedCandidates;
+                        webImportFinalUrl = captured.finalUrl || result.finalUrl;
+                    } else {
+                        releaseRenderedPageCapture();
+                    }
+                } catch (captureError) {
+                    if (!extracted.length || captureError.name === 'AbortError') {
+                        throw captureError;
+                    }
+                }
                 if (!extracted.length) {
                     throw new Error('页面运行完成后仍未找到漫画图片');
                 }
@@ -1869,6 +1951,10 @@
             webImportAbortController = null;
             setBusy('');
             renderWebImportCandidates();
+            const queued = selectedWebCandidates().filter(candidate => !candidate.prepared && !candidate.loading && !candidate.error);
+            if (queued.length) {
+                root.queueMicrotask(() => previewWebCandidates(queued));
+            }
         }
     }
 
@@ -3340,26 +3426,25 @@
     });
     document.getElementById('downloadWebImportButton').addEventListener('click', downloadWebImport);
     document.getElementById('clearWebImportButton').addEventListener('click', () => clearWebImportCandidates('网页分析结果已清除。'));
-    document.getElementById('webImportSelectAllButton').addEventListener('click', () => {
-        const maximum = Math.max(0, format.MAX_PAGES - items.length);
-        let selected = 0;
-        for (const candidate of webImportCandidates) {
-            const shouldSelect = !candidate.duplicate && selected < maximum;
-            if (!shouldSelect && candidate.selected) {
-                releasePreparedCandidate(candidate);
-            }
-            candidate.selected = shouldSelect;
-            candidate.error = '';
-            if (shouldSelect) {
-                selected += 1;
-            }
+    document.getElementById('webImportSelectionMenuButton').addEventListener('click', event => {
+        event.stopPropagation();
+        const menu = document.getElementById('webImportSelectionMenu');
+        const willOpen = menu.hidden;
+        menu.hidden = !willOpen;
+        event.currentTarget.setAttribute('aria-expanded', String(willOpen));
+    });
+    document.getElementById('webImportSelectionMenu').addEventListener('click', event => {
+        const button = event.target.closest('button[data-web-selection]');
+        if (!button) {
+            return;
         }
-        renderWebImportCandidates();
-        previewWebCandidates(selectedWebCandidates());
+        applyWebImportSelection(button.dataset.webSelection);
+        closeWebImportSelectionMenu();
+        document.getElementById('webImportSelectionMenuButton').focus();
     });
     document.getElementById('webImportList').addEventListener('click', event => {
         const button = event.target.closest('button[data-web-action]');
-        if (!button || activeJobType) {
+        if (!button || activeJobType === 'webAnalyze' || activeJobType === 'webDownload') {
             return;
         }
         const index = webImportCandidates.findIndex(candidate => candidate.id === button.dataset.candidateId);
@@ -3371,9 +3456,21 @@
         } else if (button.dataset.webAction === 'down') {
             moveWebImportCandidate(button.dataset.candidateId, index + 1);
         } else if (button.dataset.webAction === 'remove') {
+            webImportCandidates[index].selected = false;
             releasePreparedCandidate(webImportCandidates[index]);
             webImportCandidates.splice(index, 1);
             renderWebImportCandidates();
+        }
+    });
+    document.addEventListener('click', event => {
+        if (!event.target.closest('.web-import-selection-menu')) {
+            closeWebImportSelectionMenu();
+        }
+    });
+    document.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && !document.getElementById('webImportSelectionMenu').hidden) {
+            closeWebImportSelectionMenu();
+            document.getElementById('webImportSelectionMenuButton').focus();
         }
     });
     document.getElementById('comicFilesPicker').addEventListener('keydown', event => activateFilePicker(event, comicFilesInput));

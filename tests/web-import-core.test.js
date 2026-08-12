@@ -45,6 +45,52 @@ test('web import caps candidate records without changing their order', () => {
     assert.equal(result[499].url, 'https://example.com/p/499.jpg');
 });
 
+test('web import extracts a complete embedded image list instead of the visible reader window', () => {
+    const slides = Array.from({ length: 17 }, (_, index) =>
+        `{\\"src\\":\\"https:\\/\\/cdn.example.com\\/book\\/hash-${index + 1}\\/${index + 1}.webp\\"}`
+    ).join(',');
+    const html = `<script>self.readerData={\\"slides\\":[${slides}],\\"startingPage\\":0}</script>`;
+    const result = webImport.extractEmbeddedImageCandidates(html, 'https://reader.example/viewer?page=1');
+    assert.equal(result.length, 17);
+    assert.equal(result[0].url, 'https://cdn.example.com/book/hash-1/1.webp');
+    assert.equal(result[16].url, 'https://cdn.example.com/book/hash-17/17.webp');
+    assert.deepEqual(result.map(item => item.duplicateOf), Array(17).fill(-1));
+});
+
+test('web import keeps one semantic page track and ignores larger recommendation arrays', () => {
+    const pages = Array.from({ length: 8 }, (_, index) =>
+        `{url:"https://cdn.example.com/chapter/${index + 1}.jpg",url1280:"https://cdn.example.com/chapter/${index + 1}.webp-t.w1280.jpg.h"}`
+    ).join(',');
+    const recommendations = Array.from({ length: 30 }, (_, index) =>
+        `{cover:"https://cdn.example.com/recommend/${index + 1}.jpg"}`
+    ).join(',');
+    const html = `<script>window.data={comic_images:[${pages}],recommendations:[${recommendations}]}</script>`;
+    const result = webImport.extractEmbeddedImageCandidates(html, 'https://reader.example/chapter/1');
+    assert.equal(result.length, 8);
+    assert.equal(result[0].url, 'https://cdn.example.com/chapter/1.webp-t.w1280.jpg.h');
+    assert.equal(result[7].url, 'https://cdn.example.com/chapter/8.webp-t.w1280.jpg.h');
+    assert.equal(result[0].attributes.trackName, 'comic_images');
+    const unrelatedDom = webImport.resolveImageRecords(Array.from({ length: 500 }, (_, index) => ({
+        src: `https://cdn.example.com/recommend/${index + 1}.jpg`
+    })), 'https://reader.example/chapter/1');
+    assert.equal(webImport.selectBestCandidateSet(unrelatedDom, result), result);
+});
+
+test('web import uses generic reader hints for small preview sets', () => {
+    const previews = webImport.resolveImageRecords([
+        { src: '/thumbnails/1.webp' },
+        { src: '/thumbnails/2.webp' },
+        { src: '/thumbnails/3.webp' }
+    ], 'https://example.com/gallery/1');
+    const originals = webImport.resolveImageRecords(Array.from({ length: 12 }, (_, index) => ({
+        src: `/original/${index + 1}.webp`
+    })), 'https://example.com/viewer/1');
+    assert.equal(webImport.selectBestCandidateSet(previews, originals), originals);
+    assert.equal(webImport.shouldCaptureRenderedPage(previews, '<a id="read-online-button">Read Online</a>'), true);
+    assert.equal(webImport.shouldCaptureRenderedPage(originals, '<main class="reader"></main>'), false);
+    assert.equal(webImport.shouldCaptureRenderedPage([], '<ul class="comic-contain" id="images"></ul>'), true);
+});
+
 test('18comic scrambled pages receive the deterministic strip restoration plan', () => {
     assert.equal(webImport.md5Hex('41613000001'), '2f7bd47844c13bd7fe289326dc1dd7c7');
     assert.equal(webImport.get18ComicSliceCount('416130', '00001'), 12);

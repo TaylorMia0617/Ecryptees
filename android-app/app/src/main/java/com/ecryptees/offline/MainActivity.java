@@ -708,6 +708,31 @@ public final class MainActivity extends ComponentActivity {
             }
         }
 
+        private boolean navigateRenderedPage(String token, String rawUrl) {
+            RenderedPageTask task = renderedTasks.get(token);
+            String url = normalizeHttpsUrl(rawUrl);
+            if (task == null || url == null || task.webView == null || task.redirects >= 5) {
+                return false;
+            }
+            try {
+                URL current = new URL(task.finalUrl.isEmpty() ? task.initialUrl : task.finalUrl);
+                URL destination = new URL(url);
+                if (!current.getHost().equalsIgnoreCase(destination.getHost())) {
+                    return false;
+                }
+            } catch (Exception error) {
+                return false;
+            }
+            task.state = "loading";
+            task.error = "";
+            runOnUiThread(() -> {
+                if (renderedTasks.containsKey(token) && task.webView != null) {
+                    task.webView.loadUrl(url);
+                }
+            });
+            return true;
+        }
+
         @JavascriptInterface
         public boolean beginRenderedImage(String token, int index, String rawName, String rawMime, long expectedSize) {
             RenderedPageTask task = renderedTasks.get(token);
@@ -1022,6 +1047,14 @@ public final class MainActivity extends ComponentActivity {
             rendered.addJavascriptInterface(renderedCaptureReceiver, "AndroidRenderedCapture");
             rendered.setWebViewClient(new WebViewClientCompat() {
                 @Override
+                public void onPageStarted(@NonNull WebView view, @NonNull String url, Bitmap favicon) {
+                    super.onPageStarted(view, url, favicon);
+                    if ("capturing".equals(task.state)) {
+                        task.state = "loading";
+                    }
+                }
+
+                @Override
                 public boolean shouldOverrideUrlLoading(@NonNull WebView view, @NonNull WebResourceRequest request) {
                     Uri uri = request.getUrl();
                     if (!"https".equalsIgnoreCase(uri.getScheme())) {
@@ -1186,6 +1219,17 @@ public final class MainActivity extends ComponentActivity {
         }
 
         private final class RenderedCaptureReceiver {
+            @JavascriptInterface
+            public int getRenderedImageCount(String token) {
+                RenderedPageTask task = renderedTasks.get(token);
+                return task == null ? 0 : task.images.size();
+            }
+
+            @JavascriptInterface
+            public boolean navigateRenderedPage(String token, String url) {
+                return RemoteNetworkBridge.this.navigateRenderedPage(token, url);
+            }
+
             @JavascriptInterface
             public boolean beginRenderedImage(String token, int index, String name, String mime, long size) {
                 return RemoteNetworkBridge.this.beginRenderedImage(token, index, name, mime, size);

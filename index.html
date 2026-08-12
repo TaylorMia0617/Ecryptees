@@ -32,17 +32,23 @@
             </div>
             <span>本地优先的加密漫画工具</span>
         </div>
-        <span class="app-drawer-label app-drawer-label--offline">离线工具</span>
-        <div class="tabs app-drawer-nav" role="tablist" aria-label="编解码类型">
+        <div class="app-drawer-assets">
+            <div class="app-drawer-assets-heading">
+                <button class="tab app-drawer-asset-tab" id="historyTab" type="button" role="tab" aria-selected="false" aria-controls="historyPanel" tabindex="-1" data-mode="history"><span aria-hidden="true">资</span>资产</button>
+                <button class="app-drawer-assets-toggle" id="appDrawerAssetsToggle" type="button" aria-label="展开资产分组" aria-controls="appDrawerAssetGroups" aria-expanded="false" title="展开资产分组">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6.7 9.3 1.4-1.4 3.9 3.9 3.9-3.9 1.4 1.4-5.3 5.3-5.3-5.3Z"/></svg>
+                </button>
+            </div>
+            <div class="app-drawer-asset-groups" id="appDrawerAssetGroups" hidden>
+                <button id="drawerComicAssetsButton" type="button"><span aria-hidden="true">漫</span>漫画资产</button>
+                <button id="drawerImageAssetsButton" type="button"><span aria-hidden="true">图</span>图片资产</button>
+            </div>
+        </div>
+        <span class="app-drawer-label">工具</span>
+        <div class="tabs app-drawer-nav" role="tablist" aria-label="本地工具">
             <button class="tab" id="textTab" type="button" role="tab" aria-selected="true" aria-controls="textPanel" tabindex="0" data-mode="text"><span aria-hidden="true">文</span>文本</button>
             <button class="tab" id="imageTab" type="button" role="tab" aria-selected="false" aria-controls="imagePanel" tabindex="-1" data-mode="image"><span aria-hidden="true">图</span>图片</button>
             <button class="tab" id="comicTab" type="button" role="tab" aria-selected="false" aria-controls="comicPanel" tabindex="-1" data-mode="comic"><span aria-hidden="true">漫</span>漫画</button>
-            <button class="tab" id="historyTab" type="button" role="tab" aria-selected="false" aria-controls="historyPanel" tabindex="-1" data-mode="history"><span aria-hidden="true">资</span>资产</button>
-        </div>
-        <div class="app-drawer-future">
-            <span class="app-drawer-label">通道模式 <em>未来</em></span>
-            <button type="button" disabled><span aria-hidden="true">存</span>哑存储</button>
-            <button type="button" disabled><span aria-hidden="true">连</span>打洞直连</button>
         </div>
         <div class="app-drawer-spacer"></div>
         <p class="app-drawer-privacy">网页导入仅在点击“分析网页”后联网；其他功能保持本地处理。</p>
@@ -182,7 +188,7 @@
                 <div class="web-import-panel" id="webComicSourcePanel" hidden>
                     <div class="web-import-intro">
                         <strong>从网页导入图片</strong>
-                        <p>读取静态 HTML 中的全部图片，根据顺序导入</p>
+                        <p>识别网页图片清单、滚动列表或翻页阅读器，根据顺序导入</p>
                     </div>
                     <label for="webImportUrl">HTTPS 网页链接</label>
                     <div class="web-import-url-row">
@@ -190,11 +196,20 @@
                         <button class="web-import-clear-url" id="clearWebImportUrlButton" type="button" aria-label="清除网页链接和当前网页任务" title="清除网页链接和当前网页任务">×</button>
                         <button id="analyzeWebImportButton" type="button">分析网页</button>
                     </div>
-                    <p class="web-import-network-note">仅点击“分析网页”后联网；静态 HTML 没有图片时，Android 会在隔离临时页运行网页脚本并等待图片加载。需要开启 VPN 或 Clash。</p>
+                    <p class="web-import-network-note">仅点击“分析网页”后联网；Android 会优先读取页面内嵌清单，必要时在隔离临时页运行阅读器并收集翻页图片。需要开启 VPN 或 Clash。</p>
                     <div class="web-import-results" id="webImportResults" hidden>
                         <div class="web-import-results-header">
                             <strong id="webImportSummary">尚未分析</strong>
-                            <button class="secondary-button" id="webImportSelectAllButton" type="button">全选</button>
+                            <div class="web-import-selection-menu">
+                                <button class="secondary-button web-import-selection-trigger" id="webImportSelectionMenuButton" type="button" aria-label="批量选择图片" aria-haspopup="menu" aria-expanded="false" aria-controls="webImportSelectionMenu">
+                                    <span aria-hidden="true">☑</span><span class="web-import-selection-chevron" aria-hidden="true">⌄</span>
+                                </button>
+                                <div class="web-import-selection-options" id="webImportSelectionMenu" role="menu" hidden>
+                                    <button type="button" role="menuitem" data-web-selection="all">全选</button>
+                                    <button type="button" role="menuitem" data-web-selection="none">取消全选</button>
+                                    <button type="button" role="menuitem" data-web-selection="invert">反转勾选</button>
+                                </div>
+                            </div>
                         </div>
                         <ol class="web-import-list" id="webImportList" aria-label="网页图片顺序"></ol>
                         <div class="web-import-actions">
@@ -329,7 +344,7 @@
                 <h3 id="versionSettingsTitle">应用信息</h3>
                 <div class="app-version-row">
                     <span>版本</span>
-                    <strong id="appVersionInfo">1.0.13 · code 14</strong>
+                    <strong id="appVersionInfo">1.0.14 · code 15</strong>
                 </div>
             </section>
         </div>
