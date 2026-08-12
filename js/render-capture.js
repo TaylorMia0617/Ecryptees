@@ -4,6 +4,7 @@
     const bridge = globalThis.AndroidRenderedCapture;
     const token = String(globalThis.__ECRYPTEES_CAPTURE_TOKEN__ || '');
     const maximum = Math.max(1, Math.min(80, Number(globalThis.__ECRYPTEES_CAPTURE_MAXIMUM__) || 80));
+    const READER_SETTLE_CYCLES = 6;
     delete globalThis.__ECRYPTEES_CAPTURE_TOKEN__;
     delete globalThis.__ECRYPTEES_CAPTURE_MAXIMUM__;
     const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -183,6 +184,16 @@
         if (!source || capturedSources.has(source)) {
             return false;
         }
+        if (/^https:\/\//i.test(source)) {
+            if (typeof bridge.addRenderedPageSource !== 'function'
+                    || !bridge.addRenderedPageSource(token, source)) {
+                throw new Error(`第 ${capturedCount + 1} 张动态图片地址无法写入任务`);
+            }
+            capturedSources.add(source);
+            capturedCount += 1;
+            saveCaptureState();
+            return true;
+        }
         try {
             const response = await fetch(source, { credentials: 'omit', cache: 'no-store' });
             if (!response.ok) {
@@ -193,18 +204,25 @@
             if (!mime.startsWith('image/') || blob.size <= 0) {
                 throw new Error(`第 ${capturedCount + 1} 张动态图片内容无效`);
             }
-            const index = capturedCount;
-            if (!bridge.beginRenderedImage(token, index, safeName(source, index, mime), mime, blob.size)) {
-                throw new Error(`第 ${index + 1} 张动态图片无法写入临时空间`);
+            const order = capturedCount;
+            const capturedIndex = Number(bridge.beginRenderedImage(
+                token,
+                order,
+                safeName(source, order, mime),
+                mime,
+                blob.size
+            ));
+            if (!Number.isInteger(capturedIndex) || capturedIndex < 0) {
+                throw new Error(`第 ${order + 1} 张动态图片无法写入临时空间`);
             }
             for (let offset = 0; offset < blob.size; offset += 192 * 1024) {
                 const bytes = new Uint8Array(await blob.slice(offset, offset + 192 * 1024).arrayBuffer());
-                if (!bridge.writeRenderedImageChunk(token, index, encodeBase64(bytes))) {
-                    throw new Error(`第 ${index + 1} 张动态图片写入失败`);
+                if (!bridge.writeRenderedImageChunk(token, capturedIndex, encodeBase64(bytes))) {
+                    throw new Error(`第 ${order + 1} 张动态图片写入失败`);
                 }
             }
-            if (!bridge.finishRenderedImage(token, index)) {
-                throw new Error(`第 ${index + 1} 张动态图片写入不完整`);
+            if (!bridge.finishRenderedImage(token, capturedIndex)) {
+                throw new Error(`第 ${order + 1} 张动态图片写入不完整`);
             }
             capturedSources.add(source);
             capturedCount += 1;
@@ -231,18 +249,6 @@
             }
         }
         return added;
-    }
-
-    function pendingReaderImages() {
-        return Array.from(document.images).filter(image => {
-            if (hasExcludedContext(image)) {
-                return false;
-            }
-            const lazySource = image.getAttribute('data-original')
-                || image.getAttribute('data-src')
-                || image.getAttribute('data-lazy-src');
-            return !image.complete || (!!lazySource && ![image.currentSrc, image.src].includes(lazySource));
-        }).length;
     }
 
     async function waitForImages(attempts = 24) {
@@ -297,19 +303,16 @@
             }
         } else {
             let stableBottomCycles = 0;
-            let lastMutationVersion = mutationVersion;
             for (let cycle = 0; cycle < 160 && capturedCount < maximum; cycle += 1) {
                 const added = await captureCurrentImages();
                 const documentHeight = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
                 const atBottom = scrollY + innerHeight >= documentHeight - 32;
-                const mutated = mutationVersion !== lastMutationVersion;
-                lastMutationVersion = mutationVersion;
-                if (added || mutated || pendingReaderImages()) {
+                if (added) {
                     stableBottomCycles = 0;
                 } else if (atBottom) {
                     stableBottomCycles += 1;
                 }
-                if (atBottom && stableBottomCycles >= 3) {
+                if (atBottom && stableBottomCycles >= READER_SETTLE_CYCLES) {
                     const next = findNextControl();
                     if (!next) {
                         break;

@@ -1062,6 +1062,7 @@
     }
 
     async function captureRenderedPage(url, maximum, signal) {
+        const timeoutAt = Date.now() + 150_000;
         if (!isAndroidRuntime || typeof androidNetwork?.beginRenderedPageCapture !== 'function') {
             throw new Error('网页依赖脚本生成图片；请使用支持动态网页分析的 Android APK');
         }
@@ -1082,6 +1083,9 @@
             while (true) {
                 if (signal.aborted) {
                     throw new DOMException('操作已取消', 'AbortError');
+                }
+                if (Date.now() >= timeoutAt) {
+                    throw new Error('动态网页分析超过 150 秒，任务已停止；请清除后重试');
                 }
                 const status = JSON.parse(androidNetwork.getRenderedPageCaptureStatus(token) || '{}');
                 if (status.state === 'ready') {
@@ -1879,9 +1883,9 @@
                 try {
                     const captured = await captureRenderedPage(result.finalUrl, maximumSelected, webImportAbortController.signal);
                     const renderedCandidates = (captured.images || []).map(image => ({
-                        url: `${captured.finalUrl || result.finalUrl}#dynamic-page-${image.index + 1}`,
+                        url: image.sourceUrl || `${captured.finalUrl || result.finalUrl}#dynamic-page-${image.index + 1}`,
                         duplicateOf: -1,
-                        capturedIndex: Number(image.index),
+                        capturedIndex: Number.isInteger(image.capturedIndex) ? Number(image.capturedIndex) : -1,
                         capturedName: String(image.name || `page-${image.index + 1}.jpg`),
                         capturedMime: String(image.mime || ''),
                         capturedSize: Number(image.size) || 0

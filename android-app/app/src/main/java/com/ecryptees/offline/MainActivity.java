@@ -660,12 +660,17 @@ public final class MainActivity extends ComponentActivity {
                 result.put("finalUrl", task.finalUrl);
                 JSONArray images = new JSONArray();
                 synchronized (task) {
-                    for (CapturedRenderedImage image : task.images) {
+                    for (int order = 0; order < task.entries.size(); order++) {
+                        RenderedPageEntry entry = task.entries.get(order);
                         JSONObject item = new JSONObject();
-                        item.put("index", image.index);
-                        item.put("name", image.name);
-                        item.put("mime", image.mime);
-                        item.put("size", image.size);
+                        item.put("index", order);
+                        item.put("sourceUrl", entry.sourceUrl);
+                        if (entry.image != null) {
+                            item.put("capturedIndex", entry.image.index);
+                            item.put("name", entry.image.name);
+                            item.put("mime", entry.image.mime);
+                            item.put("size", entry.image.size);
+                        }
                         images.put(item);
                     }
                 }
@@ -734,29 +739,51 @@ public final class MainActivity extends ComponentActivity {
         }
 
         @JavascriptInterface
-        public boolean beginRenderedImage(String token, int index, String rawName, String rawMime, long expectedSize) {
+        public boolean addRenderedPageSource(String token, String rawUrl) {
             RenderedPageTask task = renderedTasks.get(token);
-            if (task == null || index != task.images.size() || index >= task.maximum
-                    || expectedSize <= 0 || expectedSize > MAX_NATIVE_INPUT_BYTES
-                    || task.totalBytes + expectedSize > MAX_NATIVE_INPUT_BYTES) {
+            String url = normalizeHttpsUrl(rawUrl);
+            if (task == null || url == null) {
                 return false;
             }
-            String name = rawName == null ? "page-" + (index + 1) + ".jpg" : rawName;
-            name = name.replaceAll("[\\\\/:*?\"<>|\\p{Cntrl}]", "_");
-            String mime = rawMime != null && rawMime.startsWith("image/") ? rawMime : "application/octet-stream";
-            File file = new File(getCacheDir(), RENDER_CACHE_PREFIX + token + "-" + index + ".tmp");
-            try {
-                CapturedRenderedImage image = new CapturedRenderedImage(index, name, mime, expectedSize, file);
-                image.output = new FileOutputStream(file, false);
-                synchronized (task) {
-                    task.images.add(image);
-                    task.totalBytes += expectedSize;
+            synchronized (task) {
+                if (task.entries.size() >= task.maximum
+                        || task.entries.stream().anyMatch(entry -> url.equals(entry.sourceUrl))) {
+                    return false;
                 }
-                return true;
-            } catch (IOException error) {
-                file.delete();
-                task.fail("无法创建动态网页图片临时文件");
-                return false;
+                task.entries.add(new RenderedPageEntry(url, null));
+            }
+            return true;
+        }
+
+        @JavascriptInterface
+        public int beginRenderedImage(String token, int order, String rawName, String rawMime, long expectedSize) {
+            RenderedPageTask task = renderedTasks.get(token);
+            if (task == null) {
+                return -1;
+            }
+            synchronized (task) {
+                if (order != task.entries.size() || order >= task.maximum
+                        || expectedSize <= 0 || expectedSize > MAX_NATIVE_INPUT_BYTES
+                        || task.totalBytes + expectedSize > MAX_NATIVE_INPUT_BYTES) {
+                    return -1;
+                }
+                int capturedIndex = task.images.size();
+                String name = rawName == null ? "page-" + (order + 1) + ".jpg" : rawName;
+                name = name.replaceAll("[\\\\/:*?\"<>|\\p{Cntrl}]", "_");
+                String mime = rawMime != null && rawMime.startsWith("image/") ? rawMime : "application/octet-stream";
+                File file = new File(getCacheDir(), RENDER_CACHE_PREFIX + token + "-" + capturedIndex + ".tmp");
+                try {
+                    CapturedRenderedImage image = new CapturedRenderedImage(capturedIndex, name, mime, expectedSize, file);
+                    image.output = new FileOutputStream(file, false);
+                    task.images.add(image);
+                    task.entries.add(new RenderedPageEntry("", image));
+                    task.totalBytes += expectedSize;
+                    return capturedIndex;
+                } catch (IOException error) {
+                    file.delete();
+                    task.fail("无法创建动态网页图片临时文件");
+                    return -1;
+                }
             }
         }
 
@@ -809,7 +836,7 @@ public final class MainActivity extends ComponentActivity {
                 return;
             }
             synchronized (task) {
-                if (count <= 0 || task.images.size() != count
+                if (count <= 0 || task.entries.size() != count
                         || task.images.stream().anyMatch(image -> image.output != null || image.written != image.size)) {
                     task.fail("动态网页图片捕获不完整");
                     return;
@@ -1179,6 +1206,7 @@ public final class MainActivity extends ComponentActivity {
             final String token;
             final String initialUrl;
             final int maximum;
+            final List<RenderedPageEntry> entries = new ArrayList<>();
             final List<CapturedRenderedImage> images = new ArrayList<>();
             volatile String state = "loading";
             volatile String error = "";
@@ -1214,7 +1242,18 @@ public final class MainActivity extends ComponentActivity {
                         image.cleanup();
                     }
                     images.clear();
+                    entries.clear();
                 }
+            }
+        }
+
+        private final class RenderedPageEntry {
+            final String sourceUrl;
+            final CapturedRenderedImage image;
+
+            RenderedPageEntry(String sourceUrl, CapturedRenderedImage image) {
+                this.sourceUrl = sourceUrl;
+                this.image = image;
             }
         }
 
@@ -1222,7 +1261,12 @@ public final class MainActivity extends ComponentActivity {
             @JavascriptInterface
             public int getRenderedImageCount(String token) {
                 RenderedPageTask task = renderedTasks.get(token);
-                return task == null ? 0 : task.images.size();
+                if (task == null) {
+                    return 0;
+                }
+                synchronized (task) {
+                    return task.entries.size();
+                }
             }
 
             @JavascriptInterface
@@ -1231,7 +1275,12 @@ public final class MainActivity extends ComponentActivity {
             }
 
             @JavascriptInterface
-            public boolean beginRenderedImage(String token, int index, String name, String mime, long size) {
+            public boolean addRenderedPageSource(String token, String url) {
+                return RemoteNetworkBridge.this.addRenderedPageSource(token, url);
+            }
+
+            @JavascriptInterface
+            public int beginRenderedImage(String token, int index, String name, String mime, long size) {
                 return RemoteNetworkBridge.this.beginRenderedImage(token, index, name, mime, size);
             }
 

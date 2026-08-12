@@ -328,6 +328,10 @@ test('web image previews stay local and navigation uses the expanded full-width 
     assert.match(comicApp, /beginRenderedPageCapture/);
     assert.match(comicApp, /readRenderedPageImageChunk/);
     assert.match(comicApp, /releaseRenderedPageCapture/);
+    assert.match(comicApp, /const timeoutAt = Date\.now\(\) \+ 150_000/);
+    assert.match(comicApp, /动态网页分析超过 150 秒/);
+    assert.match(comicApp, /url: image\.sourceUrl \|\| `\$\{captured\.finalUrl \|\| result\.finalUrl\}#dynamic-page-/);
+    assert.match(comicApp, /capturedIndex: Number\.isInteger\(image\.capturedIndex\)[\s\S]*: -1/);
     assert.match(styles, /\.web-import-selection-options\s*\{/);
 });
 
@@ -439,11 +443,18 @@ test('Android wrapper loads local HTTPS assets and streams downloads through SAF
     assert.match(activity, /cancelRemoteFetch\(String token\)/);
     assert.match(activity, /releaseRemoteFetch\(String token\)/);
     assert.match(renderedCapture, /new MutationObserver/);
-    assert.match(renderedCapture, /pendingReaderImages\(\)/);
-    assert.match(renderedCapture, /stableBottomCycles >= 3/);
+    assert.doesNotMatch(renderedCapture, /function pendingReaderImages\(\)/);
+    assert.match(renderedCapture, /const READER_SETTLE_CYCLES = 6/);
+    assert.match(renderedCapture, /if \(added\) \{\s*stableBottomCycles = 0/s);
+    assert.doesNotMatch(renderedCapture, /added \|\| mutated \|\| pendingReaderImages/);
+    assert.match(renderedCapture, /stableBottomCycles >= READER_SETTLE_CYCLES/);
     assert.match(activity, /beginRenderedPageCapture\(String rawUrl, int requestedMaximum\)/);
     assert.match(activity, /navigateRenderedPage\(String token, String rawUrl\)/);
     assert.match(activity, /getRenderedImageCount\(String token\)/);
+    assert.match(activity, /addRenderedPageSource\(String token, String rawUrl\)/);
+    assert.match(activity, /item\.put\("sourceUrl", entry\.sourceUrl\)/);
+    assert.match(activity, /item\.put\("capturedIndex", entry\.image\.index\)/);
+    assert.match(activity, /task\.entries\.size\(\) != count/);
     assert.match(activity, /"capturing"\.equals\(task\.state\)[\s\S]*task\.state = "loading"/);
     assert.match(activity, /getRenderedPageCaptureStatus\(String token\)/);
     assert.match(activity, /readRenderedPageImageChunk\(String token, int index, long offset, int requestedBytes\)/);
@@ -458,6 +469,8 @@ test('Android wrapper loads local HTTPS assets and streams downloads through SAF
     assert.match(renderedCapture, /resumeIndex/);
     assert.match(renderedCapture, /getRenderedImageCount/);
     assert.match(renderedCapture, /scrollIntoView/);
+    assert.match(renderedCapture, /if \(\/\^https:\\\/\\\/\/i\.test\(source\)\)[\s\S]*bridge\.addRenderedPageSource\(token, source\)[\s\S]*return true;[\s\S]*const response = await fetch\(source/);
+    assert.match(renderedCapture, /const capturedIndex = Number\(bridge\.beginRenderedImage/);
     assert.match(renderedCapture, /blob\.slice\(offset, offset \+ 192 \* 1024\)/);
     assert.match(renderedCapture, /bridge\.finishRenderedPage/);
     assert.match(activity, /"https"\.equalsIgnoreCase\(url\.getProtocol\(\)\)/);
