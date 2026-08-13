@@ -4,7 +4,7 @@
 
 Ecryptees 可以把多张图片打包成带认证的 `.ecomic` 漫画归档，在 Android 或现代浏览器中离线阅读、整理漫画与图片资产，并按需重新导出归档、长图、原图或图片密文 TXT。当前版本不需要账号，不连接项目服务器，也不包含广告、统计或远程资源；仅当用户在“网页链接”中点击“分析网页”时，应用才会访问用户填写的 HTTPS 页面和选中的图片地址。
 
-当前 Android 版本：`1.0.14`（versionCode 15）。
+当前 Android 版本：`1.0.15`（versionCode 16）。
 
 ## 它能做什么
 
@@ -45,7 +45,7 @@ Ecryptees 可以把多张图片打包成带认证的 `.ecomic` 漫画归档，�
 
 ## Android 使用
 
-1. 安装 `dist/Ecryptees-v1.0.14.apk`；从旧版本升级时直接覆盖安装，不要先卸载。
+1. 安装 `dist/Ecryptees-v1.0.15.apk`；从旧版本升级时直接覆盖安装，不要先卸载。
 2. 在“漫画”中选择图片、调整顺序并点击“加密并加入资产”。
 3. 完成后点击“去查看”直接阅读；需要文件时从漫画资产卡导出 `.ecomic` 或长图。
 4. 在 QQ 或文件管理器中对 `.ecomic` 使用“其他应用打开”或“发送”，然后选择 Ecryptees。
@@ -54,7 +54,7 @@ Ecryptees 可以把多张图片打包成带认证的 `.ecomic` 漫画归档，�
 
 为了兼容不同 Android 厂商和应用不稳定的 MIME 标记，Ecryptees 会出现在较多文件的打开或分享候选中。真正导入前仍会检查 `.ecomic` 文件名、大小、`ECRCOM1` 文件头和完整归档认证；无效文件不会进入书架。
 
-Android 最低版本为 Android 8.0（API 26）。1.0.11 为主动网页导入声明普通权限 `INTERNET`，但不包含读取全部文件或管理全部文件权限；本地导入和导出继续使用系统文件选择界面及来源应用临时授予的 URI 权限。
+Android 最低版本为 Android 8.0（API 26）。APK 的单图和漫画多图导入使用系统照片选择器，只显示图片，并在系统支持时按勾选顺序返回；不支持有序选择的设备会保留系统返回顺序，用户可根据页码拖动确认。TXT、`.ecomic` 等非图片文件继续使用系统文档选择器。应用不申请读取整个相册、读取全部文件或管理全部文件权限，只使用用户选择项目的临时 URI 权限。1.0.11 起为主动网页导入声明普通权限 `INTERNET`。
 
 ## 浏览器与 PWA
 
@@ -116,7 +116,7 @@ node --check js/comic-app.js
 powershell -ExecutionPolicy Bypass -File .\android-app\build-apk.ps1
 ```
 
-构建脚本会生成版本化 APK，例如 `dist/Ecryptees-v1.0.14.apk`，并同步覆盖稳定文件名 `dist/Ecryptees.apk`。脚本会验证 APK 内部版本和发布证书；覆盖安装必须继续使用同一个 applicationId 与签名证书。
+构建脚本会生成版本化 APK，例如 `dist/Ecryptees-v1.0.15.apk`，并同步覆盖稳定文件名 `dist/Ecryptees.apk`。脚本会验证 APK 内部版本和发布证书；覆盖安装必须继续使用同一个 applicationId 与签名证书。
 
 ## 项目结构
 

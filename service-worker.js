@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE_NAME = 'ecryptees-app-v14';
+const CACHE_NAME = 'ecryptees-app-v15';
 const APP_SHELL = [
     './',
     './index.html',

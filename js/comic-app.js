@@ -130,7 +130,7 @@
         activeJobType = type;
         const busy = !!type;
         const previewingWebImages = type === 'webPreview';
-        comicFilesInput.disabled = busy || !runtimeSupported;
+        comicFilesInput.disabled = busy || !runtimeSupported || items.length >= format.MAX_PAGES;
         archiveInput.disabled = busy || !runtimeSupported;
         document.getElementById('comicArchiveName').disabled = busy || !runtimeSupported;
         document.getElementById('localComicSourceButton').disabled = busy;
@@ -2326,7 +2326,9 @@
             renderFileList();
             updateSelectionSummary();
             resetProgress();
-            setStatus(`已加入 ${selected.length} 张图片，请拖动或使用箭头确认页面顺序。`, 'success');
+            setStatus(isAndroidRuntime
+                ? `已按系统相册返回顺序加入 ${selected.length} 张图片，请确认页码；需要时可拖动或使用箭头调整。`
+                : `已按文件选择器返回顺序加入 ${selected.length} 张图片，请确认页码；需要时可拖动或使用箭头调整。`, 'success');
         } catch (error) {
             prepared.filter(Boolean).forEach(revokeItem);
             setStatus(error.message || '图片导入失败', 'error');

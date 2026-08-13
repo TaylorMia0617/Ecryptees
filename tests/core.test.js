@@ -415,7 +415,7 @@ test('Android wrapper loads local HTTPS assets and streams downloads through SAF
     const buildScript = fs.readFileSync(path.join(repositoryRoot, 'android-app', 'build-apk.ps1'), 'utf8');
 
     assert.match(manifest, /android\.permission\.INTERNET/);
-    assert.doesNotMatch(manifest, /READ_EXTERNAL_STORAGE|MANAGE_EXTERNAL_STORAGE/);
+    assert.doesNotMatch(manifest, /READ_MEDIA_IMAGES|READ_MEDIA_VISUAL_USER_SELECTED|READ_EXTERNAL_STORAGE|MANAGE_EXTERNAL_STORAGE/);
     assert.match(manifest, /android:allowBackup="false"/);
     assert.match(manifest, /android:launchMode="singleTop"/);
     assert.match(manifest, /android\.intent\.action\.VIEW/);
@@ -514,7 +514,7 @@ test('Android wrapper loads local HTTPS assets and streams downloads through SAF
     assert.match(buildScript, /APK version mismatch/);
 });
 
-test('JPG and JPEG remain selectable in browsers and Android document providers', () => {
+test('JPG and JPEG remain selectable in browsers and the Android photo picker', () => {
     const index = fs.readFileSync(path.join(repositoryRoot, 'index.html'), 'utf8');
     const activity = fs.readFileSync(
         path.join(repositoryRoot, 'android-app', 'app', 'src', 'main', 'java', 'com', 'ecryptees', 'offline', 'MainActivity.java'),
@@ -539,25 +539,39 @@ test('JPG and JPEG remain selectable in browsers and Android document providers'
     }
 
     assert.match(activity, /params\.getAcceptTypes\(\)/);
-    assert.match(activity, /createImageDocumentIntent\(params\)/);
-    assert.match(appBuild, /versionCode 15/);
-    assert.match(appBuild, /versionName '1\.0\.14'/);
-    assert.match(serviceWorker, /const CACHE_NAME = 'ecryptees-app-v14'/);
+    assert.match(activity, /new ActivityResultContracts\.PickVisualMedia\(\)/);
+    assert.match(activity, /new ActivityResultContracts\.PickMultipleVisualMedia\(80\)/);
+    assert.match(activity, /PickVisualMedia\.ImageOnly\.INSTANCE/);
+    assert.match(appBuild, /versionCode 16/);
+    assert.match(appBuild, /versionName '1\.0\.15'/);
+    assert.match(serviceWorker, /const CACHE_NAME = 'ecryptees-app-v15'/);
 });
 
-test('Android comic picker returns every readable document without trusting provider MIME metadata', () => {
+test('Android comic picker preserves system photo selection order without broad storage access', () => {
     const activity = fs.readFileSync(
         path.join(repositoryRoot, 'android-app', 'app', 'src', 'main', 'java', 'com', 'ecryptees', 'offline', 'MainActivity.java'),
         'utf8'
     );
     const appBuild = fs.readFileSync(path.join(repositoryRoot, 'android-app', 'app', 'build.gradle'), 'utf8');
+    const manifest = fs.readFileSync(
+        path.join(repositoryRoot, 'android-app', 'app', 'src', 'main', 'AndroidManifest.xml'),
+        'utf8'
+    );
+    const comicApp = fs.readFileSync(path.join(repositoryRoot, 'js', 'comic-app.js'), 'utf8');
 
-    assert.match(activity, /new Intent\(Intent\.ACTION_OPEN_DOCUMENT\)/);
-    assert.match(activity, /intent\.setType\("\*\/\*"\)/);
-    assert.match(activity, /Intent\.EXTRA_ALLOW_MULTIPLE/);
-    assert.match(activity, /data\.getClipData\(\)/);
+    assert.match(activity, /registerForActivityResult\([\s\S]*new ActivityResultContracts\.PickVisualMedia\(\)/);
+    assert.match(activity, /registerForActivityResult\([\s\S]*new ActivityResultContracts\.PickMultipleVisualMedia\(80\)/);
+    assert.match(activity, /\.setMaxItems\(80\)[\s\S]*\.setOrderedSelection\(true\)/);
+    assert.match(activity, /for \(Uri uri : uris\) \{\s*addReadableDocument\(selectedUris, uri\);\s*\}/s);
     assert.match(activity, /getContentResolver\(\)\.openFileDescriptor\(uri, "r"\)/);
-    assert.match(activity, /parseImageDocumentResult\(resultCode, data\)/);
-    assert.match(appBuild, /versionCode 15/);
-    assert.match(appBuild, /versionName '1\.0\.14'/);
+    assert.match(activity, /Intent intent = params\.createIntent\(\)/);
+    assert.doesNotMatch(activity, /createImageDocumentIntent|parseImageDocumentResult/);
+    assert.doesNotMatch(manifest, /READ_MEDIA_IMAGES|READ_MEDIA_VISUAL_USER_SELECTED|READ_EXTERNAL_STORAGE|MANAGE_EXTERNAL_STORAGE/);
+    assert.match(comicApp, /const prepared = new Array\(selected\.length\)/);
+    assert.match(comicApp, /prepared\[index\] = await prepareComicItem/);
+    assert.match(comicApp, /items\.push\(\.\.\.prepared\)/);
+    assert.match(comicApp, /items\.length >= format\.MAX_PAGES/);
+    assert.match(comicApp, /已按系统相册返回顺序加入/);
+    assert.match(appBuild, /versionCode 16/);
+    assert.match(appBuild, /versionName '1\.0\.15'/);
 });

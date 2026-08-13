@@ -38,6 +38,9 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.activity.ComponentActivity;
 import androidx.activity.OnBackPressedCallback;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.PickVisualMediaRequest;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.webkit.WebViewAssetLoader;
 import androidx.webkit.WebViewClientCompat;
 
@@ -83,7 +86,8 @@ public final class MainActivity extends ComponentActivity {
     private FrameLayout rootView;
     private WebView webView;
     private ValueCallback<Uri[]> fileChooserCallback;
-    private boolean imageDocumentChooser;
+    private ActivityResultLauncher<PickVisualMediaRequest> singleImagePicker;
+    private ActivityResultLauncher<PickVisualMediaRequest> multipleImagePicker;
     private final FileBridge fileBridge = new FileBridge();
     private final RemoteNetworkBridge remoteNetworkBridge = new RemoteNetworkBridge();
     private PendingDownload pendingDownload;
@@ -105,6 +109,7 @@ public final class MainActivity extends ComponentActivity {
         cleanupStaleRenderedFiles();
         rootView = new FrameLayout(this);
         setContentView(rootView);
+        registerImagePickers();
         createWebView(savedInstanceState);
         handleIncomingDocument(getIntent());
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
@@ -214,16 +219,25 @@ public final class MainActivity extends ComponentActivity {
                 }
                 fileChooserCallback = callback;
                 try {
-                    imageDocumentChooser = acceptsImageFiles(params);
-                    Intent intent = imageDocumentChooser
-                            ? createImageDocumentIntent(params)
-                            : params.createIntent();
+                    if (acceptsImageFiles(params)) {
+                        PickVisualMediaRequest.Builder request = new PickVisualMediaRequest.Builder()
+                                .setMediaType(ActivityResultContracts.PickVisualMedia.ImageOnly.INSTANCE);
+                        if (params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE) {
+                            multipleImagePicker.launch(request
+                                    .setMaxItems(80)
+                                    .setOrderedSelection(true)
+                                    .build());
+                        } else {
+                            singleImagePicker.launch(request.build());
+                        }
+                        return true;
+                    }
+                    Intent intent = params.createIntent();
                     intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
                     startActivityForResult(intent, REQUEST_OPEN_FILE);
                     return true;
-                } catch (ActivityNotFoundException error) {
+                } catch (ActivityNotFoundException | IllegalArgumentException error) {
                     fileChooserCallback = null;
-                    imageDocumentChooser = false;
                     Toast.makeText(MainActivity.this, R.string.file_chooser_unavailable, Toast.LENGTH_LONG).show();
                     return false;
                 }
@@ -233,6 +247,36 @@ public final class MainActivity extends ComponentActivity {
         if (savedInstanceState == null || webView.restoreState(savedInstanceState) == null) {
             webView.loadUrl(APP_URL);
         }
+    }
+
+    private void registerImagePickers() {
+        singleImagePicker = registerForActivityResult(
+                new ActivityResultContracts.PickVisualMedia(),
+                uri -> {
+                    ArrayList<Uri> selectedUris = new ArrayList<>();
+                    addReadableDocument(selectedUris, uri);
+                    finishImagePicker(selectedUris);
+                }
+        );
+        multipleImagePicker = registerForActivityResult(
+                new ActivityResultContracts.PickMultipleVisualMedia(80),
+                uris -> {
+                    ArrayList<Uri> selectedUris = new ArrayList<>();
+                    for (Uri uri : uris) {
+                        addReadableDocument(selectedUris, uri);
+                    }
+                    finishImagePicker(selectedUris);
+                }
+        );
+    }
+
+    private void finishImagePicker(List<Uri> selectedUris) {
+        ValueCallback<Uri[]> callback = fileChooserCallback;
+        fileChooserCallback = null;
+        if (callback == null) {
+            return;
+        }
+        callback.onReceiveValue(selectedUris.isEmpty() ? null : selectedUris.toArray(new Uri[0]));
     }
 
     private static boolean acceptsImageFiles(WebChromeClient.FileChooserParams params) {
@@ -263,36 +307,6 @@ public final class MainActivity extends ComponentActivity {
         return false;
     }
 
-    private static Intent createImageDocumentIntent(WebChromeClient.FileChooserParams params) {
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        // File providers do not consistently label JPEG and WebP content. Show all
-        // openable documents and let the web app verify each image byte signature.
-        intent.setType("*/*");
-        intent.putExtra(
-                Intent.EXTRA_ALLOW_MULTIPLE,
-                params.getMode() == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE
-        );
-        return intent;
-    }
-
-    @Nullable
-    private Uri[] parseImageDocumentResult(int resultCode, @Nullable Intent data) {
-        if (resultCode != RESULT_OK || data == null) {
-            return null;
-        }
-        ArrayList<Uri> selectedUris = new ArrayList<>();
-        ClipData clipData = data.getClipData();
-        if (clipData != null) {
-            for (int index = 0; index < clipData.getItemCount(); index++) {
-                addReadableDocument(selectedUris, clipData.getItemAt(index).getUri());
-            }
-        } else {
-            addReadableDocument(selectedUris, data.getData());
-        }
-        return selectedUris.isEmpty() ? null : selectedUris.toArray(new Uri[0]);
-    }
-
     private void addReadableDocument(ArrayList<Uri> selectedUris, @Nullable Uri uri) {
         if (uri == null || !"content".equalsIgnoreCase(uri.getScheme()) || selectedUris.contains(uri)) {
             return;
@@ -312,12 +326,8 @@ public final class MainActivity extends ComponentActivity {
         if (requestCode == REQUEST_OPEN_FILE) {
             ValueCallback<Uri[]> callback = fileChooserCallback;
             fileChooserCallback = null;
-            boolean parseAsImageDocuments = imageDocumentChooser;
-            imageDocumentChooser = false;
             if (callback != null) {
-                callback.onReceiveValue(parseAsImageDocuments
-                        ? parseImageDocumentResult(resultCode, data)
-                        : WebChromeClient.FileChooserParams.parseResult(resultCode, data));
+                callback.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(resultCode, data));
             }
             return;
         }
