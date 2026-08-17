@@ -4,6 +4,23 @@
     const tauri = root.__TAURI__;
     const available = !!root.__TAURI_INTERNALS__ && !!tauri?.core?.invoke;
     const MAX_CHUNK_BYTES = 1024 * 1024;
+    const NETWORK_MODE_KEY = 'ecryptees-desktop-network-mode-v1';
+    const NETWORK_MODES = new Set(['auto', 'systemProxy', 'direct']);
+
+    function getNetworkMode() {
+        try {
+            const value = root.localStorage.getItem(NETWORK_MODE_KEY) || 'auto';
+            return NETWORK_MODES.has(value) ? value : 'auto';
+        } catch (error) {
+            return 'auto';
+        }
+    }
+
+    function setNetworkMode(value) {
+        const mode = NETWORK_MODES.has(value) ? value : 'auto';
+        root.localStorage.setItem(NETWORK_MODE_KEY, mode);
+        return mode;
+    }
 
     function invoke(command, payload) {
         if (!available) {
@@ -32,7 +49,8 @@
         return invoke('begin_desktop_network_fetch', {
             url: String(url || ''),
             kind: String(kind || ''),
-            referer: String(referer || '')
+            referer: String(referer || ''),
+            mode: getNetworkMode()
         });
     }
 
@@ -61,7 +79,8 @@
         return invoke('begin_desktop_rendered_page_capture', {
             url: String(url || ''),
             maximum: Math.min(80, Math.max(1, Number(maximum) || 80)),
-            interactiveVerification: interactiveVerification === true
+            interactiveVerification: interactiveVerification === true,
+            mode: getNetworkMode()
         });
     }
 
@@ -85,6 +104,8 @@
 
     root.EcrypteesDesktopNetwork = Object.freeze({
         available,
+        getNetworkMode,
+        setNetworkMode,
         beginRemoteFetch,
         getRemoteFetchStatus,
         readRemoteFetchChunk,

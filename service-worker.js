@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE_NAME = 'ecryptees-app-v23-web-verification';
+const CACHE_NAME = 'ecryptees-app-v26-network-adapter-hitomi';
 const APP_SHELL = [
     './',
     './index.html',
@@ -29,7 +29,8 @@ const APP_SHELL = [
     './js/pwa.js',
     './js/android-bridge.js',
     './js/desktop-storage.js',
-    './js/desktop-network.js'
+    './js/desktop-network.js',
+    './js/network-adapter.js'
 ];
 
 const APP_URLS = new Set(APP_SHELL.map(path => new URL(path, self.registration.scope).href));

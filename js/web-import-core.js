@@ -499,6 +499,46 @@
             && (unique === 0 || ((unique <= 5 || mostlyThumbnails || trackType === 'fallback') && hasReaderPageHint(html)));
     }
 
+    function resolveHitomiReaderUrl(value) {
+        try {
+            const url = new URL(value);
+            if (!/(?:^|\.)hitomi\.la$/i.test(url.hostname)) {
+                return '';
+            }
+            const readerMatch = /^\/reader\/(\d+)\.html$/i.exec(url.pathname);
+            const galleryMatch = /-(\d+)\.html$/i.exec(url.pathname);
+            const galleryId = readerMatch?.[1] || galleryMatch?.[1] || '';
+            if (!galleryId) {
+                return '';
+            }
+            const page = /^#\d+$/.test(url.hash) ? url.hash : '#1';
+            return `${url.origin}/reader/${galleryId}.html${page}`;
+        } catch (error) {
+            return '';
+        }
+    }
+
+    function planRenderedPageCapture(candidates, html, baseUrl) {
+        const hitomiReaderUrl = resolveHitomiReaderUrl(baseUrl);
+        if (hitomiReaderUrl) {
+            return Object.freeze({
+                required: true,
+                preferRendered: true,
+                discardStaticFallback: true,
+                url: hitomiReaderUrl,
+                reason: 'scripted-gallery-reader'
+            });
+        }
+        const required = shouldCaptureRenderedPage(candidates, html);
+        return Object.freeze({
+            required,
+            preferRendered: false,
+            discardStaticFallback: false,
+            url: baseUrl,
+            reason: required ? 'generic-reader-hint' : 'static-content'
+        });
+    }
+
     root.Ecryptees = root.Ecryptees || {};
     root.Ecryptees.webImport = Object.freeze({
         MAX_CANDIDATES,
@@ -509,6 +549,7 @@
         md5Hex,
         normalizeHttpsUrl,
         parseSrcset,
+        planRenderedPageCapture,
         selectBestCandidateSet,
         shouldCaptureRenderedPage,
         resolve18ComicTransform,

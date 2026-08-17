@@ -100,6 +100,32 @@ test('web import uses generic reader hints for small preview sets', () => {
     assert.equal(webImport.shouldCaptureRenderedPage([], '<ul class="comic-contain" id="images"></ul>'), true);
 });
 
+test('Hitomi gallery pages bypass decorative images and open the real scripted reader', () => {
+    const decorative = webImport.resolveImageRecords([
+        { src: '//ltn.gold-usergeneratedcontent.net/logo.png' },
+        { src: '//ltn.gold-usergeneratedcontent.net/down-arrow.png' },
+        { src: '//ltn.gold-usergeneratedcontent.net/cover.webp' }
+    ], 'https://hitomi.la/doujinshi/example-2970668.html#7');
+    const plan = webImport.planRenderedPageCapture(
+        decorative,
+        '<a href="#" id="read-online-button">Read Online</a><ul class="thumbnail-list"></ul>',
+        'https://hitomi.la/doujinshi/example-2970668.html#7'
+    );
+
+    assert.deepEqual({ ...plan }, {
+        required: true,
+        preferRendered: true,
+        discardStaticFallback: true,
+        url: 'https://hitomi.la/reader/2970668.html#7',
+        reason: 'scripted-gallery-reader'
+    });
+    assert.equal(webImport.planRenderedPageCapture(
+        decorative,
+        '<main></main>',
+        'https://example.com/gallery/2970668'
+    ).required, false);
+});
+
 test('18comic scrambled pages receive the deterministic strip restoration plan', () => {
     assert.equal(webImport.md5Hex('41613000001'), '2f7bd47844c13bd7fe289326dc1dd7c7');
     assert.equal(webImport.get18ComicSliceCount('416130', '00001'), 12);

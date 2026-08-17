@@ -14,9 +14,8 @@
     const { format } = comic;
     const { formatBytes, sanitizeDownloadName } = core.utils;
     const androidMedia = root.EcrypteesAndroidMedia;
-    const androidNetwork = root.AndroidNetworkBridge;
     const desktopStorage = root.EcrypteesDesktopStorage?.available ? root.EcrypteesDesktopStorage : null;
-    const desktopNetwork = root.EcrypteesDesktopNetwork?.available ? root.EcrypteesDesktopNetwork : null;
+    const networkAdapter = root.EcrypteesNetworkAdapter?.available ? root.EcrypteesNetworkAdapter : null;
     const comicFilesInput = document.getElementById('comicFiles');
     const archiveInput = document.getElementById('comicArchiveFile');
     const fileList = document.getElementById('comicFileList');
@@ -34,9 +33,9 @@
     const historyStatus = document.getElementById('historyStatus');
     const isAndroidRuntime = !!root.AndroidFileBridge || /EcrypteesAndroid\//.test(root.navigator.userAgent);
     const isDesktopRuntime = !!desktopStorage;
-    const nativeNetwork = isAndroidRuntime ? androidNetwork : desktopNetwork;
+    const nativeNetwork = networkAdapter;
     const hasNativeNetwork = !!nativeNetwork;
-    const renderedNetwork = isAndroidRuntime ? androidNetwork : desktopNetwork;
+    const renderedNetwork = networkAdapter;
     const hasRenderedNetwork = typeof renderedNetwork?.beginRenderedPageCapture === 'function';
     const directoryPickerSupported = isDesktopRuntime || typeof root.showDirectoryPicker === 'function';
     const DIRECTORY_DATABASE_NAME = 'ecryptees-directory-v1';
@@ -1512,15 +1511,6 @@
         return new Promise(resolve => root.setTimeout(resolve, 60));
     }
 
-    function decodeBase64Chunk(value) {
-        const binary = root.atob(value);
-        const bytes = new Uint8Array(binary.length);
-        for (let index = 0; index < binary.length; index++) {
-            bytes[index] = binary.charCodeAt(index);
-        }
-        return bytes;
-    }
-
     function concatByteChunks(chunks, size) {
         const output = new Uint8Array(size);
         let offset = 0;
@@ -1544,6 +1534,42 @@
         return typeof value === 'string' ? JSON.parse(value || '{}') : (value || {});
     }
 
+    function networkFailureMessage(info) {
+        const messages = {
+            dnsError: 'DNS 解析失败',
+            privateAddressBlocked: '链接指向本机、真实私网或不允许的保留地址',
+            httpForbidden: '目标网站返回 HTTP 403；可能是访问限制或图片防盗链',
+            rateLimited: '目标网站返回 HTTP 429；请求过于频繁，请稍后重试',
+            certificateError: 'HTTPS 证书验证失败',
+            timeout: '网络请求超时',
+            systemProxyUnavailable: 'Windows 系统代理不可用或无法连接目标网站',
+            connectionFailed: '无法连接目标网站'
+        };
+        return info.error || messages[String(info.errorCode || '')] || '网络请求失败';
+    }
+
+    function appendNetworkDiagnostic(message, diagnostics) {
+        const entries = Array.isArray(diagnostics) ? diagnostics.filter(Boolean) : [];
+        return entries.length ? `${message} · ${entries[entries.length - 1]}` : message;
+    }
+
+    function updateWebImportDiagnostics(diagnostics, reset = false) {
+        const panel = document.getElementById('webImportDiagnosticsPanel');
+        const output = document.getElementById('webImportDiagnosticsText');
+        if (!panel || !output || !isDesktopRuntime) return;
+        if (reset) {
+            output.textContent = '';
+            panel.hidden = true;
+            panel.open = false;
+            return;
+        }
+        const entries = Array.isArray(diagnostics) ? diagnostics.filter(Boolean) : [];
+        if (!entries.length) return;
+        const existing = output.textContent ? output.textContent.split('\n').filter(Boolean) : [];
+        output.textContent = Array.from(new Set([...existing, ...entries])).slice(-320).join('\n');
+        panel.hidden = false;
+    }
+
     async function awaitNativeRemoteFetch(token, signal) {
         activeRemoteFetchTokens.add(token);
         const cancel = () => {
@@ -1560,6 +1586,7 @@
                     throw new DOMException('操作已取消', 'AbortError');
                 }
                 const info = parseNativeNetworkStatus(await nativeNetwork.getRemoteFetchStatus(token));
+                updateWebImportDiagnostics(info.diagnostics);
                 if (activeJobType === 'webAnalyze' && info.state === 'running') {
                     const total = Number(info.contentLength) > 0 ? `/${formatBytes(Number(info.contentLength))}` : '';
                     setStatus(`正在安全读取网页 · ${formatBytes(Number(info.bytesRead) || 0)}${total}`);
@@ -1568,8 +1595,9 @@
                     return info;
                 }
                 if (info.state === 'error' || info.state === 'cancelled' || !info.state) {
-                    const error = new Error(info.error || '网络请求失败');
+                    const error = new Error(networkFailureMessage(info));
                     error.code = String(info.errorCode || '');
+                    error.diagnostics = Array.isArray(info.diagnostics) ? info.diagnostics : [];
                     throw error;
                 }
                 await waitForRemoteStatus();
@@ -1580,8 +1608,7 @@
     }
 
     async function readNativeRemoteFetchChunk(token, offset) {
-        const value = await nativeNetwork.readRemoteFetchChunk(token, 768 * 1024, offset);
-        return isAndroidRuntime ? decodeBase64Chunk(value) : value;
+        return nativeNetwork.readRemoteFetchChunk(token, 768 * 1024, offset);
     }
 
     async function releaseNativeRemoteFetch(token) {
@@ -1640,6 +1667,10 @@
                 const status = parseNativeNetworkStatus(
                     await renderedNetwork.getRenderedPageCaptureStatus(token)
                 );
+                updateWebImportDiagnostics(status.diagnostics);
+                if (status.state === 'checkingChallenge') {
+                    setStatus('正在后台通过网站验证 · 暂时不需要操作…');
+                }
                 if (status.state === 'awaitingVerification') {
                     setStatus('网页要求人机验证 · 请在独立验证窗口中正常完成验证…');
                 }
@@ -1650,7 +1681,10 @@
                     return status;
                 }
                 if (status.state === 'error' || status.state === 'cancelled') {
-                    throw new Error(status.error || '动态网页分析失败');
+                    const error = new Error(status.error || '动态网页分析失败');
+                    error.code = String(status.errorCode || '');
+                    error.diagnostics = Array.isArray(status.diagnostics) ? status.diagnostics : [];
+                    throw error;
                 }
                 await new Promise(resolve => root.setTimeout(resolve, 350));
             }
@@ -1882,13 +1916,13 @@
                 const value = await renderedNetwork.readRenderedPageImageChunk(
                     webImportRenderedToken,
                     candidate.capturedIndex,
-                    isAndroidRuntime ? localBytes : 768 * 1024,
-                    isAndroidRuntime ? 768 * 1024 : localBytes
+                    768 * 1024,
+                    localBytes
                 );
-                if (!value || (!isAndroidRuntime && !value.length)) {
+                if (!value?.length) {
                     break;
                 }
-                const chunk = isAndroidRuntime ? decodeBase64Chunk(value) : value;
+                const chunk = value;
                 localBytes += chunk.length;
                 budget.bytes += chunk.length;
                 if (budget.bytes > budget.limit) {
@@ -2092,6 +2126,7 @@
             activeJobType = '';
         }
         clearWebImportCandidates();
+        updateWebImportDiagnostics([], true);
         const retained = [];
         for (const item of items) {
             if (webImportSessionId && item.webImportSessionId === webImportSessionId) {
@@ -2443,7 +2478,12 @@
             );
             webImportFinalUrl = result.finalUrl;
             const maximumSelected = Math.max(0, format.MAX_PAGES - items.length);
-            if (webImportCore.shouldCaptureRenderedPage(extracted, result.html)) {
+            const capturePlan = webImportCore.planRenderedPageCapture(
+                extracted,
+                result.html,
+                result.finalUrl
+            );
+            if (capturePlan.required) {
                 if (!maximumSelected) {
                     throw new Error('当前漫画已经没有可用页数');
                 }
@@ -2452,7 +2492,7 @@
                     : '正在运行动态页面 · 静态内容没有图片，正在隔离运行页面并等待漫画内容加载…');
                 try {
                     const captured = await captureRenderedPage(
-                        result.finalUrl,
+                        capturePlan.url,
                         maximumSelected,
                         webImportAbortController.signal,
                         result.requiresInteractiveVerification === true
@@ -2465,14 +2505,15 @@
                         capturedMime: String(image.mime || ''),
                         capturedSize: Number(image.size) || 0
                     })));
-                    if (renderedCandidates.length > extracted.filter(candidate => candidate.duplicateOf < 0).length) {
+                    if (renderedCandidates.length && (capturePlan.preferRendered
+                            || renderedCandidates.length > extracted.filter(candidate => candidate.duplicateOf < 0).length)) {
                         extracted = renderedCandidates;
                         webImportFinalUrl = captured.finalUrl || result.finalUrl;
                     } else {
                         releaseRenderedPageCapture();
                     }
                 } catch (captureError) {
-                    if (!extracted.length || captureError.name === 'AbortError') {
+                    if (capturePlan.discardStaticFallback || !extracted.length || captureError.name === 'AbortError') {
                         throw captureError;
                     }
                 }
@@ -2524,7 +2565,12 @@
             }
         } catch (error) {
             resetProgress();
-            setStatus(error.name === 'AbortError' ? '网页分析已取消。' : (error.message || '网页分析失败'), error.name === 'AbortError' ? 'info' : 'error');
+            setStatus(
+                error.name === 'AbortError'
+                    ? '网页分析已取消。'
+                    : appendNetworkDiagnostic(error.message || '网页分析失败', error.diagnostics),
+                error.name === 'AbortError' ? 'info' : 'error'
+            );
         } finally {
             activeJobType = '';
             webImportAbortController = null;

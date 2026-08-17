@@ -247,7 +247,11 @@
                         <button class="web-import-clear-url" id="clearWebImportUrlButton" type="button" aria-label="清除网页链接和当前网页任务" title="清除网页链接和当前网页任务">×</button>
                         <button id="analyzeWebImportButton" type="button">分析网页</button>
                     </div>
-                    <p class="web-import-network-note">仅点击“分析网页”后联网；Windows 和 Android 使用受控原生网络读取，浏览器版本仍受目标网站跨域策略限制。使用 Clash Fake-IP 时，请为目标域名、图片域名及验证域名启用 fake-ip-filter，或改用 redir-host。</p>
+                    <p class="web-import-network-note">仅点击“分析网页”后联网；Windows 和 Android 使用系统网络栈读取，支持 Clash VPN/TUN 与 Fake-IP。浏览器版本仍受目标网站跨域策略限制。</p>
+                    <details class="web-import-diagnostics" id="webImportDiagnosticsPanel" hidden>
+                        <summary>查看网络诊断</summary>
+                        <pre id="webImportDiagnosticsText"></pre>
+                    </details>
                     <div class="web-import-results" id="webImportResults" hidden>
                         <div class="web-import-results-header">
                             <strong id="webImportSummary">尚未分析</strong>
@@ -413,6 +417,20 @@
                     <input id="launcherDisguiseToggle" type="checkbox" role="switch">
                 </label>
             </section>
+            <section class="app-settings-section desktop-network-settings" id="desktopNetworkSettings" aria-labelledby="desktopNetworkSettingsTitle" hidden>
+                <h3 id="desktopNetworkSettingsTitle">网页导入网络</h3>
+                <label class="app-setting-row" for="desktopNetworkModeSelect">
+                    <span class="app-setting-copy">
+                        <strong>网络模式</strong>
+                        <span id="desktopNetworkModeSummary">自动识别系统代理、Clash TUN 和 Fake-IP</span>
+                    </span>
+                    <select id="desktopNetworkModeSelect">
+                        <option value="auto">自动（推荐）</option>
+                        <option value="systemProxy">系统代理</option>
+                        <option value="direct">仅直连 / TUN</option>
+                    </select>
+                </label>
+            </section>
             <section class="app-settings-section desktop-storage-settings" id="desktopStorageSettings" aria-labelledby="desktopStorageSettingsTitle" hidden>
                     <h3 id="desktopStorageSettingsTitle">资产保存位置</h3>
                     <p class="desktop-storage-intro">电脑版将原件直接保存在以下目录；卸载应用不会删除这些文件。</p>
@@ -455,7 +473,7 @@
                 <h3 id="versionSettingsTitle">应用信息</h3>
                 <div class="app-version-row">
                     <span>版本</span>
-                    <strong id="appVersionInfo">1.1.4 · code 21</strong>
+                    <strong id="appVersionInfo">1.1.5 · code 23</strong>
                 </div>
             </section>
         </div>
@@ -761,6 +779,7 @@
     <script src="js/android-bridge.js" defer></script>
     <script src="js/desktop-storage.js" defer></script>
     <script src="js/desktop-network.js" defer></script>
+    <script src="js/network-adapter.js" defer></script>
     <script src="js/settings.js" defer></script>
     <script src="js/asset-storage.js" defer></script>
     <script src="js/asset-center.js" defer></script>

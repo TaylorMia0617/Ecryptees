@@ -4,9 +4,10 @@
     const LOCK_STORAGE_KEY = 'ecryptees-app-lock-v1';
     const LOCK_VERSION = 1;
     const LOCK_ITERATIONS = 210000;
-    const VERSION_FALLBACK = Object.freeze({ versionName: '1.1.4', versionCode: 21 });
+    const VERSION_FALLBACK = Object.freeze({ versionName: '1.1.5', versionCode: 23 });
     const nativeBridge = root.AndroidFileBridge || null;
     const desktopStorage = root.EcrypteesDesktopStorage || null;
+    const desktopNetwork = root.EcrypteesDesktopNetwork || null;
 
     let unlockResolve;
     const whenUnlocked = new Promise(resolve => {
@@ -27,6 +28,7 @@
     const disguiseToggle = document.getElementById('launcherDisguiseToggle');
     const disguiseSummary = document.getElementById('launcherDisguiseSummary');
     const desktopStorageSettings = document.getElementById('desktopStorageSettings');
+    const desktopNetworkSettings = document.getElementById('desktopNetworkSettings');
     const desktopPathDialog = document.getElementById('desktopPathDialog');
     let pendingDesktopPath = null;
 
@@ -218,6 +220,29 @@
         if (!settingsDialog.open) {
             settingsDialog.showModal();
         }
+    }
+
+    function initializeDesktopNetworkSetting() {
+        if (!desktopNetwork?.available
+            || typeof desktopNetwork.getNetworkMode !== 'function'
+            || typeof desktopNetwork.setNetworkMode !== 'function') {
+            return;
+        }
+        desktopNetworkSettings.hidden = false;
+        const select = document.getElementById('desktopNetworkModeSelect');
+        const summary = document.getElementById('desktopNetworkModeSummary');
+        const summaries = {
+            auto: '公网地址自动使用系统代理或直连；Fake-IP 交给 Clash TUN',
+            systemProxy: '优先使用 Windows 系统代理设置',
+            direct: '不使用 HTTP 代理；仍允许 Clash TUN 接管 Fake-IP'
+        };
+        select.value = desktopNetwork.getNetworkMode();
+        summary.textContent = summaries[select.value] || summaries.auto;
+        select.addEventListener('change', () => {
+            const mode = desktopNetwork.setNetworkMode(select.value);
+            select.value = mode;
+            summary.textContent = summaries[mode] || summaries.auto;
+        });
     }
 
     function formatDesktopBytes(bytes) {
@@ -474,6 +499,7 @@
     const version = readNativeVersion();
     document.getElementById('appVersionInfo').textContent = `${version.versionName} · code ${version.versionCode}`;
     initializeDisguiseSetting();
+    initializeDesktopNetworkSetting();
     const initialLock = readLockRecord();
     lockRecord = initialLock.record;
     lockRecordCorrupted = initialLock.corrupted;

@@ -4,7 +4,7 @@
 
 Ecryptees 可以把多张图片打包成带认证的 `.ecomic`，也可以直接保存和播放原始 MP4，并在分享时按需生成 `.emp4`。Android 与现代浏览器都能离线整理漫画、图片和视频资产，并按需导出原文件。
 
-当前 Android 版本：`1.1.4`（versionCode 21）。
+当前 Android 版本：`1.1.5`（versionCode 23）。
 
 当前 Windows 桌面版本：`1.1.5`（Tauri v2，Windows x64）。
 
@@ -60,7 +60,7 @@ Ecryptees 可以把多张图片打包成带认证的 `.ecomic`，也可以直接
 
 ## Android 使用
 
-1. 安装 `dist/Ecryptees-v1.1.4.apk`；从旧版本升级时直接覆盖安装，不要先卸载。
+1. 安装 `dist/Ecryptees-v1.1.5.apk`；从旧版本升级时直接覆盖安装，不要先卸载。
 2. 在“漫画”中选择图片、调整顺序并点击“加密并加入资产”。
 3. 完成后点击“去查看”直接阅读；需要文件时从漫画资产卡导出 `.ecomic` 或长图。
 4. 在 QQ 或文件管理器中对 `.ecomic` 或 `.emp4` 使用“其他应用打开”或“发送”，然后选择 Ecryptees。
@@ -102,7 +102,7 @@ Windows 版首次启动会在“文档\Ecryptees”下创建“图片”“漫�
 ## 数据与安全边界
 
 - 应用冷启动、切换页面、本地导入、阅读、书架和导出不会自动联网；只有用户点击“分析网页”后才访问该 HTTPS 页面，确认下载后才访问图片地址。
-- 网页导入优先解析静态 HTML 和页面内嵌清单；Windows 和 Android 的静态 HTML、图片请求不受浏览器 CORS 限制，并拒绝本机、局域网及非 HTTPS 目标。检测到少量预览图、虚拟列表或翻页阅读器时，Windows 和 Android 才在无既有 Cookie 和登录状态的临时 WebView 中运行页面脚本，并在完成后清除临时站点数据。Windows 不会把 Clash 使用的 `198.18.0.0/15` Fake-IP 网段当作公网放行；使用 Clash 时，应只为目标网站、图片 CDN 和验证服务的域名配置 `fake-ip-filter`，或改用 `redir-host`。浏览器/PWA 版本仍受目标网站 CORS 策略限制。
+- 网页导入优先解析静态 HTML 和页面内嵌清单；Windows 和 Android 的静态 HTML、图片请求不受浏览器 CORS 限制，并拒绝本机、真实局域网及非 HTTPS 目标。用户主动分析的域名如果被 Clash 解析为 `198.18.0.0/15` Fake-IP，Windows 会把它作为 TUN 虚拟路由交给系统网络栈，不要求修改 `fake-ip-filter`；直接粘贴 Fake-IP、localhost 或真实私网 IP 仍会被拒绝。检测到少量预览图、虚拟列表或翻页阅读器时，Windows 和 Android 才在无既有 Cookie 和登录状态的临时 WebView 中运行页面脚本，并在完成后清除临时站点数据。浏览器/PWA 版本仍受目标网站 CORS 策略限制。
 - 没有账号、云同步、分析统计、广告 SDK 或远程素材。
 - Android 书架中的原始页面是应用私有数据，不是再次加密保存的 `.ecomic`。
 - 显式导出的 `.ecomic`、TXT 和 PNG 位于用户选择的外部位置，不会随应用卸载而自动删除。
@@ -146,7 +146,7 @@ node --check js/comic-app.js
 powershell -ExecutionPolicy Bypass -File .\android-app\build-apk.ps1
 ```
 
-构建脚本会生成版本化 APK，例如 `dist/Ecryptees-v1.1.4.apk`，并同步覆盖稳定文件名 `dist/Ecryptees.apk`。脚本会验证 APK 内部版本和发布证书；覆盖安装必须继续使用同一个 applicationId 与签名证书。
+构建脚本会生成版本化 APK，例如 `dist/Ecryptees-v1.1.5.apk`，并同步覆盖稳定文件名 `dist/Ecryptees.apk`。脚本会验证 APK 内部版本和发布证书；覆盖安装必须继续使用同一个 applicationId 与签名证书。
 
 准备并构建 Windows x64 NSIS 安装包：
 
@@ -167,6 +167,7 @@ npm run desktop:build
 - `js/comic-worker.js`：分块加解密、书架存储和流式长图生成。
 - `js/comic-app.js`、`js/web-import-core.js`：漫画、网页图片候选解析、阅读器、书架和分组界面。
 - `js/android-bridge.js`、`android-app/`：Android WebView 包装、系统文件交接、分块传输和用户触发的受控 HTTPS 请求。
+- `js/network-adapter.js`：统一 Android Java 桥与 Windows Rust 桥的参数、分块字节和动态页面捕获接口，业务控制器不直接处理平台差异。
 - `js/desktop-storage.js`、`src-tauri/`：Windows Tauri 外壳、三类正式目录、4 MiB 原始二进制 IPC、迁移与回收站删除。
 - `scripts/prepare-desktop.ps1`、`scripts/verify-desktop.ps1`：精简桌面资源并整理版本化 NSIS 安装包与校验值。
 - `tests/`：格式、兼容性、边界和 Android 静态集成回归。

@@ -1,7 +1,9 @@
-use crate::network::{normalize_https_url, validate_public_url};
+use crate::network::{
+    AddressClass, NetworkMode, NetworkRoute, classify_network_url, normalize_https_url,
+};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -52,7 +54,9 @@ pub(crate) struct RenderCaptureStatus {
     final_url: String,
     images: Vec<RenderedImageStatus>,
     bytes_written: u64,
+    error_code: String,
     error: String,
+    diagnostics: Vec<String>,
 }
 
 impl Default for RenderCaptureStatus {
@@ -62,7 +66,9 @@ impl Default for RenderCaptureStatus {
             final_url: String::new(),
             images: Vec::new(),
             bytes_written: 0,
+            error_code: String::new(),
             error: String::new(),
+            diagnostics: Vec::new(),
         }
     }
 }
@@ -81,6 +87,7 @@ struct RenderCaptureTaskState {
     status: RenderCaptureStatus,
     images: Vec<CapturedImage>,
     navigations: usize,
+    diagnostic_keys: HashSet<String>,
 }
 
 struct RenderCaptureTask {
@@ -89,19 +96,87 @@ struct RenderCaptureTask {
     initial_origin: String,
     maximum: usize,
     interactive_verification: bool,
+    mode: NetworkMode,
     root: PathBuf,
     browser_directory: PathBuf,
     image_directory: PathBuf,
     state: Mutex<RenderCaptureTaskState>,
+    route_cache: Mutex<HashMap<String, Result<NetworkRoute, String>>>,
 }
 
 impl RenderCaptureTask {
     fn fail(&self, message: impl Into<String>) {
         if let Ok(mut state) = self.state.lock()
-            && (state.status.state == "running" || state.status.state == "awaitingVerification")
+            && (state.status.state == "running"
+                || state.status.state == "checkingChallenge"
+                || state.status.state == "awaitingVerification")
         {
             state.status.state = "error".into();
-            state.status.error = classify_capture_error(&message.into());
+            let message = message.into();
+            state.status.error_code = classify_capture_error_code(&message).into();
+            state.status.error = classify_capture_error(&message);
+        }
+    }
+
+    fn route(&self, url: &Url) -> Result<NetworkRoute, String> {
+        let key = format!(
+            "{}:{}",
+            url.host_str()
+                .unwrap_or_default()
+                .trim_end_matches('.')
+                .to_ascii_lowercase(),
+            url.port_or_known_default().unwrap_or(443)
+        );
+        if let Ok(cache) = self.route_cache.lock()
+            && let Some(result) = cache.get(&key)
+        {
+            return result.clone();
+        }
+        let result = classify_network_url(url);
+        if let Ok(mut cache) = self.route_cache.lock() {
+            cache.insert(key, result.clone());
+        }
+        result
+    }
+
+    fn log_route(&self, phase: &str, route: &NetworkRoute, allowed: bool) {
+        let key = format!("{phase}:{}:{}", route.host, route.class.label());
+        let addresses = route
+            .addresses
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.log_once(
+            key,
+            format!(
+                "{phase} · {} · DNS [{}] · {} · {} · {}",
+                route.host,
+                addresses,
+                route.class.label(),
+                self.mode.label(),
+                if allowed { "允许" } else { "拒绝" }
+            ),
+        );
+    }
+
+    fn log_rejection(&self, phase: &str, raw_url: &str, reason: &str) {
+        let host = Url::parse(raw_url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_string))
+            .unwrap_or_else(|| "无效地址".into());
+        self.log_once(
+            format!("{phase}:{host}:{reason}"),
+            format!("{phase} · {host} · 拒绝 · {reason}"),
+        );
+    }
+
+    fn log_once(&self, key: String, message: String) {
+        if let Ok(mut state) = self.state.lock()
+            && state.status.diagnostics.len() < 160
+            && state.diagnostic_keys.insert(key)
+        {
+            state.status.diagnostics.push(message);
         }
     }
 
@@ -194,9 +269,11 @@ impl RenderCaptureManager {
         raw_url: &str,
         maximum: usize,
         interactive_verification: bool,
+        raw_mode: &str,
     ) -> Result<String, String> {
         let initial_url = normalize_https_url(raw_url)?;
-        validate_public_url(&initial_url)?;
+        let mode = NetworkMode::parse(raw_mode)?;
+        let initial_route = classify_network_url(&initial_url)?;
         let origin = initial_url.origin().ascii_serialization();
         let maximum = maximum.clamp(1, MAX_CAPTURE_PAGES);
         let token = Uuid::new_v4().to_string();
@@ -213,13 +290,14 @@ impl RenderCaptureManager {
             initial_origin: origin,
             maximum,
             interactive_verification,
+            mode,
             root,
             browser_directory: browser_directory.clone(),
             image_directory,
             state: Mutex::new(RenderCaptureTaskState {
                 status: RenderCaptureStatus {
                     state: if interactive_verification {
-                        "awaitingVerification".into()
+                        "checkingChallenge".into()
                     } else {
                         "running".into()
                     },
@@ -228,8 +306,11 @@ impl RenderCaptureManager {
                 },
                 images: Vec::new(),
                 navigations: 0,
+                diagnostic_keys: HashSet::new(),
             }),
+            route_cache: Mutex::new(HashMap::new()),
         });
+        task.log_route("主页面", &initial_route, true);
         self.inner
             .tasks
             .lock()
@@ -253,7 +334,9 @@ impl RenderCaptureManager {
             thread::sleep(CAPTURE_TIMEOUT);
             if let Ok(task) = timeout_manager.task(&timeout_token)
                 && task.status().is_ok_and(|status| {
-                    status.state == "running" || status.state == "awaitingVerification"
+                    status.state == "running"
+                        || status.state == "checkingChallenge"
+                        || status.state == "awaitingVerification"
                 })
             {
                 task.fail(if task.interactive_verification {
@@ -264,6 +347,25 @@ impl RenderCaptureManager {
                 close_capture_window(&timeout_app, &task);
             }
         });
+        if task.interactive_verification {
+            let reveal_manager = self.clone();
+            let reveal_app = app.clone();
+            let reveal_token = token.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_secs(8));
+                if let Ok(task) = reveal_manager.task(&reveal_token)
+                    && let Ok(mut state) = task.state.lock()
+                    && state.status.state == "checkingChallenge"
+                {
+                    state.status.state = "awaitingVerification".into();
+                    drop(state);
+                    if let Some(window) = reveal_app.get_webview_window(&task.label) {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                }
+            });
+        }
         Ok(token)
     }
 
@@ -287,14 +389,26 @@ impl RenderCaptureManager {
         .on_navigation(move |url| validate_capture_navigation(&navigation_task, url))
         .on_new_window(|_, _| NewWindowResponse::Deny)
         .on_download(|_, _| false);
+        let direct_webview = task.mode == NetworkMode::Direct
+            || (task.mode == NetworkMode::Auto
+                && task
+                    .route(&initial_url)
+                    .is_ok_and(|route| route.class == AddressClass::ClashFakeIp));
+        let builder = if direct_webview {
+            builder.additional_browser_args(
+                "--no-proxy-server --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection",
+            )
+        } else {
+            builder
+        };
         let page_script = capture_page_script(task);
         let builder = if task.interactive_verification {
             builder
                 .title("Ecryptees 网页验证")
                 .inner_size(980.0, 720.0)
                 .center()
-                .visible(true)
-                .focused(true)
+                .visible(false)
+                .focused(false)
                 .decorations(true)
                 .skip_taskbar(false)
         } else {
@@ -325,7 +439,8 @@ impl RenderCaptureManager {
         let security_app = app.clone();
         window
             .with_webview(move |webview| {
-                if let Err(error) = install_webview_security(webview, &initial_url) {
+                if let Err(error) = install_webview_security(webview, &initial_url, &security_task)
+                {
                     security_task.fail(error);
                     close_capture_window(&security_app, &security_task);
                 }
@@ -512,12 +627,21 @@ fn validate_capture_navigation(task: &RenderCaptureTask, url: &Url) -> bool {
     if url.as_str() == "about:blank" {
         return true;
     }
-    if normalize_https_url(url.as_str())
-        .and_then(|url| validate_public_url(&url))
-        .is_err()
-    {
-        task.fail("网页重定向到了不允许的地址");
-        return false;
+    let normalized = match normalize_https_url(url.as_str()) {
+        Ok(url) => url,
+        Err(error) => {
+            task.log_rejection("页面导航", url.as_str(), &error);
+            task.fail("网页重定向到了不允许的地址");
+            return false;
+        }
+    };
+    match task.route(&normalized) {
+        Ok(route) => task.log_route("页面导航", &route, true),
+        Err(error) => {
+            task.log_rejection("页面导航", url.as_str(), &error);
+            task.fail(format!("网页重定向被阻止：{error}"));
+            return false;
+        }
     }
     let Ok(mut state) = task.state.lock() else {
         return false;
@@ -541,7 +665,8 @@ fn process_capture_message(
             .state
             .lock()
             .map_err(|_| "无法更新网页验证状态".to_string())?;
-        if state.status.state == "awaitingVerification" {
+        if state.status.state == "checkingChallenge" || state.status.state == "awaitingVerification"
+        {
             state.status.state = "running".into();
         }
         return Ok(());
@@ -567,7 +692,8 @@ fn navigate_capture_page(
     raw_url: &str,
 ) -> Result<(), String> {
     let url = normalize_https_url(raw_url)?;
-    validate_public_url(&url)?;
+    let route = task.route(&url)?;
+    task.log_route("阅读器翻页", &route, true);
     if url.origin().ascii_serialization() != task.initial_origin {
         return Err("动态网页只能在原网站内切换阅读页面".into());
     }
@@ -579,7 +705,8 @@ fn navigate_capture_page(
 
 fn add_capture_source(task: &RenderCaptureTask, raw_source: &str) -> Result<(), String> {
     let source = normalize_https_url(raw_source)?;
-    validate_public_url(&source)?;
+    let route = task.route(&source)?;
+    task.log_route("漫画图片", &route, true);
     let mut state = task
         .state
         .lock()
@@ -767,6 +894,24 @@ fn classify_capture_error(message: &str) -> String {
     }
 }
 
+fn classify_capture_error_code(message: &str) -> &'static str {
+    if message.contains("本机")
+        || message.contains("局域网")
+        || message.contains("保留地址")
+        || message.contains("被阻止")
+    {
+        "webviewResourceBlocked"
+    } else if message.contains("验证") || message.contains("captcha") {
+        "cloudflareChallenge"
+    } else if message.contains("超时") {
+        "timeout"
+    } else if message.contains("仍未找到") || message.contains("没有找到") {
+        "noImages"
+    } else {
+        "renderCaptureError"
+    }
+}
+
 fn close_capture_window(app: &AppHandle, task: &RenderCaptureTask) {
     if let Some(window) = app.get_webview_window(&task.label) {
         let _ = window.close();
@@ -820,6 +965,7 @@ fn map_capture_io_error(error: std::io::Error) -> String {
 fn install_webview_security(
     webview: tauri::webview::PlatformWebview,
     initial_url: &Url,
+    task: &Arc<RenderCaptureTask>,
 ) -> Result<(), String> {
     let controller = webview.controller();
     let core = unsafe { controller.CoreWebView2() }
@@ -856,6 +1002,7 @@ fn install_webview_security(
         )
         .map_err(|error| format!("无法启用网页资源安全过滤：{error}"))?;
         let filter_environment = environment.clone();
+        let filter_task = Arc::clone(task);
         let mut resource_token = 0_i64;
         core.add_WebResourceRequested(
             &WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
@@ -863,11 +1010,17 @@ fn install_webview_security(
                     return Ok(());
                 };
                 let request = args.Request()?;
+                let mut context = COREWEBVIEW2_WEB_RESOURCE_CONTEXT_OTHER;
+                args.ResourceContext(&mut context)?;
                 let mut raw_uri = PWSTR::null();
                 request.Uri(&mut raw_uri)?;
                 let uri = raw_uri.to_string().unwrap_or_default();
                 CoTaskMemFree(Some(raw_uri.0.cast()));
-                if !capture_resource_allowed(&uri) {
+                if !capture_resource_allowed(
+                    &filter_task,
+                    &uri,
+                    web_resource_context_label(context),
+                ) {
                     let response = filter_environment.CreateWebResourceResponse(
                         None,
                         403,
@@ -889,18 +1042,54 @@ fn install_webview_security(
 }
 
 #[cfg(not(windows))]
-fn install_webview_security(_: tauri::webview::PlatformWebview, _: &Url) -> Result<(), String> {
+fn install_webview_security(
+    _: tauri::webview::PlatformWebview,
+    _: &Url,
+    _: &Arc<RenderCaptureTask>,
+) -> Result<(), String> {
     Err("动态网页分析只在 Windows 版启用".into())
 }
 
-fn capture_resource_allowed(raw_url: &str) -> bool {
+#[cfg(windows)]
+fn web_resource_context_label(context: COREWEBVIEW2_WEB_RESOURCE_CONTEXT) -> &'static str {
+    match context {
+        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT => "文档",
+        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_STYLESHEET => "样式",
+        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_IMAGE => "图片",
+        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_MEDIA => "媒体",
+        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_FONT => "字体",
+        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_SCRIPT => "脚本",
+        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_XML_HTTP_REQUEST => "XHR/API",
+        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_FETCH => "Fetch/API",
+        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_WEBSOCKET => "WebSocket",
+        _ => "其他资源",
+    }
+}
+
+fn capture_resource_allowed(task: &RenderCaptureTask, raw_url: &str, context: &str) -> bool {
     let Ok(url) = Url::parse(raw_url) else {
         return false;
     };
     match url.scheme() {
-        "https" => normalize_https_url(raw_url)
-            .and_then(|url| validate_public_url(&url))
-            .is_ok(),
+        "https" => {
+            let normalized = match normalize_https_url(raw_url) {
+                Ok(url) => url,
+                Err(error) => {
+                    task.log_rejection(&format!("WebView2 {context}"), raw_url, &error);
+                    return false;
+                }
+            };
+            match task.route(&normalized) {
+                Ok(route) => {
+                    task.log_route(&format!("WebView2 {context}"), &route, true);
+                    true
+                }
+                Err(error) => {
+                    task.log_rejection(&format!("WebView2 {context}"), raw_url, &error);
+                    false
+                }
+            }
+        }
         "blob" | "data" => true,
         "about" => raw_url == "about:blank",
         _ => false,
@@ -913,9 +1102,10 @@ pub(crate) fn begin_desktop_rendered_page_capture(
     url: String,
     maximum: usize,
     interactive_verification: bool,
+    mode: String,
     manager: tauri::State<'_, RenderCaptureManager>,
 ) -> Result<String, String> {
-    manager.begin(&app, &url, maximum, interactive_verification)
+    manager.begin(&app, &url, maximum, interactive_verification, &mode)
 }
 
 #[tauri::command]
@@ -952,14 +1142,60 @@ pub(crate) fn release_desktop_rendered_page_capture(
 mod tests {
     use super::*;
 
+    fn test_task() -> RenderCaptureTask {
+        RenderCaptureTask {
+            token: Uuid::new_v4().to_string(),
+            label: "capture-test".into(),
+            initial_origin: "https://example.com".into(),
+            maximum: 80,
+            interactive_verification: false,
+            mode: NetworkMode::Auto,
+            root: PathBuf::from("capture-test"),
+            browser_directory: PathBuf::from("capture-test/browser"),
+            image_directory: PathBuf::from("capture-test/images"),
+            state: Mutex::new(RenderCaptureTaskState {
+                status: RenderCaptureStatus::default(),
+                images: Vec::new(),
+                navigations: 0,
+                diagnostic_keys: HashSet::new(),
+            }),
+            route_cache: Mutex::new(HashMap::new()),
+        }
+    }
+
     #[test]
     fn capture_resource_policy_blocks_local_and_non_https_urls() {
-        assert!(!capture_resource_allowed("http://example.com/image.jpg"));
-        assert!(!capture_resource_allowed("https://127.0.0.1/image.jpg"));
-        assert!(!capture_resource_allowed("https://[::1]/image.jpg"));
-        assert!(!capture_resource_allowed("file:///C:/secret.txt"));
-        assert!(capture_resource_allowed("blob:https://example.com/id"));
-        assert!(capture_resource_allowed("data:image/png;base64,AA=="));
+        let task = test_task();
+        assert!(!capture_resource_allowed(
+            &task,
+            "http://example.com/image.jpg",
+            "图片"
+        ));
+        assert!(!capture_resource_allowed(
+            &task,
+            "https://127.0.0.1/image.jpg",
+            "图片"
+        ));
+        assert!(!capture_resource_allowed(
+            &task,
+            "https://[::1]/image.jpg",
+            "图片"
+        ));
+        assert!(!capture_resource_allowed(
+            &task,
+            "file:///C:/secret.txt",
+            "其他资源"
+        ));
+        assert!(capture_resource_allowed(
+            &task,
+            "blob:https://example.com/id",
+            "Fetch/API"
+        ));
+        assert!(capture_resource_allowed(
+            &task,
+            "data:image/png;base64,AA==",
+            "图片"
+        ));
     }
 
     #[test]

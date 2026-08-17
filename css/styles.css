@@ -859,6 +859,30 @@ label {
     line-height: 1.5;
 }
 
+.web-import-diagnostics {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border: 1px solid rgba(142, 72, 100, 0.18);
+    border-radius: 12px;
+    background: #fff8fa;
+    color: #765662;
+}
+
+.web-import-diagnostics summary {
+    cursor: pointer;
+    font-weight: 700;
+}
+
+.web-import-diagnostics pre {
+    max-height: 220px;
+    margin: 10px 0 0;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font: 0.75rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+    user-select: text;
+}
+
 .web-import-url-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 52px auto;
@@ -2276,7 +2300,8 @@ html[data-desktop-runtime="true"] #installAppRow {
 }
 
 .app-setting-row > div,
-.app-setting-switch > span {
+.app-setting-switch > span,
+.app-setting-copy {
     display: grid;
     gap: 4px;
     min-width: 0;
@@ -2293,6 +2318,18 @@ html[data-desktop-runtime="true"] #installAppRow {
 
 .app-setting-row button {
     flex: 0 0 auto;
+}
+
+.desktop-network-settings select {
+    flex: 0 0 auto;
+    min-height: 44px;
+    max-width: 180px;
+    padding: 8px 34px 8px 12px;
+    border: 1px solid #e6bdcc;
+    border-radius: 12px;
+    background: #fff8fa;
+    color: var(--md-on-surface);
+    font: inherit;
 }
 
 .app-lock-disable {

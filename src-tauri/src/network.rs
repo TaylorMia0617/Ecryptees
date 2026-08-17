@@ -29,6 +29,56 @@ const HTML_TASK_TIMEOUT: Duration = Duration::from_secs(120);
 const IMAGE_TASK_TIMEOUT: Duration = Duration::from_secs(600);
 const STALE_TEMP_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const CLOUDFLARE_CHALLENGE_MARKER: &str = "ECRYPTEES_CLOUDFLARE_CHALLENGE:";
+const MAX_DIAGNOSTIC_ENTRIES: usize = 160;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NetworkMode {
+    Auto,
+    SystemProxy,
+    Direct,
+}
+
+impl NetworkMode {
+    pub(crate) fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "" | "auto" => Ok(Self::Auto),
+            "systemProxy" => Ok(Self::SystemProxy),
+            "direct" => Ok(Self::Direct),
+            _ => Err("Windows 网络模式无效".into()),
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "自动",
+            Self::SystemProxy => "系统代理",
+            Self::Direct => "仅直连/TUN",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AddressClass {
+    Public,
+    ClashFakeIp,
+}
+
+impl AddressClass {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Public => "公网",
+            Self::ClashFakeIp => "Clash Fake-IP",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct NetworkRoute {
+    pub(crate) host: String,
+    pub(crate) addresses: Vec<SocketAddr>,
+    pub(crate) connection_addresses: Vec<SocketAddr>,
+    pub(crate) class: AddressClass,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NetworkKind {
@@ -65,6 +115,13 @@ impl NetworkKind {
             Self::Image => "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
         }
     }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Html => "HTML",
+            Self::Image => "图片",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -77,6 +134,7 @@ pub(crate) struct NetworkStatus {
     bytes_read: u64,
     error_code: String,
     error: String,
+    diagnostics: Vec<String>,
 }
 
 impl Default for NetworkStatus {
@@ -89,6 +147,7 @@ impl Default for NetworkStatus {
             bytes_read: 0,
             error_code: String::new(),
             error: String::new(),
+            diagnostics: Vec::new(),
         }
     }
 }
@@ -97,6 +156,7 @@ struct NetworkTask {
     initial_url: Url,
     kind: NetworkKind,
     referer: Option<Url>,
+    mode: NetworkMode,
     path: PathBuf,
     cancelled: AtomicBool,
     status: Mutex<NetworkStatus>,
@@ -115,6 +175,7 @@ impl NetworkTask {
                 status.error_code = "cloudflareChallenge".into();
                 status.error = detail.into();
             } else {
+                status.error_code = classify_network_error_code(&message, self.mode).into();
                 status.error = message;
             }
             status.state = if self.cancelled.load(Ordering::Acquire) {
@@ -124,6 +185,14 @@ impl NetworkTask {
             };
         }
         let _ = fs::remove_file(&self.path);
+    }
+
+    fn log(&self, message: impl Into<String>) {
+        if let Ok(mut status) = self.status.lock()
+            && status.diagnostics.len() < MAX_DIAGNOSTIC_ENTRIES
+        {
+            status.diagnostics.push(message.into());
+        }
     }
 
     fn cancel(&self) {
@@ -174,10 +243,11 @@ impl NetworkManager {
         raw_url: &str,
         raw_kind: &str,
         raw_referer: &str,
+        raw_mode: &str,
     ) -> Result<String, String> {
         let kind = NetworkKind::parse(raw_kind)?;
+        let mode = NetworkMode::parse(raw_mode)?;
         let initial_url = normalize_https_url(raw_url)?;
-        validate_public_url(&initial_url)?;
         let referer = if raw_referer.trim().is_empty() {
             None
         } else {
@@ -195,6 +265,7 @@ impl NetworkManager {
             initial_url,
             kind,
             referer,
+            mode,
             path,
             cancelled: AtomicBool::new(false),
             status: Mutex::new(NetworkStatus::default()),
@@ -311,9 +382,10 @@ pub(crate) fn begin_desktop_network_fetch(
     url: String,
     kind: String,
     referer: String,
+    mode: String,
     manager: tauri::State<'_, NetworkManager>,
 ) -> Result<String, String> {
-    manager.begin(&url, &kind, &referer)
+    manager.begin(&url, &kind, &referer, &mode)
 }
 
 #[tauri::command]
@@ -358,25 +430,57 @@ fn run_fetch(task: &NetworkTask) -> Result<(), String> {
     let mut current = task.initial_url.clone();
     for redirect_count in 0..=MAX_REDIRECTS {
         task.check_cancelled(deadline)?;
-        let addresses = validate_public_url(&current)?;
-        let client = build_client(&current, &addresses, task.kind)?;
+        let route = match classify_network_url(&current) {
+            Ok(route) => route,
+            Err(error) => {
+                task.log(format!(
+                    "拒绝 {} · {} · {}",
+                    task.kind.label(),
+                    current.host_str().unwrap_or("未知域名"),
+                    error
+                ));
+                return Err(error);
+            }
+        };
+        let transport = transport_label(task.mode, route.class);
+        task.log(format_route_diagnostic(
+            if redirect_count == 0 {
+                "请求"
+            } else {
+                "重定向"
+            },
+            task.kind,
+            &route,
+            transport,
+        ));
+        let client = build_client(&current, &route, task.kind, task.mode)?;
         let mut request = client
             .get(current.clone())
             .header(USER_AGENT, "Ecryptees/1.1.5 Windows")
             .header(ACCEPT, task.kind.accept())
-            .header(ACCEPT_ENCODING, "gzip, deflate, br, zstd");
+            .header(ACCEPT_ENCODING, "identity");
         if task.kind == NetworkKind::Image
             && let Some(referer) = &task.referer
         {
             request = request.header(REFERER, referer.as_str());
         }
         let response = request.send().map_err(map_reqwest_error)?;
+        task.log(format!(
+            "响应 {} · {} · HTTP {}",
+            route.host,
+            task.kind.label(),
+            response.status().as_u16()
+        ));
         if response
             .headers()
             .get("cf-mitigated")
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.eq_ignore_ascii_case("challenge"))
         {
+            task.log(format!(
+                "Cloudflare challenge · {} · 交给隔离 WebView2",
+                route.host
+            ));
             if let Ok(mut status) = task.status.lock() {
                 status.final_url = current.to_string();
             }
@@ -399,7 +503,13 @@ fn run_fetch(task: &NetworkTask) -> Result<(), String> {
                     .map_err(|_| "网页重定向地址无效".to_string())?
                     .as_str(),
             )?;
-            validate_public_url(&current)?;
+            let redirected = classify_network_url(&current)?;
+            task.log(format_route_diagnostic(
+                "重定向校验",
+                task.kind,
+                &redirected,
+                transport_label(task.mode, redirected.class),
+            ));
             continue;
         }
         if !response.status().is_success() {
@@ -483,18 +593,28 @@ fn stream_response(
     Ok(())
 }
 
-fn build_client(url: &Url, addresses: &[SocketAddr], kind: NetworkKind) -> Result<Client, String> {
+fn build_client(
+    url: &Url,
+    route: &NetworkRoute,
+    kind: NetworkKind,
+    mode: NetworkMode,
+) -> Result<Client, String> {
     let host = url
         .host_str()
         .ok_or_else(|| "HTTPS 地址缺少主机名".to_string())?;
-    Client::builder()
+    let builder = Client::builder()
         .redirect(Policy::none())
-        .no_proxy()
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(kind.timeout())
-        .resolve_to_addrs(host, addresses)
-        .build()
-        .map_err(map_reqwest_error)
+        .resolve_to_addrs(host, &route.connection_addresses);
+    let builder = if mode == NetworkMode::Direct
+        || (mode == NetworkMode::Auto && route.class == AddressClass::ClashFakeIp)
+    {
+        builder.no_proxy()
+    } else {
+        builder
+    };
+    builder.build().map_err(map_reqwest_error)
 }
 
 pub(crate) fn normalize_https_url(raw: &str) -> Result<Url, String> {
@@ -509,7 +629,7 @@ pub(crate) fn normalize_https_url(raw: &str) -> Result<Url, String> {
     Ok(url)
 }
 
-pub(crate) fn validate_public_url(url: &Url) -> Result<Vec<SocketAddr>, String> {
+pub(crate) fn classify_network_url(url: &Url) -> Result<NetworkRoute, String> {
     let host = url
         .host_str()
         .ok_or_else(|| "HTTPS 地址缺少主机名".to_string())?;
@@ -522,7 +642,8 @@ pub(crate) fn validate_public_url(url: &Url) -> Result<Vec<SocketAddr>, String> 
         return Err("出于安全原因，不能读取本机或局域网地址".into());
     }
     let port = url.port_or_known_default().unwrap_or(443);
-    let mut addresses = if let Ok(ip) = host.parse::<IpAddr>() {
+    let literal_ip = host.parse::<IpAddr>().ok();
+    let mut addresses = if let Some(ip) = literal_ip {
         vec![SocketAddr::new(ip, port)]
     } else {
         (host, port)
@@ -535,19 +656,98 @@ pub(crate) fn validate_public_url(url: &Url) -> Result<Vec<SocketAddr>, String> 
     if addresses.is_empty() {
         return Err("DNS 没有返回可用地址".into());
     }
+    classify_resolved_addresses(&lowered, literal_ip, addresses)
+}
+
+fn classify_resolved_addresses(
+    host: &str,
+    literal_ip: Option<IpAddr>,
+    addresses: Vec<SocketAddr>,
+) -> Result<NetworkRoute, String> {
+    if literal_ip.is_some_and(is_benchmark_ip) {
+        return Err("不能直接访问 Clash Fake-IP 或网络测试保留地址".into());
+    }
     if addresses
         .iter()
-        .any(|address| is_benchmark_ip(address.ip()))
+        .any(|address| !is_public_ip(address.ip()) && !is_benchmark_ip(address.ip()))
     {
-        return Err(format!(
-            "域名 {} 被 Clash 解析到 Fake-IP 保留网段；请为该域名启用 fake-ip-filter，或将 DNS 模式改为 redir-host",
-            host
-        ));
-    }
-    if addresses.iter().any(|address| !is_public_ip(address.ip())) {
         return Err("出于安全原因，不能读取本机或局域网地址".into());
     }
-    Ok(addresses)
+    let fake_addresses = addresses
+        .iter()
+        .copied()
+        .filter(|address| is_benchmark_ip(address.ip()))
+        .collect::<Vec<_>>();
+    let class = if fake_addresses.is_empty() {
+        AddressClass::Public
+    } else {
+        AddressClass::ClashFakeIp
+    };
+    let connection_addresses = if class == AddressClass::ClashFakeIp {
+        fake_addresses
+    } else {
+        addresses.clone()
+    };
+    Ok(NetworkRoute {
+        host: host.into(),
+        addresses,
+        connection_addresses,
+        class,
+    })
+}
+
+fn transport_label(mode: NetworkMode, class: AddressClass) -> &'static str {
+    match (mode, class) {
+        (NetworkMode::Auto, AddressClass::ClashFakeIp) => "TUN/Fake-IP",
+        (NetworkMode::Auto, AddressClass::Public) => "自动（系统代理或直连）",
+        (NetworkMode::SystemProxy, _) => "系统代理",
+        (NetworkMode::Direct, _) => "直连/TUN",
+    }
+}
+
+fn format_route_diagnostic(
+    phase: &str,
+    kind: NetworkKind,
+    route: &NetworkRoute,
+    transport: &str,
+) -> String {
+    let addresses = route
+        .addresses
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{phase} {} · {} · DNS [{}] · {} · {}",
+        kind.label(),
+        route.host,
+        addresses,
+        route.class.label(),
+        transport
+    )
+}
+
+fn classify_network_error_code(message: &str, mode: NetworkMode) -> &'static str {
+    if message.contains("DNS") {
+        "dnsError"
+    } else if message.contains("本机") || message.contains("局域网") || message.contains("保留地址")
+    {
+        "privateAddressBlocked"
+    } else if message.contains("HTTP 403") {
+        "httpForbidden"
+    } else if message.contains("HTTP 429") {
+        "rateLimited"
+    } else if message.contains("证书") {
+        "certificateError"
+    } else if message.contains("超时") {
+        "timeout"
+    } else if message.contains("无法连接") && mode == NetworkMode::SystemProxy {
+        "systemProxyUnavailable"
+    } else if message.contains("无法连接") {
+        "connectionFailed"
+    } else {
+        "networkError"
+    }
 }
 
 fn is_benchmark_ip(ip: IpAddr) -> bool {
@@ -696,6 +896,7 @@ mod tests {
             initial_url: Url::parse("https://example.com/").unwrap(),
             kind: NetworkKind::Html,
             referer: None,
+            mode: NetworkMode::Auto,
             path: PathBuf::from("missing-network-test.part"),
             cancelled: AtomicBool::new(false),
             status: Mutex::new(NetworkStatus::default()),
@@ -715,5 +916,25 @@ mod tests {
         }
         assert!(is_public_ip("2606:4700:4700::1111".parse().unwrap()));
         assert!(!is_public_ip("::ffff:127.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn fake_ip_is_allowed_only_when_it_came_from_a_domain() {
+        let literal = Url::parse("https://198.18.0.1/book").unwrap();
+        assert!(classify_network_url(&literal).is_err());
+        let route = classify_resolved_addresses(
+            "reader.example",
+            None,
+            vec!["198.18.0.7:443".parse().unwrap()],
+        )
+        .unwrap();
+        assert_eq!(route.class, AddressClass::ClashFakeIp);
+        assert_eq!(route.connection_addresses, route.addresses);
+        assert_eq!(NetworkMode::parse("auto").unwrap(), NetworkMode::Auto);
+        assert_eq!(
+            NetworkMode::parse("systemProxy").unwrap(),
+            NetworkMode::SystemProxy
+        );
+        assert_eq!(NetworkMode::parse("direct").unwrap(), NetworkMode::Direct);
     }
 }

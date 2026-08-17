@@ -215,6 +215,8 @@ test('static entry point references ordered external files without inline handle
     const imageAssetsAppPosition = index.indexOf('src="js/image-assets-app.js"');
     const pwaPosition = index.indexOf('src="js/pwa.js"');
     const androidBridgePosition = index.indexOf('src="js/android-bridge.js"');
+    const desktopNetworkPosition = index.indexOf('src="js/desktop-network.js"');
+    const networkAdapterPosition = index.indexOf('src="js/network-adapter.js"');
 
     assert.ok(
         corePosition >= 0
@@ -223,7 +225,9 @@ test('static entry point references ordered external files without inline handle
             && readerCorePosition > historyCorePosition
             && webImportCorePosition > readerCorePosition
             && androidBridgePosition > webImportCorePosition
-            && settingsPosition > androidBridgePosition
+            && desktopNetworkPosition > androidBridgePosition
+            && networkAdapterPosition > desktopNetworkPosition
+            && settingsPosition > networkAdapterPosition
             && imageAssetsPosition > settingsPosition
             && appPosition > imageAssetsPosition
             && comicWorkerPosition > appPosition
@@ -246,6 +250,7 @@ test('static entry point references ordered external files without inline handle
     assert.match(index, /<script src="js\/image-assets-app\.js" defer><\/script>/);
     assert.match(index, /<script src="js\/pwa\.js" defer><\/script>/);
     assert.match(index, /<script src="js\/android-bridge\.js" defer><\/script>/);
+    assert.match(index, /<script src="js\/network-adapter\.js" defer><\/script>/);
     assert.doesNotMatch(index, /<style\b/);
     assert.doesNotMatch(index, /<script(?![^>]*\bsrc=)/);
     assert.doesNotMatch(index, /onclick\s*=/);
@@ -400,7 +405,7 @@ test('web image previews stay local and navigation uses the expanded full-width 
     assert.match(comicApp, /item\.webImportSessionId === webImportSessionId/);
     assert.match(comicApp, /检测到阅读器或少量预览图，正在隔离运行页面并收集完整页序/);
     assert.match(comicApp, /extractEmbeddedImageCandidates/);
-    assert.match(comicApp, /shouldCaptureRenderedPage/);
+    assert.match(comicApp, /planRenderedPageCapture/);
     assert.match(comicApp, /beginRenderedPageCapture/);
     assert.match(comicApp, /readRenderedPageImageChunk/);
     assert.match(comicApp, /releaseRenderedPageCapture/);
@@ -487,6 +492,8 @@ test('Android wrapper loads local HTTPS assets and streams downloads through SAF
     );
     const bridge = fs.readFileSync(path.join(repositoryRoot, 'js', 'android-bridge.js'), 'utf8');
     const renderedCapture = fs.readFileSync(path.join(repositoryRoot, 'js', 'render-capture.js'), 'utf8');
+    const comicApp = fs.readFileSync(path.join(repositoryRoot, 'js', 'comic-app.js'), 'utf8');
+    const networkAdapter = fs.readFileSync(path.join(repositoryRoot, 'js', 'network-adapter.js'), 'utf8');
     const appBuild = fs.readFileSync(path.join(repositoryRoot, 'android-app', 'app', 'build.gradle'), 'utf8');
     const buildScript = fs.readFileSync(path.join(repositoryRoot, 'android-app', 'build-apk.ps1'), 'utf8');
 
@@ -516,6 +523,8 @@ test('Android wrapper loads local HTTPS assets and streams downloads through SAF
     assert.match(activity, /beginRemoteFetch\(String rawUrl, String kind, String rawReferer\)/);
     assert.match(activity, /getRemoteFetchStatus\(String token\)/);
     assert.match(activity, /readRemoteFetchChunk\(String token, int requestedBytes\)/);
+    assert.match(networkAdapter, /platform === 'android'\s*\? await network\.readRemoteFetchChunk\(String\(token \|\| ''\), length\)\s*: await network\.readRemoteFetchChunk\(String\(token \|\| ''\), length, position\)/s);
+    assert.match(comicApp, /return nativeNetwork\.readRemoteFetchChunk\(token, 768 \* 1024, offset\)/);
     assert.match(activity, /cancelRemoteFetch\(String token\)/);
     assert.match(activity, /releaseRemoteFetch\(String token\)/);
     assert.match(renderedCapture, /new MutationObserver/);
@@ -524,7 +533,9 @@ test('Android wrapper loads local HTTPS assets and streams downloads through SAF
     assert.match(renderedCapture, /if \(added\) \{\s*stableBottomCycles = 0/s);
     assert.doesNotMatch(renderedCapture, /added \|\| mutated \|\| pendingReaderImages/);
     assert.match(renderedCapture, /stableBottomCycles >= READER_SETTLE_CYCLES/);
+    assert.match(renderedCapture, /select\.getClientRects\(\)\.length > 0/);
     assert.match(activity, /beginRenderedPageCapture\(String rawUrl, int requestedMaximum\)/);
+    assert.match(networkAdapter, /platform === 'android'[\s\S]*return network\.beginRenderedPageCapture\(String\(url \|\| ''\), limit\)/);
     assert.match(activity, /navigateRenderedPage\(String token, String rawUrl\)/);
     assert.match(activity, /getRenderedImageCount\(String token\)/);
     assert.match(activity, /addRenderedPageSource\(String token, String rawUrl\)/);
@@ -618,9 +629,10 @@ test('JPG and JPEG remain selectable in browsers and the Android photo picker', 
     assert.match(activity, /new ActivityResultContracts\.PickVisualMedia\(\)/);
     assert.match(activity, /new ActivityResultContracts\.PickMultipleVisualMedia\(80\)/);
     assert.match(activity, /PickVisualMedia\.ImageOnly\.INSTANCE/);
-    assert.match(appBuild, /versionCode 21/);
-    assert.match(appBuild, /versionName '1\.1\.4'/);
-    assert.match(serviceWorker, /const CACHE_NAME = 'ecryptees-app-v23-web-verification'/);
+    assert.match(appBuild, /versionCode 23/);
+    assert.match(appBuild, /versionName '1\.1\.5'/);
+    assert.match(serviceWorker, /const CACHE_NAME = 'ecryptees-app-v26-network-adapter-hitomi'/);
+    assert.match(serviceWorker, /'\.\/js\/network-adapter\.js'/);
     assert.match(serviceWorker, /'\.\/js\/desktop-storage\.js'/);
     assert.match(serviceWorker, /'\.\/js\/reader-core\.js'/);
 });
@@ -650,6 +662,6 @@ test('Android comic picker preserves system photo selection order without broad 
     assert.match(comicApp, /items\.push\(\.\.\.prepared\)/);
     assert.match(comicApp, /items\.length >= format\.MAX_PAGES/);
     assert.match(comicApp, /已按系统相册返回顺序加入/);
-    assert.match(appBuild, /versionCode 21/);
-    assert.match(appBuild, /versionName '1\.1\.4'/);
+    assert.match(appBuild, /versionCode 23/);
+    assert.match(appBuild, /versionName '1\.1\.5'/);
 });

@@ -136,13 +136,19 @@
 
     function findPageSelect() {
         return Array.from(document.querySelectorAll('select'))
-            .filter(select => {
+            .map(select => {
                 const label = `${select.id} ${select.name} ${select.className} ${select.getAttribute('aria-label') || ''}`;
-                return select.options.length > 1
+                const eligible = select.options.length > 1
                     && select.options.length <= 500
                     && /(?:page|panel|slide|image|页|张)/i.test(label);
+                const visible = eligible
+                    && select.getClientRects().length > 0
+                    && !select.closest('.hidden, [hidden], [aria-hidden="true"]');
+                return { select, eligible, visible };
             })
-            .sort((left, right) => right.options.length - left.options.length)[0] || null;
+            .filter(candidate => candidate.eligible)
+            .sort((left, right) => Number(right.visible) - Number(left.visible)
+                || right.select.options.length - left.select.options.length)[0]?.select || null;
     }
 
     function findNextControl() {
