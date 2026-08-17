@@ -182,17 +182,26 @@
             if (!url) {
                 continue;
             }
-            const duplicateOf = seen.has(url) ? seen.get(url) : -1;
-            if (duplicateOf < 0) {
-                seen.set(url, resolved.length);
-            }
+            if (seen.has(url)) continue;
+            seen.set(url, resolved.length);
             resolved.push(Object.freeze({
                 url,
-                duplicateOf,
+                duplicateOf: -1,
                 attributes: Object.freeze({ ...(record || {}) })
             }));
         }
         return resolved;
+    }
+
+    function uniqueImageCandidates(candidates) {
+        const seen = new Set();
+        return (candidates || []).filter(candidate => {
+            if (!candidate || candidate.duplicateOf >= 0) return false;
+            const key = String(candidate.url || '');
+            if (!key || seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
     }
 
     function extractImageCandidates(html, baseUrl, maximum = MAX_CANDIDATES) {
@@ -504,6 +513,7 @@
         shouldCaptureRenderedPage,
         resolve18ComicTransform,
         resolveImageRecords,
-        selectImageSource
+        selectImageSource,
+        uniqueImageCandidates
     });
 })(typeof self !== 'undefined' ? self : globalThis);

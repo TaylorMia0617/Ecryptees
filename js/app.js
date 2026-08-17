@@ -179,7 +179,7 @@
         updateImageButtons();
     }
 
-    const pageTitles = Object.freeze({ text: '文本', image: '图片', comic: '漫画', history: '资产' });
+    const pageTitles = Object.freeze({ text: '文本', image: '图片', video: '视频', comic: '漫画', history: '资产' });
     const drawer = document.getElementById('appDrawer');
     const drawerBackdrop = document.getElementById('appDrawerBackdrop');
     const menuButton = document.getElementById('appMenuButton');
@@ -661,6 +661,11 @@
     document.getElementById('drawerImageAssetsButton').addEventListener('click', () => {
         document.getElementById('historyTab').click();
         document.getElementById('assetTypeImageButton').click();
+        closeDrawer();
+    });
+    document.getElementById('drawerVideoAssetsButton').addEventListener('click', () => {
+        document.getElementById('historyTab').click();
+        document.getElementById('assetTypeVideoButton').click();
         closeDrawer();
     });
     drawerBackdrop.addEventListener('click', () => closeDrawer());

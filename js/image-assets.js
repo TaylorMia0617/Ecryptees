@@ -7,6 +7,8 @@
     const FOLDER_STORE = 'folders';
     const MEMBERSHIP_STORE = 'memberships';
     const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
+    const desktopStorage = root.EcrypteesDesktopStorage?.available ? root.EcrypteesDesktopStorage : null;
+    let desktopSyncPromise = null;
 
     function requestToPromise(request) {
         return new Promise((resolve, reject) => {
@@ -73,6 +75,8 @@
         if (!/^image\//.test(mime)) {
             throw new Error('图片资产格式无效');
         }
+        await root.EcrypteesAssetStorage?.requestPersistence?.();
+        await root.EcrypteesAssetStorage?.ensureCapacity?.(blob.size, '保存该图片');
         const now = Date.now();
         const fileName = normalizeFileName(input?.fileName || 'image');
         const asset = {
@@ -88,6 +92,10 @@
             updatedAt: now,
             lastOpenedAt: 0
         };
+        if (desktopStorage) {
+            const { blob: ignoredBlob, ...metadata } = asset;
+            await desktopStorage.saveAsset('image', asset.assetId, blob, metadata);
+        }
         const database = await openDatabase();
         try {
             const transaction = database.transaction(ASSET_STORE, 'readwrite');
@@ -99,7 +107,7 @@
         return asset;
     }
 
-    async function listImageAssets() {
+    async function readRawState() {
         const database = await openDatabase();
         try {
             const transaction = database.transaction([ASSET_STORE, FOLDER_STORE, MEMBERSHIP_STORE], 'readonly');
@@ -114,21 +122,117 @@
         }
     }
 
+    async function synchronizeDesktopAssets() {
+        if (!desktopStorage) return;
+        if (desktopSyncPromise) return desktopSyncPromise;
+        desktopSyncPromise = (async () => {
+            await desktopStorage.whenReady;
+            const desktopSettings = desktopStorage.getSettings();
+            if (!desktopSettings?.image?.available) {
+                const unavailableDatabase = await openDatabase();
+                try {
+                    const transaction = unavailableDatabase.transaction(ASSET_STORE, 'readwrite');
+                    const store = transaction.objectStore(ASSET_STORE);
+                    const cached = await requestToPromise(store.getAll());
+                    cached.forEach(asset => store.put({ ...asset, fileAvailable: false }));
+                    await transactionToPromise(transaction);
+                } finally {
+                    unavailableDatabase.close();
+                }
+                return;
+            }
+            const [diskAssets, local, library] = await Promise.all([
+                desktopStorage.listAssets('image'),
+                readRawState(),
+                desktopStorage.getLibrary('image').catch(() => null)
+            ]);
+            const localById = new Map(local.assets.map(asset => [asset.assetId, asset]));
+            const diskRecords = [];
+            for (const disk of diskAssets) {
+                const cached = localById.get(disk.assetId);
+                let blob = cached?.blob instanceof Blob ? cached.blob : new Blob([]);
+                if (disk.available) {
+                    try {
+                        blob = await desktopStorage.getAssetFile(
+                            'image',
+                            disk.assetId,
+                            disk.metadata.fileName || `${disk.assetId}.img`
+                        );
+                    } catch (error) {
+                        // Keep the rebuildable cache only for display; formal availability remains false.
+                    }
+                }
+                diskRecords.push({
+                    ...disk.metadata,
+                    assetId: disk.assetId,
+                    blob,
+                    size: Number(disk.metadata.size || disk.metadata.fileSize || blob.size),
+                    mime: disk.metadata.mime || blob.type || 'application/octet-stream',
+                    fileAvailable: disk.available
+                });
+            }
+            const restoredFolders = Array.isArray(library?.groups) ? library.groups : [];
+            const restoredMemberships = Array.isArray(library?.memberships) ? library.memberships : [];
+            const database = await openDatabase();
+            try {
+                const transaction = database.transaction([ASSET_STORE, FOLDER_STORE, MEMBERSHIP_STORE], 'readwrite');
+                const assetStore = transaction.objectStore(ASSET_STORE);
+                const folderStore = transaction.objectStore(FOLDER_STORE);
+                const membershipStore = transaction.objectStore(MEMBERSHIP_STORE);
+                assetStore.clear();
+                folderStore.clear();
+                membershipStore.clear();
+                diskRecords.forEach(asset => assetStore.put(asset));
+                restoredFolders.forEach(folder => folderStore.put(folder));
+                restoredMemberships.forEach(membership => membershipStore.put(membership));
+                await transactionToPromise(transaction);
+            } finally {
+                database.close();
+            }
+        })().catch(error => {
+            desktopSyncPromise = null;
+            throw error;
+        });
+        return desktopSyncPromise;
+    }
+
+    async function persistDesktopLibrary() {
+        if (!desktopStorage) return;
+        const state = await readRawState();
+        await desktopStorage.updateLibrary('image', {
+            groups: state.folders,
+            memberships: state.memberships,
+            orderMode: 'natural',
+            order: []
+        });
+    }
+
+    async function listImageAssets() {
+        await synchronizeDesktopAssets();
+        return readRawState();
+    }
+
     async function getImageAsset(assetId) {
         const database = await openDatabase();
+        let asset;
         try {
-            return await requestToPromise(database.transaction(ASSET_STORE, 'readonly').objectStore(ASSET_STORE).get(String(assetId || '')));
+            asset = await requestToPromise(database.transaction(ASSET_STORE, 'readonly').objectStore(ASSET_STORE).get(String(assetId || '')));
         } finally {
             database.close();
         }
+        if (desktopStorage && asset) {
+            if (asset.fileAvailable === false) throw new Error('图片原件不可用');
+            asset.blob = await desktopStorage.getAssetFile('image', asset.assetId, asset.fileName);
+        }
+        return asset;
     }
 
     async function updateImageAsset(assetId, changes) {
-        const database = await openDatabase();
+        let database = await openDatabase();
+        let asset;
         try {
-            const transaction = database.transaction(ASSET_STORE, 'readwrite');
-            const store = transaction.objectStore(ASSET_STORE);
-            const asset = await requestToPromise(store.get(String(assetId || '')));
+            asset = await requestToPromise(database.transaction(ASSET_STORE, 'readonly')
+                .objectStore(ASSET_STORE).get(String(assetId || '')));
             if (!asset) {
                 throw new Error('图片资产不存在');
             }
@@ -139,7 +243,17 @@
                 asset.lastOpenedAt = Math.max(0, Number(changes.lastOpenedAt) || 0);
             }
             asset.updatedAt = Date.now();
-            store.put(asset);
+            if (desktopStorage) {
+                const { blob: ignoredBlob, ...metadata } = asset;
+                await desktopStorage.updateAssetMetadata('image', asset.assetId, metadata);
+            }
+        } finally {
+            database.close();
+        }
+        database = await openDatabase();
+        try {
+            const transaction = database.transaction(ASSET_STORE, 'readwrite');
+            transaction.objectStore(ASSET_STORE).put(asset);
             await transactionToPromise(transaction);
             return asset;
         } finally {
@@ -149,6 +263,7 @@
 
     async function deleteImageAsset(assetId) {
         const id = String(assetId || '');
+        if (desktopStorage) await desktopStorage.trashAsset('image', id);
         const database = await openDatabase();
         try {
             const transaction = database.transaction([ASSET_STORE, MEMBERSHIP_STORE], 'readwrite');
@@ -158,6 +273,7 @@
         } finally {
             database.close();
         }
+        await persistDesktopLibrary();
     }
 
     async function createImageFolder(name) {
@@ -179,6 +295,7 @@
         } finally {
             database.close();
         }
+        await persistDesktopLibrary();
         return folder;
     }
 
@@ -198,9 +315,14 @@
         } finally {
             database.close();
         }
+        await persistDesktopLibrary();
     }
 
     async function clearImageAssets() {
+        if (desktopStorage) {
+            const state = await readRawState();
+            for (const asset of state.assets) await desktopStorage.trashAsset('image', asset.assetId);
+        }
         const database = await openDatabase();
         try {
             const transaction = database.transaction([ASSET_STORE, MEMBERSHIP_STORE], 'readwrite');
@@ -210,7 +332,12 @@
         } finally {
             database.close();
         }
+        await persistDesktopLibrary();
     }
+
+    document.addEventListener('ecryptees-desktop-paths-changed', event => {
+        if (event.detail?.kind === 'image') desktopSyncPromise = null;
+    });
 
     root.EcrypteesImageAssets = Object.freeze({
         saveImageAsset,

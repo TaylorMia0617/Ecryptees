@@ -18,7 +18,7 @@ test('web import prefers original and lazy image attributes before srcset and sr
     }), 'large.jpg');
 });
 
-test('web import resolves relative URLs, preserves DOM order, and marks duplicates', () => {
+test('web import resolves relative URLs, preserves DOM order, and removes duplicates from display candidates', () => {
     const records = [
         { src: '/pages/001.jpg' },
         { 'data-src': '//cdn.example.com/002.webp' },
@@ -31,10 +31,19 @@ test('web import resolves relative URLs, preserves DOM order, and marks duplicat
     assert.deepEqual(result.map(item => item.url), [
         'https://reader.example/pages/001.jpg',
         'https://cdn.example.com/002.webp',
-        'https://reader.example/pages/003.jpg',
-        'https://reader.example/pages/001.jpg'
+        'https://reader.example/pages/003.jpg'
     ]);
-    assert.deepEqual(result.map(item => item.duplicateOf), [-1, -1, -1, 0]);
+    assert.deepEqual(result.map(item => item.duplicateOf), [-1, -1, -1]);
+    assert.deepEqual(
+        webImport.uniqueImageCandidates([...result, result[0]]).map(item => item.url),
+        result.map(item => item.url)
+    );
+    assert.deepEqual(
+        webImport.resolveImageRecords([
+            { src: '/same.jpg' }, { src: '/same.jpg#copy' }, { src: '/next.jpg' }
+        ], 'https://reader.example/', 2).map(item => item.url),
+        ['https://reader.example/same.jpg', 'https://reader.example/next.jpg']
+    );
 });
 
 test('web import caps candidate records without changing their order', () => {

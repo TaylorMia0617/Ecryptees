@@ -265,6 +265,134 @@ No actionable build, lint, packaging, signing, or chunk-transfer issue remains. 
 
 final result: passed with device coverage gap
 
+## Windows Tauri 1.1.4 release build verification
+
+- Date: 2026-08-17. Rustup stable MSVC was reinstalled successfully; `rustc 1.97.1`, `cargo 1.97.1`, Visual Studio Community 2026, Windows SDK, and WebView2 151 are detected by `tauri info`.
+- Added the Tauri v2 shell, strict local CSP, allowlisted desktop web bundle, current-user Simplified Chinese NSIS configuration, and bundled WebView2 offline installer configuration.
+- Added separate image, comic, and video disk libraries, scoped asset URLs, persisted scopes, 4 MiB raw IPC writes, 64 MiB free-space reserve, SHA-256 verification, metadata backups, migration, historical roots, and recycle-bin deletion restricted to validated asset IDs.
+- Desktop IndexedDB/OPFS is treated as rebuildable cache. An unavailable root keeps cached metadata visible as unavailable and does not promote or delete cache data. Large comic/video reads stream into a rebuildable OPFS cache rather than building one JSON or base64 payload.
+- JavaScript syntax checks passed. Node regressions passed 55/55 with `--test-concurrency=1`; desktop resource preparation, Cargo formatting, Cargo metadata, and Tauri environment/config inspection passed.
+- The first Cargo attempt exposed host commit-memory pressure, and the first complete build exposed two recoverable environment issues: two static WebView2 loader libraries were absent from the extracted Cargo source cache, and this Windows PowerShell session did not expose `Get-FileHash`. The loader libraries were restored byte-for-byte from Cargo's already verified `.crate` archive, and artifact hashing now uses the built-in .NET SHA-256 implementation.
+- The full optimized Tauri Release and x64 NSIS bundle completed. The versioned installer and stable alias are both 218,257,906 bytes and both hash to SHA-256 `c333e87a405f6270d9b68c0c307534d49053cedbd6516f31f6a8eb9cd606c0b3`. Windows file metadata reports product/file version 1.1.4.
+
+**Findings**
+
+Application implementation, static regressions, Rust Release compilation, NSIS generation, artifact naming, and SHA-256 verification are complete. The build remains intentionally unsigned because no code-signing certificate is installed. Installation, uninstall preservation, SmartScreen presentation, and large-file runtime stress remain manual Windows acceptance items.
+
+final result: passed with manual Windows installation and runtime coverage gap
+
+## APK 1.1.3 video library and responsive player UI verification
+
+- Date: 2026-08-17. Video cards now use only the accessible 16:9 poster as the playback target; the standalone play action was removed while EMP4 and original MP4 exports remain independent.
+- The video action surface is an application-owned bottom sheet with inline rename, group creation/assignment, export actions, and a separated two-step delete confirmation. No browser prompt is used for video rename or group creation.
+- The custom player retains resume position, playback rate, wake lock, 10-second seeking, orientation lock, and export behavior. Portrait and landscape layouts share one control model, with text-only title marquee and responsive overlays.
+- The episode drawer reuses the existing video folder and membership stores without a schema upgrade. Browser smoke covered all/ungrouped/custom groups, current-video highlighting, missing native controls, and switching between two distinct stored MP4 assets; switching closed the drawer and replaced the active Blob URL.
+- Node regressions passed 52/52, `node --check js/video-app.js` and `git diff --check` passed. The browser MP4/EMP4 round trip remained byte-exact and duplicate import still kept two distinct source assets at two records/files.
+- Gradle `clean assembleRelease lintRelease` passed. The build script verified version 1.1.3 (code 20), and `apksigner` verified certificate SHA-256 `91306e7c15932646a58ffbd3443f541be57401f1f64106d8dcd0e97fbc5687e8`.
+- Final APK: `dist/Ecryptees-v1.1.3.apk`, 3,505,603 bytes; SHA-256 `63A40D10648793400BBD8E2D1CC2F0BB1D3E38006A9DA787C25AB4667A8687C3`.
+
+**Findings**
+
+No actionable format, database, storage-isolation, browser UI, lint, signing, or packaging issue remains. No Android device or `adb` executable was available, so physical touch gestures, OEM WebView fullscreen behavior, and in-place upgrade from 1.1.2 remain device-level acceptance coverage.
+
+final result: passed with device coverage gap
+
+## APK 1.1.1 original MP4 assets and stable reader order verification
+
+- Date: 2026-08-16. Video assets now commit the byte-exact original MP4 to app-private OPFS and record `storageFormat: plain-mp4`; playback and original export read that file directly. `.emp4` exists only as an authenticated import or an explicit temporary export.
+- Existing encrypted video assets migrate transactionally: the restored `.mp4` and new metadata must both commit before the old `.emp4` is removed. A failure preserves the legacy archive for a later retry.
+- A real Chrome run stored one 4096-byte `.mp4` with an `ftyp` prefix and no persistent `.emp4`. Worker export followed by import restored every byte exactly and retained the `ECRVID1` archive magic.
+- Direct `file://` loading opened the `.emp4` decode interface and completed authentication, decryption, playback setup, and original-file export without creating a Worker. Chromium denied persistent storage for the file origin, so the UI correctly reported that the restored MP4 was transient.
+- The reader drawer now uses natural title ordering for Chinese numerals, Arabic digits, and English number words. Reading, progress updates, and horizontal book switching do not affect that order. Pointer/drag reordering switches to a persisted manual order, and the reset action restores natural order.
+- The reader drawer has a dedicated full-screen toggle and a horizontal gesture rail: right expands and left collapses. Browser geometry verification measured 360 px collapsed and the full 758 px dialog width expanded. Long-title scrolling moved only the title by 180 px while the book row remained fixed.
+- The application Service Worker no longer contains encrypted-video sessions or a plaintext Range route; it caches only the application shell.
+- Node regressions passed 48/48. JavaScript syntax checks and `git diff --check` passed.
+- Gradle `clean assembleRelease lintRelease` passed. The build script verified version 1.1.1 (code 18) and release certificate SHA-256 `91306e7c15932646a58ffbd3443f541be57401f1f64106d8dcd0e97fbc5687e8`.
+- Final APKs: `dist/Ecryptees-v1.1.1.apk` and `dist/Ecryptees.apk`, both 3,490,248 bytes with SHA-256 `25D6552123A54353847F1E9FD28D6F8DA9612F881C2E4648136C3A0CD4BD2144`.
+
+## APK 1.1.2 video asset isolation, deduplication, and player verification
+
+- The asset center now has one active controller. A browser regression switched from a populated video shelf to comics and back; stale video rendering did not overwrite the comic view, and the video count remained visible.
+- A browser smoke test imported an MP4, imported the same bytes under a different name, then imported an EMP4 generated from those bytes. The video database and OPFS both retained exactly one raw MP4 with the same `sha256-tree-v1` content ID.
+- Video export exposes a global, cancellable progress dialog. Worker cancellation aborts and removes the temporary EMP4, while capacity checks retain a 64 MiB reserve before imports and exports.
+- Playback adds resume position, 10-second seeking, six playback speeds, fullscreen landscape, screen wake lock, and Android native fullscreen/keep-screen-on fallback.
+- `node --test tests/*.test.js`, JavaScript syntax checks, `git diff --check`, browser video smoke, Gradle `clean assembleRelease lintRelease`, release signing verification, and offline shell caching passed.
+- Final APKs: `dist/Ecryptees-v1.1.2.apk` and `dist/Ecryptees.apk`, both 3,498,527 bytes with SHA-256 `6E2631F3A6539D4860CE027FA16563EEEEC091BC862AEDD6619706E44D24534B`.
+
+**Findings**
+
+No actionable raw-storage, `.emp4` round-trip, direct-HTML compatibility, reader-order, build, lint, signing, or packaging issue remains. No physical Android device was connected, so OEM WebView codec playback, external `.emp4` handoff, touch drag ordering, and in-place upgrade migration remain device-level acceptance items.
+
+final result: passed with device coverage gap
+
+## APK 1.1.0 `.emp4` video assets and Range playback verification
+
+- Date: 2026-08-16. `.emp4` v1 preserves one original MP4 byte-for-byte, using a 160-byte authenticated header, an encrypted manifest, 1 MiB AES-256-GCM chunks, and a fresh random content key per archive.
+- Video deliberately has no custom-password mode. The UI contains no video password controls; the worker always uses the application key material; web and Android readers reject any nonzero key-mode value, non-HKDF KDF value, or nonzero reserved field.
+- Browser playback registers an in-memory Service Worker session and maps plaintext requests to authenticated encrypted chunks. A real headless Chrome run returned `206 Partial Content` for `bytes=0-23`, reported `Content-Range: bytes 0-23/4096`, and restored the original `ftyp` bytes. No plaintext video entered the application-shell cache.
+- Android accepts `.emp4` view/share handoffs, streams ciphertext into a maximum of two tokenized native sessions, and serves authenticated `video/mp4` ranges through the local `WebViewClient`. The native player bridge never writes a plaintext MP4.
+- Video assets store only `.emp4` ciphertext plus metadata and folder membership. Playback, encrypted export, explicit MP4 decryption export, rename, grouping, and deletion are wired into the shared asset screen.
+- Web image extraction now drops repeated normalized URLs before the candidate cap and list rendering, preserving only the first occurrence and original page order. Dynamic capture results receive the same first-occurrence filtering by source URL.
+- JavaScript syntax checks passed for every script. Node regressions passed 47/47, including exact-byte round trips, header rejection, corruption detection, Range parsing, storage boundaries, Service Worker wiring, and Android static integration. `git diff --check` passed.
+- Gradle `clean assembleRelease lintRelease` passed with a temporary 1 GiB Gradle heap override after the default 2 GiB daemon allocation exceeded available host memory. The build script verified release certificate SHA-256 `91306e7c15932646a58ffbd3443f541be57401f1f64106d8dcd0e97fbc5687e8`.
+- Final APKs: `dist/Ecryptees-v1.1.0.apk` and `dist/Ecryptees.apk`, both 3,485,540 bytes with SHA-256 `541A806D61BABE4D09498DB9DE3251894444DB380CF19660A1D2007E28F836B7`.
+
+**Findings**
+
+No actionable format, password-surface, browser Range, encrypted-storage, build, lint, signing, or packaging issue remains. The browser smoke uses a deliberately minimal MP4 header to verify byte-range restoration rather than codec playback. No physical Android device was connected, so OEM WebView seeking, external `.emp4` handoff, and long-duration playback remain device-level acceptance items.
+
+final result: passed with device coverage gap
+
+## Compact comic archive source bar verification
+
+- Date: 2026-08-16. The comic archive source bar now exposes exactly three concise choices: `图片`, `链接`, and `解码`. The former standalone bottom `.ecomic` decode card has been folded into the same source area.
+- The bar is capped at 360 px on wider layouts and uses the full available card width on mobile. At the 390 × 844 verification viewport it measured 334 px; all three controls retained 44 px touch targets.
+- Runtime switching kept the three panels mutually exclusive. `链接` displayed the webpage importer while retaining the archive creation controls; `解码` displayed only the `.ecomic` picker/open action and hid the page list, archive name, security note, and creation actions.
+- The mobile viewport and document widths both remained exactly 390 px with no horizontal overflow. The comic panel contained one archive card instead of separate create and decode cards.
+- Browser evidence: `C:\Users\user\.codex\visualizations\2026\08\16\01a009c7-48a2-7392-9788-0f3e3eb42e6d\comic-source-image.png`, `comic-source-link.png`, `comic-source-decode.png`, and `comic-source-desktop.png`.
+- `node --test tests/*.test.js` passed 38/38; `node --check js/comic-app.js` and `git diff --check` passed.
+
+**Findings**
+
+No actionable P0, P1, or P2 visual, interaction, or responsive-layout issue remains.
+
+final result: passed
+
+## Reader adaptive control layer verification
+
+- Date: 2026-08-16.
+- Source visual truth: `C:\Users\user\.codex\generated_images\019fee16-c7fa-7480-8c37-b11feea7f636\exec-d7a26ef5-10c9-493f-80c1-d3f9a0e384a0.png` (1536 × 1024 px).
+- Browser-rendered implementation evidence: `C:\Users\user\.codex\visualizations\2026\08\10\019fee16-c7fa-7480-8c37-b11feea7f636\reader-normal-492.png` and `reader-drawer-final.png` (492 × 844 px, device scale factor 1).
+- Combined full-view comparison: `C:\Users\user\.codex\visualizations\2026\08\10\019fee16-c7fa-7480-8c37-b11feea7f636\reader-comparison.png` (820 × 1240 px).
+- The Windows Edge headless runtime enforces a 492 px minimum CSS width. Both captures remain inside the application's mobile breakpoint; the 390 px layout is additionally protected by calculated control widths and static overflow assertions.
+- State: normal continuous reading with visible controls, and the same reader with the grouped comic drawer open.
+
+**Fidelity surfaces**
+
+- Typography: the top bar contains only a single-line ellipsized title between 44 px menu and close targets. Old page-count, file-size, storage explanation, and “连续阅读” heading content are absent.
+- Spacing and layout: the reader remains full-screen; controls overlay the content and respect safe-area insets. The bottom controller retains complete previous/next targets and the page slider. The drawer measures 360 px at the captured width and uses 82vw below that maximum.
+- Colors: the implementation uses the existing Ecryptees pink, warm-white drawer surface, dark translucent control layers, and high-contrast white reading controls shown in the source.
+- Image quality: the implementation continues to render stored original-page Blob URLs at intrinsic aspect ratio. Test captures use existing local assets only; no remote or replacement reader asset was introduced.
+- Copy: the drawer uses `选择漫画`, `全部漫画`, `未分组`, saved folder names, and a concise `当前` marker. Book rows intentionally omit the concept image's miniature progress bars because the approved specification requires only cover, title, and current-book state.
+
+**Focused comparison and interactions**
+
+- The lower portion of `reader-comparison.png` provides focused normal/footer and drawer/list evidence at readable scale; no additional crop was required.
+- The real HTTP application initialized `reader-core.js`, set the closed reader state, and reported `漫画模式已就绪` in Edge, confirming the changed classic-script order and DOM bindings load without a startup exception.
+- Node regressions cover group filtering, recent/added/title ordering, first/last boundaries, deliberate horizontal swipe thresholds, page-index clamping, and the presence of accessible range, drawer, previous-page, and next-page controls.
+
+**Comparison history**
+
+- Pass 1 appeared horizontally clipped because headless Edge kept a wider CSS layout while writing a 390 px crop. This was identified as capture-tool behavior, not accepted as implementation evidence.
+- Pass 2 captured the complete 492 px mobile breakpoint. It confirmed the full header, both page buttons, slider, title truncation, 360 px drawer, folder counts, covers, current state, and dimmed reader backdrop.
+- The implementation pass also corrected a slider edge case where releasing an unchanged thumb could otherwise leave auto-hide suspended.
+
+**Findings**
+
+No actionable P0, P1, or P2 visual mismatch remains. The conceptual source contains group icons and per-book progress miniatures; their omission is intentional and follows the approved lower-clutter reader specification.
+
+final result: passed
+
 ## APK 1.0.8 strict `.ecomic` open-association verification
 
 - Date: 2026-08-11. Android now advertises `ACTION_VIEW` for the dedicated `application/vnd.ecryptees.ecomic` MIME type and for case-bounded `content:` URI paths ending in `.ecomic`; it does not register a broad `application/octet-stream` handler.

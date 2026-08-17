@@ -5,9 +5,12 @@
     if (!bridge) return;
 
     const ECOMIC_MIME_TYPE = 'application/vnd.ecryptees.ecomic';
+    const EMP4_MIME_TYPE = 'application/vnd.ecryptees.emp4';
     const MAX_INCOMING_ARCHIVE_BYTES = 512 * 1024 * 1024;
+    const MAX_INCOMING_VIDEO_BYTES = 64 * 1024 * 1024 * 1024 + 4 * 1024 * 1024;
     const INCOMING_CHUNK_BYTES = 768 * 1024;
     const ECOMIC_MAGIC = Uint8Array.from([0x45, 0x43, 0x52, 0x43, 0x4F, 0x4D, 0x31, 0x00]);
+    const EMP4_MAGIC = Uint8Array.from([0x45, 0x43, 0x52, 0x56, 0x49, 0x44, 0x31, 0x00]);
     let statusElement = null;
     let pendingDownload = null;
     let incomingBusy = false;
@@ -59,6 +62,7 @@
         if (lower.endsWith('.heif')) return 'image/heif';
         if (lower.endsWith('.txt')) return 'text/plain';
         if (lower.endsWith('.ecomic')) return ECOMIC_MIME_TYPE;
+        if (lower.endsWith('.emp4')) return EMP4_MIME_TYPE;
         return 'application/octet-stream';
     }
 
@@ -80,11 +84,11 @@
         return bytes;
     }
 
-    function hasEcomicMagic(file) {
-        return file.slice(0, ECOMIC_MAGIC.length).arrayBuffer().then(buffer => {
+    function hasArchiveMagic(file, magic) {
+        return file.slice(0, magic.length).arrayBuffer().then(buffer => {
             const bytes = new Uint8Array(buffer);
-            return bytes.length === ECOMIC_MAGIC.length
-                && bytes.every((value, index) => value === ECOMIC_MAGIC[index]);
+            return bytes.length === magic.length
+                && bytes.every((value, index) => value === magic[index]);
         });
     }
 
@@ -108,29 +112,33 @@
             }
             metadata = JSON.parse(encoded);
         } catch (error) {
-            showStatus('无法读取外部漫画归档。', 'error', true);
+            showStatus('无法读取外部加密归档。', 'error', true);
             return;
         }
         const token = String(metadata.token || '');
         const name = String(metadata.name || '');
+        const lowerName = name.toLowerCase();
+        const isVideoArchive = lowerName.endsWith('.emp4');
+        const maximumBytes = isVideoArchive ? MAX_INCOMING_VIDEO_BYTES : MAX_INCOMING_ARCHIVE_BYTES;
+        const archiveLabel = isVideoArchive ? '视频' : '漫画';
         const expectedSize = Number(metadata.size);
         incomingBusy = true;
         let storageRoot;
         let writable;
         let entryName = '';
         try {
-            if (!token || !name.toLowerCase().endsWith('.ecomic')) {
-                throw new Error('只能打开 .ecomic 文件');
+            if (!token || (!lowerName.endsWith('.ecomic') && !isVideoArchive)) {
+                throw new Error('只能打开 .ecomic 或 .emp4 文件');
             }
             if (Number.isFinite(expectedSize)
-                && (expectedSize === 0 || expectedSize > MAX_INCOMING_ARCHIVE_BYTES)) {
-                throw new Error('该 .ecomic 文件为空或超过大小限制');
+                && (expectedSize === 0 || expectedSize > maximumBytes)) {
+                throw new Error(`该 .${isVideoArchive ? 'emp4' : 'ecomic'} 文件为空或超过大小限制`);
             }
             if (!globalThis.navigator.storage?.getDirectory) {
                 throw new Error('当前 Android System WebView 不支持安全导入外部归档');
             }
             storageRoot = await globalThis.navigator.storage.getDirectory();
-            entryName = `ecryptees-temp-incoming-${token.replace(/[^a-z0-9-]/gi, '')}.ecomic`;
+            entryName = `ecryptees-temp-incoming-${token.replace(/[^a-z0-9-]/gi, '')}.${isVideoArchive ? 'emp4' : 'ecomic'}`;
             const handle = await storageRoot.getFileHandle(entryName, { create: true });
             writable = await handle.createWritable();
             let received = 0;
@@ -138,16 +146,16 @@
             while (true) {
                 const encoded = bridge.readIncomingChunk(token, INCOMING_CHUNK_BYTES);
                 if (encoded === null || encoded === undefined) {
-                    throw new Error('外部 .ecomic 文件读取失败');
+                    throw new Error(`外部${archiveLabel}文件读取失败`);
                 }
                 if (!encoded) {
                     break;
                 }
                 const bytes = decodeBase64(encoded);
                 received += bytes.byteLength;
-                if (received > MAX_INCOMING_ARCHIVE_BYTES
+                if (received > maximumBytes
                     || (Number.isFinite(expectedSize) && expectedSize >= 0 && received > expectedSize)) {
-                    throw new Error('该 .ecomic 文件超过大小限制');
+                    throw new Error(`该 .${isVideoArchive ? 'emp4' : 'ecomic'} 文件超过大小限制`);
                 }
                 await writable.write(bytes);
                 if (expectedSize > 0) {
@@ -155,23 +163,24 @@
                 }
             }
             if (expectedSize >= 0 && received !== expectedSize) {
-                throw new Error('外部 .ecomic 文件读取不完整');
+                throw new Error(`外部${archiveLabel}文件读取不完整`);
             }
             await writable.close();
             writable = null;
             if (!bridge.finishIncomingDocument(token)) {
-                throw new Error('外部 .ecomic 文件读取未完成');
+                throw new Error(`外部${archiveLabel}文件读取未完成`);
             }
             const stored = await handle.getFile();
-            if (!(await hasEcomicMagic(stored))) {
-                throw new Error('该文件后缀为 .ecomic，但内容不是有效的漫画归档');
+            if (!(await hasArchiveMagic(stored, isVideoArchive ? EMP4_MAGIC : ECOMIC_MAGIC))) {
+                throw new Error(`该文件后缀为 .${isVideoArchive ? 'emp4' : 'ecomic'}，但内容不是有效归档`);
             }
             const file = new File([stored], name, {
-                type: ECOMIC_MIME_TYPE,
+                type: isVideoArchive ? EMP4_MIME_TYPE : ECOMIC_MIME_TYPE,
                 lastModified: stored.lastModified
             });
             showStatus(`正在验证 ${name}…`, 'success', true);
-            document.dispatchEvent(new CustomEvent('ecryptees-open-archive', {
+            document.dispatchEvent(new CustomEvent(isVideoArchive
+                ? 'ecryptees-open-video-archive' : 'ecryptees-open-archive', {
                 detail: { file, opfsName: entryName }
             }));
             entryName = '';
@@ -186,7 +195,7 @@
             } catch (abortError) {
                 // Android also closes the stream when the activity is destroyed.
             }
-            showStatus(error.message || '无法打开外部漫画归档', 'error', true);
+            showStatus(error.message || `无法打开外部${archiveLabel}归档`, 'error', true);
         } finally {
             if (storageRoot && entryName) {
                 try {
@@ -322,6 +331,43 @@
     globalThis.EcrypteesAndroidMedia = Object.freeze({
         isHeicSupported,
         decodeHeic
+    });
+
+    async function prepareEmp4Playback(source, rawKey, onProgress) {
+        if (!(source instanceof Blob)
+            || typeof bridge.beginEmp4Playback !== 'function'
+            || typeof bridge.writeEmp4PlaybackChunk !== 'function') {
+            throw new Error('当前 Android 版本不支持 .emp4 流式播放');
+        }
+        const keyBytes = rawKey instanceof Uint8Array ? rawKey : new Uint8Array(rawKey);
+        const token = bridge.beginEmp4Playback(source.name || 'video.emp4', source.size, encodeBase64(keyBytes));
+        if (!token) throw new Error('无法准备 Android 视频播放会话');
+        try {
+            const chunkSize = 768 * 1024;
+            for (let offset = 0; offset < source.size; offset += chunkSize) {
+                const bytes = new Uint8Array(await source.slice(offset, Math.min(source.size, offset + chunkSize)).arrayBuffer());
+                if (!bridge.writeEmp4PlaybackChunk(token, encodeBase64(bytes))) {
+                    throw new Error('Android 加密视频暂存失败');
+                }
+                onProgress?.(Math.min(source.size, offset + bytes.length), source.size);
+            }
+            if (!bridge.finishEmp4Playback(token)) throw new Error('Android 视频播放会话校验失败');
+            return {
+                token,
+                url: `https://appassets.androidplatform.net/emp4/${encodeURIComponent(token)}/video.mp4`
+            };
+        } catch (error) {
+            try { bridge.releaseEmp4Playback(token); } catch (releaseError) { /* Best effort. */ }
+            throw error;
+        }
+    }
+
+    globalThis.EcrypteesAndroidVideo = Object.freeze({
+        supported: typeof bridge.beginEmp4Playback === 'function',
+        prepare: prepareEmp4Playback,
+        release(token) {
+            try { bridge.releaseEmp4Playback(String(token || '')); } catch (error) { /* Best effort. */ }
+        }
     });
 
     document.addEventListener('click', event => {

@@ -42,12 +42,14 @@
             <div class="app-drawer-asset-groups" id="appDrawerAssetGroups" hidden>
                 <button id="drawerComicAssetsButton" type="button"><span aria-hidden="true">漫</span>漫画资产</button>
                 <button id="drawerImageAssetsButton" type="button"><span aria-hidden="true">图</span>图片资产</button>
+                <button id="drawerVideoAssetsButton" type="button"><span aria-hidden="true">视</span>视频资产</button>
             </div>
         </div>
         <span class="app-drawer-label">工具</span>
         <div class="tabs app-drawer-nav" role="tablist" aria-label="本地工具">
             <button class="tab" id="textTab" type="button" role="tab" aria-selected="true" aria-controls="textPanel" tabindex="0" data-mode="text"><span aria-hidden="true">文</span>文本</button>
             <button class="tab" id="imageTab" type="button" role="tab" aria-selected="false" aria-controls="imagePanel" tabindex="-1" data-mode="image"><span aria-hidden="true">图</span>图片</button>
+            <button class="tab" id="videoTab" type="button" role="tab" aria-selected="false" aria-controls="videoPanel" tabindex="-1" data-mode="video"><span aria-hidden="true">视</span>视频</button>
             <button class="tab" id="comicTab" type="button" role="tab" aria-selected="false" aria-controls="comicPanel" tabindex="-1" data-mode="comic"><span aria-hidden="true">漫</span>漫画</button>
         </div>
         <div class="app-drawer-spacer"></div>
@@ -159,17 +161,66 @@
             </div>
         </section>
 
+        <section id="videoPanel" role="tabpanel" aria-labelledby="videoTab" hidden>
+            <div class="video-workflow-card">
+                <div class="image-card-header">
+                    <strong id="videoWorkflowHeading">添加原始视频</strong>
+                    <span class="image-meta" id="videoSelectionMeta">尚未选择 MP4</span>
+                </div>
+                <div class="video-source-switch" role="group" aria-label="视频归档操作">
+                    <button class="video-source-option is-active" id="videoCreateModeButton" type="button" aria-pressed="true">添加 MP4</button>
+                    <button class="video-source-option" id="videoOpenModeButton" type="button" aria-pressed="false">导入 .emp4</button>
+                </div>
+
+                <div class="video-source-panel" id="videoCreatePanel">
+                    <div class="image-upload">
+                        <input class="file-input" id="videoSourceFile" type="file" accept=".mp4,video/mp4">
+                        <label class="file-picker" for="videoSourceFile" tabindex="0">选择 MP4 视频</label>
+                        <p class="hint">原文件不会转码或重封装，将直接写入应用私有数据。</p>
+                    </div>
+                    <label for="videoArchiveName">视频名称</label>
+                    <input id="videoArchiveName" maxlength="120" value="video" autocomplete="off">
+                    <p class="hint">需要分享加密文件时，可从视频资产按需导出 .emp4。</p>
+                    <div class="button-group video-actions">
+                        <button id="encryptVideoButton" type="button" disabled>加入视频资产</button>
+                        <button class="secondary-button" id="viewSavedVideoButton" type="button" hidden>去查看</button>
+                        <a class="download-button" id="downloadEmp4" href="#" aria-disabled="true" hidden>下载 .emp4</a>
+                    </div>
+                </div>
+
+                <div class="video-source-panel" id="videoOpenPanel" hidden>
+                    <div class="image-upload">
+                        <input class="file-input" id="videoArchiveFile" type="file" accept=".emp4,application/vnd.ecryptees.emp4">
+                        <label class="file-picker" for="videoArchiveFile" tabindex="0">选择 .emp4</label>
+                    </div>
+                    <p class="hint">选择后会自动验证并加入视频资产，无需密码。</p>
+                    <div class="button-group video-actions">
+                        <button id="openVideoButton" type="button" disabled>解密、加入资产并播放</button>
+                        <button class="secondary-button" id="cancelVideoButton" type="button" hidden>取消任务</button>
+                    </div>
+                </div>
+
+                <div class="image-progress" id="videoProgressGroup" hidden>
+                    <progress id="videoProgress" max="100" value="0" aria-label="视频处理进度"></progress>
+                    <span id="videoProgressText" aria-hidden="true">0%</span>
+                </div>
+                <p class="image-status" id="videoStatus" role="status" aria-live="polite"></p>
+                <p class="image-local-note">资产保存原始 MP4 · .emp4 仅在导入导出时处理 · 全程本地</p>
+            </div>
+        </section>
+
         <section id="comicPanel" role="tabpanel" aria-labelledby="comicTab" hidden>
             <p class="comic-warning" id="comicEnvironmentWarning" role="alert" hidden></p>
 
             <div class="comic-section">
                 <div class="image-card-header">
-                    <strong>创建漫画归档</strong>
+                    <strong id="comicArchiveHeading">创建漫画归档</strong>
                     <span class="image-meta" id="comicSelectionSummary">尚未选择图片</span>
                 </div>
-                <div class="comic-source-switch" role="group" aria-label="漫画图片来源">
-                    <button class="comic-source-option is-active" id="localComicSourceButton" type="button" aria-pressed="true">本地图片</button>
-                    <button class="comic-source-option" id="webComicSourceButton" type="button" aria-pressed="false">网页链接</button>
+                <div class="comic-source-switch" role="group" aria-label="漫画归档操作">
+                    <button class="comic-source-option is-active" id="localComicSourceButton" type="button" aria-pressed="true">图片</button>
+                    <button class="comic-source-option" id="webComicSourceButton" type="button" aria-pressed="false">链接</button>
+                    <button class="comic-source-option" id="archiveComicSourceButton" type="button" aria-pressed="false">解码</button>
                 </div>
                 <div class="image-upload" id="localComicSourcePanel">
                     <input
@@ -219,32 +270,29 @@
                     </div>
                 </div>
 
-                <ol class="comic-file-list" id="comicFileList" aria-label="漫画页面顺序"></ol>
+                <div class="comic-decode-panel" id="archiveComicSourcePanel" hidden>
+                    <span class="image-meta" id="comicArchiveMeta">尚未选择 .ecomic</span>
+                    <div class="cipher-file-actions">
+                        <input class="file-input" id="comicArchiveFile" type="file" accept=".ecomic,application/vnd.ecryptees.ecomic">
+                        <label class="file-picker" id="comicArchiveFilePicker" for="comicArchiveFile" tabindex="0">选择 .ecomic</label>
+                        <button id="openComicButton" type="button" disabled>解密、转存并阅读</button>
+                    </div>
+                </div>
 
-                <div class="comic-archive-settings">
+                <ol class="comic-file-list" id="comicFileList" aria-label="漫画页面顺序" data-comic-create-only></ol>
+
+                <div class="comic-archive-settings" data-comic-create-only>
                     <label class="comic-name-label" for="comicArchiveName">归档名称</label>
                     <input class="comic-name-input" id="comicArchiveName" type="text" value="comic" maxlength="120">
                 </div>
 
-                <p class="comic-security-note">内置码表随应用公开，只能隐藏内容并检测损坏，不等同于私人密码。未来版本可增加外部密码本。</p>
-                <div class="button-group comic-actions">
+                <p class="comic-security-note" data-comic-create-only>内置码表随应用公开，只能隐藏内容并检测损坏，不等同于私人密码。未来版本可增加外部密码本。</p>
+                <div class="button-group comic-actions" data-comic-create-only>
                     <button id="encryptComicButton" type="button" disabled>加密并加入资产</button>
                     <button id="viewSavedComicButton" type="button" hidden><span aria-hidden="true">✈</span> 去查看</button>
                     <a class="download-button" id="downloadComicArchive" href="#" aria-disabled="true" hidden>下载 .ecomic</a>
                     <button class="secondary-button" id="clearComicFilesButton" type="button" disabled>清空列表</button>
                     <button class="secondary-button" id="cancelComicButton" type="button" hidden>取消任务</button>
-                </div>
-            </div>
-
-            <div class="comic-section">
-                <div class="image-card-header">
-                    <strong>打开漫画归档</strong>
-                    <span class="image-meta" id="comicArchiveMeta">尚未选择 .ecomic</span>
-                </div>
-                <div class="cipher-file-actions">
-                    <input class="file-input" id="comicArchiveFile" type="file" accept=".ecomic,application/vnd.ecryptees.ecomic">
-                    <label class="file-picker" id="comicArchiveFilePicker" for="comicArchiveFile" tabindex="0">选择 .ecomic</label>
-                    <button id="openComicButton" type="button" disabled>解密、转存并阅读</button>
                 </div>
             </div>
 
@@ -265,8 +313,9 @@
                 <button class="secondary-button history-clear" id="clearHistoryButton" type="button" disabled>清空漫画</button>
             </div>
             <div class="asset-type-switch" role="group" aria-label="资产类型">
-                <button class="is-active" id="assetTypeComicButton" type="button" aria-pressed="true">漫画</button>
-                <button id="assetTypeImageButton" type="button" aria-pressed="false">图片</button>
+                <button class="is-active" id="assetTypeComicButton" type="button" aria-pressed="true">漫画 <span class="asset-type-count" data-asset-count="comic" aria-label="0 项">0</span></button>
+                <button id="assetTypeImageButton" type="button" aria-pressed="false">图片 <span class="asset-type-count" data-asset-count="image" aria-label="0 项">0</span></button>
+                <button id="assetTypeVideoButton" type="button" aria-pressed="false">视频 <span class="asset-type-count" data-asset-count="video" aria-label="0 项">0</span></button>
             </div>
             <div class="history-directory" id="historyDirectoryPanel">
                 <div>
@@ -340,13 +389,65 @@
                     <input id="launcherDisguiseToggle" type="checkbox" role="switch">
                 </label>
             </section>
+            <section class="app-settings-section desktop-storage-settings" id="desktopStorageSettings" aria-labelledby="desktopStorageSettingsTitle" hidden>
+                    <h3 id="desktopStorageSettingsTitle">资产保存位置</h3>
+                    <p class="desktop-storage-intro">电脑版将原件直接保存在以下目录；卸载应用不会删除这些文件。</p>
+                    <p class="desktop-storage-notice" id="desktopStorageNotice" role="status" aria-live="polite" hidden></p>
+                    <div class="desktop-storage-row" data-desktop-storage-kind="image">
+                        <div class="desktop-storage-copy">
+                            <strong>图片保存路径</strong>
+                            <span class="desktop-storage-path"><span id="desktopImagePath">正在读取…</span></span>
+                            <small id="desktopImageSpace"></small>
+                        </div>
+                        <div class="desktop-storage-actions">
+                            <button type="button" data-desktop-change="image">更改位置</button>
+                            <button class="secondary-button" type="button" data-desktop-open="image">在资源管理器中打开</button>
+                        </div>
+                    </div>
+                    <div class="desktop-storage-row" data-desktop-storage-kind="comic">
+                        <div class="desktop-storage-copy">
+                            <strong>漫画保存路径</strong>
+                            <span class="desktop-storage-path"><span id="desktopComicPath">正在读取…</span></span>
+                            <small id="desktopComicSpace"></small>
+                        </div>
+                        <div class="desktop-storage-actions">
+                            <button type="button" data-desktop-change="comic">更改位置</button>
+                            <button class="secondary-button" type="button" data-desktop-open="comic">在资源管理器中打开</button>
+                        </div>
+                    </div>
+                    <div class="desktop-storage-row" data-desktop-storage-kind="video">
+                        <div class="desktop-storage-copy">
+                            <strong>视频保存路径</strong>
+                            <span class="desktop-storage-path"><span id="desktopVideoPath">正在读取…</span></span>
+                            <small id="desktopVideoSpace"></small>
+                        </div>
+                        <div class="desktop-storage-actions">
+                            <button type="button" data-desktop-change="video">更改位置</button>
+                            <button class="secondary-button" type="button" data-desktop-open="video">在资源管理器中打开</button>
+                        </div>
+                    </div>
+            </section>
             <section class="app-settings-section" aria-labelledby="versionSettingsTitle">
                 <h3 id="versionSettingsTitle">应用信息</h3>
                 <div class="app-version-row">
                     <span>版本</span>
-                    <strong id="appVersionInfo">1.0.15 · code 16</strong>
+                    <strong id="appVersionInfo">1.1.3 · code 20</strong>
                 </div>
             </section>
+        </div>
+    </dialog>
+
+    <dialog class="desktop-path-dialog" id="desktopPathDialog" aria-labelledby="desktopPathDialogTitle">
+        <div class="desktop-path-dialog-shell">
+            <h2 id="desktopPathDialogTitle">更改保存位置</h2>
+            <p id="desktopPathDialogDescription">请选择如何处理已有资产。</p>
+            <span class="desktop-path-target" id="desktopPathTarget"></span>
+            <p class="history-dialog-error" id="desktopPathError" role="alert" hidden></p>
+            <div class="desktop-path-actions">
+                <button id="desktopPathMigrateButton" type="button">迁移已有资产</button>
+                <button class="secondary-button" id="desktopPathFutureButton" type="button">仅供新资产使用</button>
+                <button class="secondary-button" id="desktopPathCancelButton" type="button">取消</button>
+            </div>
         </div>
     </dialog>
 
@@ -450,34 +551,176 @@
         </div>
     </dialog>
 
+    <dialog class="video-action-sheet-dialog" id="videoAssetMenuDialog" aria-labelledby="videoAssetMenuTitle">
+        <div class="video-action-sheet" id="videoAssetActionSheet">
+            <button class="video-sheet-drag-handle" id="videoAssetMenuCancelButton" type="button" aria-label="关闭视频操作"></button>
+            <header class="video-sheet-header">
+                <div>
+                    <span class="video-sheet-eyebrow">视频操作</span>
+                    <h2 id="videoAssetMenuTitle">视频</h2>
+                </div>
+                <button class="video-sheet-close" id="videoAssetMenuCloseButton" type="button" aria-label="关闭视频操作">×</button>
+            </header>
+            <div class="video-sheet-view" id="videoAssetMenuView">
+                <div class="video-sheet-list">
+                    <button id="videoAssetRenameButton" type="button"><span aria-hidden="true">✎</span><span>修改名称</span></button>
+                    <button id="videoAssetGroupButton" type="button"><span aria-hidden="true">▱</span><span>添加至分组</span></button>
+                    <button id="videoAssetExportEmp4Button" type="button"><span aria-hidden="true">⇩</span><span>导出 .emp4</span></button>
+                    <button id="videoAssetExportMp4Button" type="button"><span aria-hidden="true">⇩</span><span>导出原 MP4</span></button>
+                </div>
+                <button class="video-sheet-danger" id="videoAssetDeleteButton" type="button"><span aria-hidden="true">⌫</span><span>删除视频</span></button>
+            </div>
+            <form class="video-sheet-view" id="videoAssetRenameForm" hidden>
+                <label for="videoAssetRenameInput">视频名称</label>
+                <input id="videoAssetRenameInput" type="text" maxlength="120" autocomplete="off" required>
+                <div class="video-sheet-actions">
+                    <button class="secondary-button" id="videoAssetRenameCancelButton" type="button">返回</button>
+                    <button type="submit">保存名称</button>
+                </div>
+            </form>
+            <form class="video-sheet-view" id="videoAssetGroupForm" hidden>
+                <label for="videoAssetGroupSelect">选择分组</label>
+                <select id="videoAssetGroupSelect"></select>
+                <label for="videoAssetNewGroupInput">新建分组</label>
+                <div class="video-sheet-new-group">
+                    <input id="videoAssetNewGroupInput" type="text" maxlength="40" autocomplete="off" placeholder="输入分组名称">
+                    <button class="secondary-button" id="videoAssetCreateGroupButton" type="button">新建</button>
+                </div>
+                <p id="videoAssetGroupMessage" role="status" aria-live="polite"></p>
+                <div class="video-sheet-actions">
+                    <button class="secondary-button" id="videoAssetGroupCancelButton" type="button">返回</button>
+                    <button type="submit">保存分组</button>
+                </div>
+            </form>
+            <div class="video-sheet-view video-delete-confirm" id="videoAssetDeleteConfirm" hidden>
+                <strong>确认删除这个视频？</strong>
+                <p>只会删除当前视频及其分组关系，漫画和图片不会受到影响。</p>
+                <div class="video-sheet-actions">
+                    <button class="secondary-button" id="videoAssetDeleteCancelButton" type="button">取消</button>
+                    <button class="danger-button" id="videoAssetDeleteConfirmButton" type="button">确认删除</button>
+                </div>
+            </div>
+        </div>
+    </dialog>
+
+    <dialog class="video-player-dialog" id="videoPlayerDialog" aria-labelledby="videoPlayerTitle">
+        <div class="video-player-shell" id="videoPlayerShell" data-controls-visible="true" data-drawer-open="false">
+            <header class="video-player-header">
+                <button class="video-player-icon-button" id="closeVideoPlayerButton" type="button" aria-label="关闭视频播放">‹</button>
+                <strong class="video-player-title" id="videoPlayerTitle"><span id="videoPlayerTitleText">视频</span></strong>
+                <button class="video-player-episode-button" id="openVideoEpisodeDrawerButton" type="button" aria-controls="videoEpisodeDrawer" aria-expanded="false">选集</button>
+            </header>
+            <div class="video-player-stage" id="videoPlayerStage">
+                <video id="videoAssetPlayer" playsinline preload="metadata" crossorigin="anonymous"></video>
+                <button class="video-player-center-toggle" id="videoCenterPlayButton" type="button" aria-label="播放视频">▶</button>
+                <div class="video-player-control-layer" id="videoPlayerControlLayer">
+                    <label class="video-player-timeline" for="videoTimeline">
+                        <span id="videoElapsedTime">0:00</span>
+                        <input id="videoTimeline" type="range" min="0" max="1000" value="0" step="1" aria-label="播放进度">
+                        <span id="videoDurationTime">0:00</span>
+                    </label>
+                    <div class="video-player-control-row" aria-label="视频播放控制">
+                        <button class="video-player-icon-button" id="videoPlayPauseButton" type="button" aria-label="播放视频">▶</button>
+                        <button class="video-player-icon-button" id="videoSeekBackwardButton" type="button" aria-label="后退 10 秒">−10</button>
+                        <button class="video-player-icon-button" id="videoSeekForwardButton" type="button" aria-label="前进 10 秒">+10</button>
+                        <label class="video-player-rate" for="videoPlaybackRate"><span>倍速</span>
+                            <select id="videoPlaybackRate" aria-label="播放倍速">
+                                <option value="0.5">0.5×</option>
+                                <option value="0.75">0.75×</option>
+                                <option value="1" selected>1×</option>
+                                <option value="1.25">1.25×</option>
+                                <option value="1.5">1.5×</option>
+                                <option value="2">2×</option>
+                            </select>
+                        </label>
+                        <button class="video-player-icon-button" id="videoMuteButton" type="button" aria-label="静音">音量</button>
+                        <button class="video-player-icon-button" id="videoFullscreenButton" type="button" aria-label="横屏全屏">全屏</button>
+                        <button class="video-player-icon-button" id="videoMoreButton" type="button" aria-expanded="false" aria-controls="videoPlayerMoreMenu" aria-label="更多视频操作">•••</button>
+                    </div>
+                </div>
+            </div>
+            <button class="video-player-collection-row" id="openVideoEpisodeRowButton" type="button" aria-controls="videoEpisodeDrawer">
+                <span><strong>选集</strong><small id="videoCurrentGroupLabel">全部</small></span>
+                <span><output id="videoEpisodePosition">1 / 1</output>›</span>
+            </button>
+            <div class="video-player-more-menu" id="videoPlayerMoreMenu" hidden>
+                <button class="secondary-button" id="exportCurrentEmp4Button" type="button">导出 .emp4</button>
+                <button class="secondary-button" id="decryptCurrentVideoButton" type="button">导出原 MP4</button>
+            </div>
+            <p id="videoPlayerStatus" role="status" aria-live="polite"></p>
+            <div class="video-episode-backdrop" id="videoEpisodeBackdrop"></div>
+            <aside class="video-episode-drawer" id="videoEpisodeDrawer" aria-label="按分组选择视频" aria-hidden="true" inert>
+                <header>
+                    <div><span>本地视频</span><strong>选择视频</strong></div>
+                    <button class="video-player-icon-button" id="closeVideoEpisodeDrawerButton" type="button" aria-label="关闭选集">×</button>
+                </header>
+                <nav class="video-episode-groups" id="videoEpisodeGroups" aria-label="视频分组"></nav>
+                <div class="video-episode-list" id="videoEpisodeList" role="list"></div>
+            </aside>
+        </div>
+    </dialog>
+
+    <dialog class="video-export-progress-dialog" id="videoExportProgressDialog" aria-labelledby="videoExportProgressTitle">
+        <div class="video-export-progress-shell">
+            <h2 id="videoExportProgressTitle">正在导出 .emp4</h2>
+            <p id="videoExportProgressPhase" role="status" aria-live="polite">正在准备…</p>
+            <progress id="videoExportProgress" max="100" value="0" aria-label="EMP4 导出进度"></progress>
+            <div class="video-export-progress-meta">
+                <strong id="videoExportProgressPercent">0%</strong>
+                <span id="videoExportProgressBytes">0 B / 0 B</span>
+            </div>
+            <button class="secondary-button" id="cancelVideoExportButton" type="button">取消导出</button>
+        </div>
+    </dialog>
+
     <dialog
         class="comic-reader-dialog"
         id="comicReaderDialog"
         aria-labelledby="comicReaderTitle"
-        aria-describedby="comicReaderHint"
     >
         <div class="comic-reader-shell">
             <header class="comic-reader-header">
-                <div class="comic-reader-heading">
-                    <strong id="comicReaderTitle">连续阅读</strong>
-                    <span class="comic-reader-meta" id="comicReaderMeta"></span>
-                    <span class="comic-reader-hint" id="comicReaderHint">资产保存原始页面和封面；长图仅在导出时生成</span>
-                </div>
-                <div class="comic-reader-actions">
-                    <button class="reader-icon-button" id="collapseComicReaderHeaderButton" type="button" aria-label="收起阅读器顶部栏" aria-expanded="true" title="收起顶部栏">
-                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6.7 14.7 5.3-5.3 5.3 5.3-1.4 1.4-3.9-3.9-3.9 3.9-1.4-1.4Z"/></svg>
+                <button class="reader-icon-button" id="openReaderDrawerButton" type="button" aria-label="选择其他漫画" aria-controls="comicReaderDrawer" aria-expanded="false" title="选择其他漫画">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v2H4V6Zm0 5h16v2H4v-2Zm0 5h16v2H4v-2Z"/></svg>
+                </button>
+                <strong id="comicReaderTitle">漫画</strong>
+                <button class="reader-icon-button comic-reader-close" id="closeComicReaderButton" type="button" aria-label="关闭阅读" title="关闭阅读">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6.4 5 5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/></svg>
+                </button>
+            </header>
+            <div class="comic-reader-drawer-backdrop" id="comicReaderDrawerBackdrop"></div>
+            <aside class="comic-reader-drawer" id="comicReaderDrawer" aria-label="按分组选择漫画" aria-hidden="true" inert>
+                <header class="comic-reader-drawer-header">
+                    <strong>选择漫画</strong>
+                    <button class="reader-icon-button" id="resetReaderOrderButton" type="button" aria-label="恢复默认漫画排序" title="恢复默认漫画排序">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4h10v2H7V4Zm-3 5h16v2H4V9Zm3 5h10v2H7v-2Zm3 5h4v2h-4v-2Z"/></svg>
                     </button>
-                    <button class="reader-icon-button comic-reader-close" id="closeComicReaderButton" type="button" aria-label="关闭阅读" title="关闭阅读">
+                    <button class="reader-icon-button" id="toggleReaderDrawerExpandButton" type="button" aria-label="全屏展开漫画选择" aria-pressed="false" title="全屏展开">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v2H6v4H4V4Zm10 0h6v6h-2V6h-4V4ZM4 14h2v4h4v2H4v-6Zm14 0h2v6h-6v-2h4v-4Z"/></svg>
+                    </button>
+                    <button class="reader-icon-button" id="closeReaderDrawerButton" type="button" aria-label="关闭漫画选择" title="关闭漫画选择">
                         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6.4 5 5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/></svg>
                     </button>
-                </div>
-            </header>
-            <div class="comic-reader-collapsed-actions" id="comicReaderCollapsedActions">
-                <button class="reader-icon-button" id="expandComicReaderHeaderButton" type="button" aria-label="展开阅读器顶部栏" aria-expanded="false" title="展开顶部栏">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6.7 9.3 1.4-1.4 3.9 3.9 3.9-3.9 1.4 1.4-5.3 5.3-5.3-5.3Z"/></svg>
+                </header>
+                <button class="comic-reader-drawer-expand-rail" id="readerDrawerExpandRail" type="button" aria-label="向右滑动全屏展开漫画选择">
+                    <span class="comic-reader-drawer-expand-bar" aria-hidden="true"></span>
+                    <span id="readerDrawerExpandHint">向右滑动全屏展开</span>
                 </button>
-                <button class="reader-icon-button comic-reader-close" id="closeCollapsedComicReaderButton" type="button" aria-label="关闭阅读" title="关闭阅读">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6.4 5 5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/></svg>
+                <nav class="comic-reader-groups" id="comicReaderGroups" aria-label="漫画分组"></nav>
+                <div class="comic-reader-book-list" id="comicReaderBookList" role="list"></div>
+            </aside>
+            <div class="comic-reader-controls" id="comicReaderControls">
+                <button class="reader-page-button" id="previousReaderPageButton" type="button" aria-label="上一页">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.7 5.3 1.4 1.4-5.3 5.3 5.3 5.3-1.4 1.4L8 12l6.7-6.7Z"/></svg>
+                    <span>上一页</span>
+                </button>
+                <label class="comic-reader-progress" for="comicReaderProgress">
+                    <output id="comicReaderPageNumber" for="comicReaderProgress">1 / 1</output>
+                    <input id="comicReaderProgress" type="range" min="1" max="1" value="1" step="1" aria-label="阅读页码">
+                </label>
+                <button class="reader-page-button" id="nextReaderPageButton" type="button" aria-label="下一页">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.3 18.7-1.4-1.4 5.3-5.3-5.3-5.3 1.4-1.4L16 12l-6.7 6.7Z"/></svg>
+                    <span>下一页</span>
                 </button>
             </div>
             <p class="comic-reader-notice" id="comicReaderNotice" role="status" aria-live="polite" hidden></p>
@@ -487,15 +730,22 @@
 
     <script src="js/core.js" defer></script>
     <script src="js/comic-core.js" defer></script>
+    <script src="js/video-core.js" defer></script>
     <script src="js/history-core.js" defer></script>
+    <script src="js/reader-core.js" defer></script>
     <script src="js/web-import-core.js" defer></script>
     <script src="js/android-bridge.js" defer></script>
+    <script src="js/desktop-storage.js" defer></script>
     <script src="js/settings.js" defer></script>
+    <script src="js/asset-storage.js" defer></script>
+    <script src="js/asset-center.js" defer></script>
     <script src="js/image-assets.js" defer></script>
+    <script src="js/video-assets.js" defer></script>
     <script src="js/app.js" defer></script>
     <script src="js/comic-worker.js" defer></script>
     <script src="js/comic-app.js" defer></script>
     <script src="js/image-assets-app.js" defer></script>
+    <script src="js/video-app.js" defer></script>
     <script src="js/pwa.js" defer></script>
 </body>
 </html>

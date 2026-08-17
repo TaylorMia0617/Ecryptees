@@ -1,0 +1,56 @@
+{
+    "$schema": "https://schema.tauri.app/config/2",
+    "productName": "Ecryptees",
+    "version": "1.1.4",
+    "identifier": "com.ecryptees.desktop",
+    "build": {
+        "beforeDevCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-desktop.ps1",
+        "beforeBuildCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-desktop.ps1",
+        "frontendDist": "../desktop-dist"
+    },
+    "app": {
+        "withGlobalTauri": true,
+        "windows": [
+            {
+                "label": "main",
+                "title": "Ecryptees",
+                "width": 1280,
+                "height": 820,
+                "minWidth": 900,
+                "minHeight": 620,
+                "resizable": true,
+                "fullscreen": false,
+                "center": true
+            }
+        ],
+        "security": {
+            "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost blob: data:; media-src 'self' asset: http://asset.localhost blob:; worker-src 'self' blob:; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'self'",
+            "assetProtocol": {
+                "enable": true,
+                "scope": []
+            }
+        }
+    },
+    "bundle": {
+        "active": true,
+        "targets": ["nsis"],
+        "category": "Utility",
+        "shortDescription": "本地加密与媒体资产工具",
+        "longDescription": "完全离线处理文本、图片、漫画与原始 MP4 视频资产。",
+        "icon": [
+            "icons/32x32.png",
+            "icons/128x128.png",
+            "icons/128x128@2x.png",
+            "icons/icon.ico"
+        ],
+        "windows": {
+            "webviewInstallMode": {
+                "type": "offlineInstaller"
+            },
+            "nsis": {
+                "installMode": "currentUser",
+                "languages": ["SimpChinese"]
+            }
+        }
+    }
+}

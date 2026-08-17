@@ -5,6 +5,7 @@ import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ComponentName;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Bitmap;
@@ -20,6 +21,8 @@ import android.provider.OpenableColumns;
 import android.util.Base64;
 import android.util.Size;
 import android.view.ViewGroup;
+import android.view.View;
+import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.CookieManager;
 import android.webkit.MimeTypeMap;
@@ -49,6 +52,7 @@ import org.json.JSONArray;
 
 import java.io.File;
 import java.io.ByteArrayOutputStream;
+import java.io.ByteArrayInputStream;
 import java.io.FileOutputStream;
 import java.io.FileInputStream;
 import java.io.BufferedInputStream;
@@ -56,9 +60,15 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
+import java.io.EOFException;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.security.GeneralSecurityException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Locale;
@@ -69,6 +79,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.Semaphore;
 
+import javax.crypto.Cipher;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
+
 public final class MainActivity extends ComponentActivity {
     private static final String APP_URL = "https://appassets.androidplatform.net/assets/index.html";
     private static final int REQUEST_OPEN_FILE = 1201;
@@ -76,12 +90,18 @@ public final class MainActivity extends ComponentActivity {
     private static final long MAX_NATIVE_IMAGE_PIXELS = 40_000_000L;
     private static final long MAX_NATIVE_INPUT_BYTES = 500L * 1024L * 1024L;
     private static final long MAX_INCOMING_ARCHIVE_BYTES = 512L * 1024L * 1024L;
+    private static final long MAX_INCOMING_VIDEO_BYTES = 64L * 1024L * 1024L * 1024L + 4L * 1024L * 1024L;
     private static final int MAX_NATIVE_CHUNK_BYTES = 1024 * 1024;
     private static final String HEIC_CACHE_PREFIX = "ecryptees-heic-";
     private static final String REMOTE_CACHE_PREFIX = "ecryptees-fetch-";
     private static final String RENDER_CACHE_PREFIX = "ecryptees-render-";
     private static final long MAX_REMOTE_HTML_BYTES = 5L * 1024L * 1024L;
     private static final String ECOMIC_MIME_TYPE = "application/vnd.ecryptees.ecomic";
+    private static final String EMP4_MIME_TYPE = "application/vnd.ecryptees.emp4";
+    private static final String EMP4_CACHE_PREFIX = "ecryptees-emp4-";
+    private static final int EMP4_HEADER_SIZE = 160;
+    private static final int EMP4_AUTH_TAG_SIZE = 16;
+    private static final byte[] EMP4_MAGIC = new byte[]{0x45, 0x43, 0x52, 0x56, 0x49, 0x44, 0x31, 0x00};
 
     private FrameLayout rootView;
     private WebView webView;
@@ -98,6 +118,9 @@ public final class MainActivity extends ComponentActivity {
     private InputStream incomingDocumentStream;
     private long incomingDocumentBytesRead;
     private boolean webAppReady;
+    private View fullscreenView;
+    private WebChromeClient.CustomViewCallback fullscreenCallback;
+    private int orientationBeforeFullscreen = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -107,6 +130,7 @@ public final class MainActivity extends ComponentActivity {
         cleanupStaleHeicFiles();
         cleanupStaleRemoteFiles();
         cleanupStaleRenderedFiles();
+        cleanupStaleEmp4Files();
         rootView = new FrameLayout(this);
         setContentView(rootView);
         registerImagePickers();
@@ -165,6 +189,10 @@ public final class MainActivity extends ComponentActivity {
                     @NonNull WebView view,
                     @NonNull WebResourceRequest request
             ) {
+                WebResourceResponse videoResponse = fileBridge.interceptEmp4Request(request);
+                if (videoResponse != null) {
+                    return videoResponse;
+                }
                 return assetLoader.shouldInterceptRequest(request.getUrl());
             }
 
@@ -199,6 +227,7 @@ public final class MainActivity extends ComponentActivity {
                 fileBridge.abortIncomingDocument(null);
                 fileBridge.abortCurrentDownload(false);
                 fileBridge.abortAllHeicDecodes();
+                fileBridge.releaseAllEmp4Playbacks();
                 remoteNetworkBridge.abortAll();
                 rootView.removeView(view);
                 view.destroy();
@@ -208,6 +237,16 @@ public final class MainActivity extends ComponentActivity {
             }
         });
         webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public void onShowCustomView(View view, CustomViewCallback callback) {
+                showFullscreenView(view, callback);
+            }
+
+            @Override
+            public void onHideCustomView() {
+                hideFullscreenView();
+            }
+
             @Override
             public boolean onShowFileChooser(
                     WebView view,
@@ -247,6 +286,39 @@ public final class MainActivity extends ComponentActivity {
         if (savedInstanceState == null || webView.restoreState(savedInstanceState) == null) {
             webView.loadUrl(APP_URL);
         }
+    }
+
+    private void showFullscreenView(View view, WebChromeClient.CustomViewCallback callback) {
+        if (fullscreenView != null) {
+            callback.onCustomViewHidden();
+            return;
+        }
+        fullscreenView = view;
+        fullscreenCallback = callback;
+        orientationBeforeFullscreen = getRequestedOrientation();
+        rootView.addView(view, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        view.setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+        );
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+    }
+
+    private void hideFullscreenView() {
+        if (fullscreenView == null) return;
+        rootView.removeView(fullscreenView);
+        fullscreenView = null;
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        setRequestedOrientation(orientationBeforeFullscreen);
+        orientationBeforeFullscreen = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
+        WebChromeClient.CustomViewCallback callback = fullscreenCallback;
+        fullscreenCallback = null;
+        if (callback != null) callback.onCustomViewHidden();
     }
 
     private void registerImagePickers() {
@@ -406,13 +478,13 @@ public final class MainActivity extends ComponentActivity {
         ClipData clipData = intent.getClipData();
         if (Intent.ACTION_SEND.equals(intent.getAction())
                 && clipData != null && clipData.getItemCount() > 1) {
-            Toast.makeText(this, "一次只能打开一个 .ecomic 文件", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "一次只能打开一个 .ecomic 或 .emp4 文件", Toast.LENGTH_LONG).show();
             return;
         }
         Uri uri = getIncomingDocumentUri(intent);
         if (uri == null || !("content".equalsIgnoreCase(uri.getScheme())
                 || "file".equalsIgnoreCase(uri.getScheme()))) {
-            Toast.makeText(this, "只能打开 .ecomic 文件", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "只能打开 .ecomic 或 .emp4 文件", Toast.LENGTH_LONG).show();
             return;
         }
         String displayName = null;
@@ -441,8 +513,10 @@ public final class MainActivity extends ComponentActivity {
             displayName = Uri.decode(uri.getLastPathSegment());
         }
         displayName = displayName == null ? "" : displayName.trim();
-        if (!displayName.toLowerCase(Locale.ROOT).endsWith(".ecomic")) {
-            Toast.makeText(this, "只能打开 .ecomic 文件", Toast.LENGTH_LONG).show();
+        String lowerName = displayName.toLowerCase(Locale.ROOT);
+        boolean videoArchive = lowerName.endsWith(".emp4");
+        if (!lowerName.endsWith(".ecomic") && !videoArchive) {
+            Toast.makeText(this, "只能打开 .ecomic 或 .emp4 文件", Toast.LENGTH_LONG).show();
             return;
         }
         try (ParcelFileDescriptor descriptor = getContentResolver().openFileDescriptor(uri, "r")) {
@@ -453,11 +527,12 @@ public final class MainActivity extends ComponentActivity {
                 size = descriptor.getStatSize();
             }
         } catch (IOException | SecurityException error) {
-            Toast.makeText(this, "无法读取这个 .ecomic 文件", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "无法读取这个加密归档", Toast.LENGTH_LONG).show();
             return;
         }
-        if (size == 0 || size > MAX_INCOMING_ARCHIVE_BYTES) {
-            Toast.makeText(this, "该 .ecomic 文件为空或超过大小限制", Toast.LENGTH_LONG).show();
+        long maximumBytes = videoArchive ? MAX_INCOMING_VIDEO_BYTES : MAX_INCOMING_ARCHIVE_BYTES;
+        if (size == 0 || size > maximumBytes) {
+            Toast.makeText(this, "该加密归档为空或超过大小限制", Toast.LENGTH_LONG).show();
             return;
         }
         synchronized (fileBridge) {
@@ -466,7 +541,8 @@ public final class MainActivity extends ComponentActivity {
                     UUID.randomUUID().toString(),
                     uri,
                     displayName,
-                    size
+                    size,
+                    maximumBytes
             );
         }
         notifyIncomingDocument();
@@ -490,6 +566,10 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void handleBackNavigation(OnBackPressedCallback callback) {
+        if (fullscreenView != null) {
+            hideFullscreenView();
+            return;
+        }
         if (webView == null) {
             callback.setEnabled(false);
             getOnBackPressedDispatcher().onBackPressed();
@@ -518,6 +598,8 @@ public final class MainActivity extends ComponentActivity {
     @Override
     protected void onDestroy() {
         webAppReady = false;
+        hideFullscreenView();
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (fileChooserCallback != null) {
             fileChooserCallback.onReceiveValue(null);
             fileChooserCallback = null;
@@ -525,6 +607,7 @@ public final class MainActivity extends ComponentActivity {
         fileBridge.abortIncomingDocument(null);
         fileBridge.abortCurrentDownload(false);
         fileBridge.shutdownHeicDecodes();
+        fileBridge.releaseAllEmp4Playbacks();
         remoteNetworkBridge.shutdown();
         if (webView != null) {
             rootView.removeView(webView);
@@ -539,6 +622,9 @@ public final class MainActivity extends ComponentActivity {
     private static String safeMimeType(String mimeType, String fileName) {
         if (fileName != null && fileName.toLowerCase(Locale.ROOT).endsWith(".ecomic")) {
             return ECOMIC_MIME_TYPE;
+        }
+        if (fileName != null && fileName.toLowerCase(Locale.ROOT).endsWith(".emp4")) {
+            return EMP4_MIME_TYPE;
         }
         if (mimeType != null && mimeType.contains("/")) {
             return mimeType;
@@ -579,6 +665,14 @@ public final class MainActivity extends ComponentActivity {
             if (file.isFile()) {
                 file.delete();
             }
+        }
+    }
+
+    private void cleanupStaleEmp4Files() {
+        File[] files = getCacheDir().listFiles((directory, name) -> name.startsWith(EMP4_CACHE_PREFIX));
+        if (files == null) return;
+        for (File file : files) {
+            if (file.isFile()) file.delete();
         }
     }
 
@@ -1417,8 +1511,185 @@ public final class MainActivity extends ComponentActivity {
 
     public final class FileBridge {
         private final Map<String, HeicTask> heicTasks = new ConcurrentHashMap<>();
+        private final Map<String, Emp4PlaybackSession> emp4Playbacks = new ConcurrentHashMap<>();
         private final ExecutorService heicExecutor = Executors.newFixedThreadPool(2);
         private final Semaphore fullSizeDecodeSlot = new Semaphore(1, true);
+
+        @JavascriptInterface
+        public void setVideoPlaybackActive(boolean active) {
+            runOnUiThread(() -> {
+                if (active) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            });
+        }
+
+        @JavascriptInterface
+        public synchronized String beginEmp4Playback(String ignoredName, long expectedSize, String encodedKey) {
+            if (expectedSize <= EMP4_HEADER_SIZE || expectedSize > MAX_INCOMING_VIDEO_BYTES + 4L * 1024L * 1024L
+                    || emp4Playbacks.size() >= 2) {
+                return "";
+            }
+            byte[] key;
+            try {
+                key = Base64.decode(encodedKey, Base64.NO_WRAP);
+            } catch (IllegalArgumentException error) {
+                return "";
+            }
+            if (key.length != 32) {
+                Arrays.fill(key, (byte) 0);
+                return "";
+            }
+            String token = UUID.randomUUID().toString();
+            File file = new File(getCacheDir(), EMP4_CACHE_PREFIX + token + ".emp4");
+            try {
+                Emp4PlaybackSession session = new Emp4PlaybackSession(
+                        token, file, expectedSize, key, new FileOutputStream(file, false)
+                );
+                emp4Playbacks.put(token, session);
+                return token;
+            } catch (IOException | SecurityException error) {
+                Arrays.fill(key, (byte) 0);
+                file.delete();
+                return "";
+            }
+        }
+
+        @JavascriptInterface
+        public boolean writeEmp4PlaybackChunk(String token, String encodedData) {
+            Emp4PlaybackSession session = emp4Playbacks.get(token);
+            if (session == null) return false;
+            synchronized (session) {
+                if (session.ready || session.output == null) return false;
+                try {
+                    byte[] bytes = Base64.decode(encodedData, Base64.NO_WRAP);
+                    if (bytes.length > MAX_NATIVE_CHUNK_BYTES
+                            || session.written + bytes.length > session.expectedSize) {
+                        releaseEmp4Playback(token);
+                        return false;
+                    }
+                    session.output.write(bytes);
+                    session.written += bytes.length;
+                    return true;
+                } catch (IOException | IllegalArgumentException error) {
+                    releaseEmp4Playback(token);
+                    return false;
+                }
+            }
+        }
+
+        @JavascriptInterface
+        public boolean finishEmp4Playback(String token) {
+            Emp4PlaybackSession session = emp4Playbacks.get(token);
+            if (session == null) return false;
+            synchronized (session) {
+                try {
+                    if (session.output == null || session.written != session.expectedSize) {
+                        throw new IOException("Incomplete encrypted video");
+                    }
+                    session.output.flush();
+                    session.output.close();
+                    session.output = null;
+                    session.parseAndValidate();
+                    session.ready = true;
+                    return true;
+                } catch (IOException | RuntimeException error) {
+                    releaseEmp4Playback(token);
+                    return false;
+                }
+            }
+        }
+
+        @JavascriptInterface
+        public void releaseEmp4Playback(String token) {
+            Emp4PlaybackSession session = emp4Playbacks.remove(token);
+            if (session != null) session.destroy();
+        }
+
+        private void releaseAllEmp4Playbacks() {
+            for (String token : new ArrayList<>(emp4Playbacks.keySet())) releaseEmp4Playback(token);
+        }
+
+        @Nullable
+        private WebResourceResponse interceptEmp4Request(@NonNull WebResourceRequest request) {
+            Uri uri = request.getUrl();
+            if (!"appassets.androidplatform.net".equalsIgnoreCase(uri.getHost())) return null;
+            List<String> segments = uri.getPathSegments();
+            if (segments.size() != 3 || !"emp4".equals(segments.get(0))
+                    || !"video.mp4".equals(segments.get(2))) return null;
+            Emp4PlaybackSession session = emp4Playbacks.get(segments.get(1));
+            if (session == null || !session.ready) return errorVideoResponse(404, "Not Found", 0);
+            String method = request.getMethod();
+            if (!"GET".equalsIgnoreCase(method) && !"HEAD".equalsIgnoreCase(method)) {
+                return errorVideoResponse(405, "Method Not Allowed", session.plainSize);
+            }
+            String rangeValue = null;
+            for (Map.Entry<String, String> header : request.getRequestHeaders().entrySet()) {
+                if ("range".equalsIgnoreCase(header.getKey())) {
+                    rangeValue = header.getValue();
+                    break;
+                }
+            }
+            long[] range = parseEmp4Range(rangeValue, session.plainSize);
+            if (range == null) return errorVideoResponse(416, "Range Not Satisfiable", session.plainSize);
+            boolean partial = rangeValue != null && !rangeValue.trim().isEmpty();
+            long length = range[1] - range[0] + 1;
+            Map<String, String> headers = new HashMap<>();
+            headers.put("Accept-Ranges", "bytes");
+            headers.put("Cache-Control", "no-store, private");
+            headers.put("Content-Length", Long.toString(length));
+            headers.put("X-Content-Type-Options", "nosniff");
+            if (partial) {
+                headers.put("Content-Range", "bytes " + range[0] + "-" + range[1] + "/" + session.plainSize);
+            }
+            InputStream body;
+            try {
+                body = "HEAD".equalsIgnoreCase(method)
+                        ? new ByteArrayInputStream(new byte[0])
+                        : new Emp4RangeInputStream(session, range[0], range[1]);
+            } catch (IOException error) {
+                return errorVideoResponse(500, "Read Error", session.plainSize);
+            }
+            return new WebResourceResponse(
+                    "video/mp4", null, partial ? 206 : 200,
+                    partial ? "Partial Content" : "OK", headers, body
+            );
+        }
+
+        private WebResourceResponse errorVideoResponse(int status, String reason, long totalSize) {
+            Map<String, String> headers = new HashMap<>();
+            headers.put("Cache-Control", "no-store");
+            if (status == 416) headers.put("Content-Range", "bytes */" + totalSize);
+            return new WebResourceResponse(
+                    "text/plain", "UTF-8", status, reason, headers,
+                    new ByteArrayInputStream(new byte[0])
+            );
+        }
+
+        @Nullable
+        private long[] parseEmp4Range(@Nullable String value, long totalSize) {
+            if (value == null || value.trim().isEmpty()) return new long[]{0, totalSize - 1};
+            String text = value.trim();
+            if (!text.toLowerCase(Locale.ROOT).startsWith("bytes=") || text.contains(",")) return null;
+            String[] values = text.substring(6).split("-", -1);
+            if (values.length != 2 || (values[0].isEmpty() && values[1].isEmpty())) return null;
+            try {
+                long start;
+                long end;
+                if (values[0].isEmpty()) {
+                    long suffix = Long.parseLong(values[1]);
+                    if (suffix <= 0) return null;
+                    start = Math.max(0, totalSize - suffix);
+                    end = totalSize - 1;
+                } else {
+                    start = Long.parseLong(values[0]);
+                    end = values[1].isEmpty() ? totalSize - 1 : Long.parseLong(values[1]);
+                }
+                if (start < 0 || start >= totalSize || end < start) return null;
+                return new long[]{start, Math.min(end, totalSize - 1)};
+            } catch (NumberFormatException error) {
+                return null;
+            }
+        }
 
         @JavascriptInterface
         public String getAppVersionInfo() {
@@ -1491,7 +1762,7 @@ public final class MainActivity extends ComponentActivity {
                 abortIncomingDocument(document.token);
                 runOnUiThread(() -> Toast.makeText(
                         MainActivity.this,
-                        "无法读取这个 .ecomic 文件",
+                        "无法读取这个加密归档",
                         Toast.LENGTH_LONG
                 ).show());
                 return "";
@@ -1517,7 +1788,7 @@ public final class MainActivity extends ComponentActivity {
                     return "";
                 }
                 incomingDocumentBytesRead += read;
-                if (incomingDocumentBytesRead > MAX_INCOMING_ARCHIVE_BYTES
+                if (incomingDocumentBytesRead > document.maximumBytes
                         || (document.size >= 0 && incomingDocumentBytesRead > document.size)) {
                     abortIncomingDocument(token);
                     return null;
@@ -1882,6 +2153,198 @@ public final class MainActivity extends ComponentActivity {
             }
         }
 
+        private final class Emp4PlaybackSession {
+            private final String token;
+            private final File file;
+            private final long expectedSize;
+            private final byte[] key;
+            private FileOutputStream output;
+            private long written;
+            private boolean ready;
+            private byte[] header;
+            private byte[] noncePrefix;
+            private int chunkSize;
+            private int chunkCount;
+            private long plainSize;
+            private long dataOffset;
+
+            private Emp4PlaybackSession(
+                    String token,
+                    File file,
+                    long expectedSize,
+                    byte[] key,
+                    FileOutputStream output
+            ) {
+                this.token = token;
+                this.file = file;
+                this.expectedSize = expectedSize;
+                this.key = key;
+                this.output = output;
+            }
+
+            private void parseAndValidate() throws IOException {
+                header = new byte[EMP4_HEADER_SIZE];
+                try (RandomAccessFile input = new RandomAccessFile(file, "r")) {
+                    input.readFully(header);
+                }
+                if (!Arrays.equals(Arrays.copyOfRange(header, 0, EMP4_MAGIC.length), EMP4_MAGIC)) {
+                    throw new IOException("Invalid EMP4 magic");
+                }
+                ByteBuffer view = ByteBuffer.wrap(header).order(ByteOrder.BIG_ENDIAN);
+                if ((header[8] & 0xFF) != 1 || (header[9] & 0xFF) != 0
+                        || (header[10] & 0xFF) != 1 || (header[11] & 0xFF) != 1
+                        || view.getInt(12) != 0 || view.getInt(16) != EMP4_HEADER_SIZE
+                        || view.getInt(40) != 0
+                        || !Arrays.equals(Arrays.copyOfRange(header, 44, 48), new byte[4])
+                        || !Arrays.equals(Arrays.copyOfRange(header, 76, 80), new byte[4])
+                        || !Arrays.equals(Arrays.copyOfRange(header, 144, 160), new byte[16])) {
+                    throw new IOException("Unsupported EMP4 header");
+                }
+                chunkSize = view.getInt(20);
+                int manifestLength = view.getInt(24);
+                chunkCount = view.getInt(28);
+                plainSize = view.getLong(32);
+                if (chunkSize != 1024 * 1024 || manifestLength <= EMP4_AUTH_TAG_SIZE
+                        || chunkCount <= 0 || plainSize <= 0 || plainSize > MAX_INCOMING_VIDEO_BYTES
+                        || chunkCount != (plainSize + chunkSize - 1) / chunkSize) {
+                    throw new IOException("Invalid EMP4 layout");
+                }
+                dataOffset = EMP4_HEADER_SIZE + (long) manifestLength;
+                long expectedArchiveSize = dataOffset + plainSize + (long) chunkCount * EMP4_AUTH_TAG_SIZE;
+                if (file.length() != expectedSize || file.length() != expectedArchiveSize) {
+                    throw new IOException("Incomplete EMP4 archive");
+                }
+                noncePrefix = Arrays.copyOfRange(header, 80, 88);
+            }
+
+            private void destroy() {
+                synchronized (this) {
+                    if (output != null) {
+                        try {
+                            output.close();
+                        } catch (IOException ignored) {
+                            // Best-effort cleanup.
+                        }
+                        output = null;
+                    }
+                    Arrays.fill(key, (byte) 0);
+                    if (header != null) Arrays.fill(header, (byte) 0);
+                    file.delete();
+                    ready = false;
+                }
+            }
+        }
+
+        private final class Emp4RangeInputStream extends InputStream {
+            private final Emp4PlaybackSession session;
+            private final long end;
+            private final RandomAccessFile source;
+            private long position;
+            private int bufferedChunk = -1;
+            private byte[] buffer;
+            private boolean closed;
+
+            private Emp4RangeInputStream(Emp4PlaybackSession session, long start, long end) throws IOException {
+                this.session = session;
+                this.position = start;
+                this.end = end;
+                this.source = new RandomAccessFile(session.file, "r");
+            }
+
+            @Override
+            public int read() throws IOException {
+                byte[] value = new byte[1];
+                return read(value, 0, 1) < 0 ? -1 : value[0] & 0xFF;
+            }
+
+            @Override
+            public int read(@NonNull byte[] target, int offset, int length) throws IOException {
+                if (closed) throw new IOException("Video stream is closed");
+                if (offset < 0 || length < 0 || offset + length > target.length) {
+                    throw new IndexOutOfBoundsException();
+                }
+                if (length == 0) return 0;
+                if (position > end) return -1;
+                int total = 0;
+                while (length > 0 && position <= end) {
+                    int chunkIndex = (int) (position / session.chunkSize);
+                    ensureChunk(chunkIndex);
+                    int withinChunk = (int) (position - (long) chunkIndex * session.chunkSize);
+                    int available = Math.min(buffer.length - withinChunk, length);
+                    available = (int) Math.min(available, end - position + 1);
+                    System.arraycopy(buffer, withinChunk, target, offset, available);
+                    offset += available;
+                    length -= available;
+                    total += available;
+                    position += available;
+                }
+                return total == 0 ? -1 : total;
+            }
+
+            @Override
+            public long skip(long byteCount) {
+                long skipped = Math.max(0, Math.min(byteCount, end - position + 1));
+                position += skipped;
+                return skipped;
+            }
+
+            @Override
+            public int available() {
+                return (int) Math.min(Integer.MAX_VALUE, Math.max(0, end - position + 1));
+            }
+
+            private void ensureChunk(int chunkIndex) throws IOException {
+                if (bufferedChunk == chunkIndex) return;
+                int plainLength = (int) Math.min(
+                        session.chunkSize,
+                        session.plainSize - (long) chunkIndex * session.chunkSize
+                );
+                byte[] encrypted = new byte[plainLength + EMP4_AUTH_TAG_SIZE];
+                long cipherOffset = session.dataOffset
+                        + (long) chunkIndex * (session.chunkSize + EMP4_AUTH_TAG_SIZE);
+                source.seek(cipherOffset);
+                try {
+                    source.readFully(encrypted);
+                } catch (EOFException error) {
+                    throw new IOException("Encrypted video chunk is incomplete", error);
+                }
+                byte[] nonce = new byte[12];
+                System.arraycopy(session.noncePrefix, 0, nonce, 0, session.noncePrefix.length);
+                ByteBuffer.wrap(nonce).order(ByteOrder.BIG_ENDIAN).putInt(8, chunkIndex + 1);
+                byte[] aad = new byte[EMP4_HEADER_SIZE + 8];
+                System.arraycopy(session.header, 0, aad, 0, EMP4_HEADER_SIZE);
+                ByteBuffer aadView = ByteBuffer.wrap(aad).order(ByteOrder.BIG_ENDIAN);
+                aadView.putInt(EMP4_HEADER_SIZE, chunkIndex + 1);
+                aadView.putInt(EMP4_HEADER_SIZE + 4, plainLength);
+                try {
+                    Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+                    cipher.init(
+                            Cipher.DECRYPT_MODE,
+                            new SecretKeySpec(session.key, "AES"),
+                            new GCMParameterSpec(128, nonce)
+                    );
+                    cipher.updateAAD(aad);
+                    buffer = cipher.doFinal(encrypted);
+                    if (buffer.length != plainLength) throw new IOException("Invalid decrypted chunk length");
+                    bufferedChunk = chunkIndex;
+                } catch (GeneralSecurityException error) {
+                    throw new IOException("Encrypted video authentication failed", error);
+                } finally {
+                    Arrays.fill(encrypted, (byte) 0);
+                    Arrays.fill(nonce, (byte) 0);
+                    Arrays.fill(aad, (byte) 0);
+                }
+            }
+
+            @Override
+            public void close() throws IOException {
+                if (closed) return;
+                closed = true;
+                if (buffer != null) Arrays.fill(buffer, (byte) 0);
+                source.close();
+            }
+        }
+
         private void cleanupHeicTask(HeicTask task) {
             synchronized (task) {
                 task.cancelled = true;
@@ -1964,13 +2427,15 @@ public final class MainActivity extends ComponentActivity {
         private final Uri uri;
         private final String name;
         private final long size;
+        private final long maximumBytes;
         private boolean claimed;
 
-        private PendingIncomingDocument(String token, Uri uri, String name, long size) {
+        private PendingIncomingDocument(String token, Uri uri, String name, long size, long maximumBytes) {
             this.token = token;
             this.uri = uri;
             this.name = name;
             this.size = size;
+            this.maximumBytes = maximumBytes;
         }
     }
 }

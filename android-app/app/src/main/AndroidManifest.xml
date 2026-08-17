@@ -22,6 +22,7 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="application/vnd.ecryptees.ecomic" />
+                <data android:mimeType="application/vnd.ecryptees.emp4" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
@@ -52,6 +53,14 @@
                 <data
                     android:host="*"
                     android:pathPattern=".*\\.ECOMIC"
+                    android:scheme="content" />
+                <data
+                    android:host="*"
+                    android:pathPattern=".*\\.emp4"
+                    android:scheme="content" />
+                <data
+                    android:host="*"
+                    android:pathPattern=".*\\.EMP4"
                     android:scheme="content" />
             </intent-filter>
         </activity>

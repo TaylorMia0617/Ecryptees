@@ -5,8 +5,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 require('../js/core.js');
+require('../js/reader-core.js');
 
 const { codec, config } = globalThis.Ecryptees.core;
+const readerNavigation = globalThis.Ecryptees.reader;
 const repositoryRoot = path.resolve(__dirname, '..');
 const pngBytes = Uint8Array.from([
     0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
@@ -141,6 +143,60 @@ test('lossless image assets preserve original bytes and remain separate from com
     assert.match(imageAssetsApp, /'导出图片', 'exportImage'/);
 });
 
+test('reader navigation keeps the selected group and asset sort order', () => {
+    const books = [
+        { bookId: 'a', title: '乙', updatedAt: 20, lastOpenedAt: 40 },
+        { bookId: 'b', title: '甲', updatedAt: 30, lastOpenedAt: 10 },
+        { bookId: 'c', title: '丙', updatedAt: 10, lastOpenedAt: 0 }
+    ];
+    const memberships = new Map([['a', 'favorites'], ['b', 'favorites']]);
+
+    assert.deepEqual(
+        readerNavigation.getBookSequence(books, memberships, 'favorites', 'title').map(book => book.bookId),
+        ['b', 'a']
+    );
+    assert.deepEqual(
+        readerNavigation.getBookSequence(books, memberships, 'ungrouped', 'recent').map(book => book.bookId),
+        ['c']
+    );
+    assert.equal(readerNavigation.getAdjacentBookId(books, 'b', 1), 'c');
+    assert.equal(readerNavigation.getAdjacentBookId(books, 'a', -1), '');
+});
+
+test('reader swipe requires a deliberate horizontal gesture', () => {
+    assert.equal(readerNavigation.getSwipeDirection(-140, 20, 390), 1);
+    assert.equal(readerNavigation.getSwipeDirection(140, 20, 390), -1);
+    assert.equal(readerNavigation.getSwipeDirection(100, 4, 390), 0);
+    assert.equal(readerNavigation.getSwipeDirection(180, 100, 390), 0);
+    assert.equal(readerNavigation.clampPageIndex(9, 5), 4);
+    assert.equal(readerNavigation.getDrawerExpandDirection(90, 8), 1);
+    assert.equal(readerNavigation.getDrawerExpandDirection(-90, 8), -1);
+    assert.equal(readerNavigation.getDrawerExpandDirection(40, 2), 0);
+    assert.equal(readerNavigation.getDrawerExpandDirection(90, 80), 0);
+});
+
+test('reader natural and manual ordering stays stable across reading timestamps', () => {
+    const books = [
+        { bookId: 'zh10', title: '第十话', lastOpenedAt: 900 },
+        { bookId: 'zh2', title: '第二话', lastOpenedAt: 1 },
+        { bookId: 'arabic10', title: 'Chapter 10', lastOpenedAt: 800 },
+        { bookId: 'arabic2', title: 'Chapter 2', lastOpenedAt: 2 },
+        { bookId: 'en10', title: 'Episode ten', lastOpenedAt: 700 },
+        { bookId: 'en2', title: 'Episode two', lastOpenedAt: 3 }
+    ];
+    const natural = readerNavigation.getBookSequence(books, new Map(), 'all', 'natural');
+    assert.deepEqual(natural.map(book => book.bookId), ['zh2', 'zh10', 'arabic2', 'arabic10', 'en2', 'en10']);
+    books.find(book => book.bookId === 'zh2').lastOpenedAt = 999999;
+    assert.deepEqual(
+        readerNavigation.getBookSequence(books, new Map(), 'all', 'natural').map(book => book.bookId),
+        natural.map(book => book.bookId)
+    );
+    assert.deepEqual(
+        readerNavigation.applyManualOrder(books, ['zh10', 'arabic2']).map(book => book.bookId),
+        ['zh10', 'arabic2', 'zh2', 'arabic10', 'en2', 'en10']
+    );
+});
+
 test('static entry point references ordered external files without inline handlers', () => {
     const index = fs.readFileSync(path.join(repositoryRoot, 'index.html'), 'utf8');
     const styles = fs.readFileSync(path.join(repositoryRoot, 'css', 'styles.css'), 'utf8');
@@ -149,6 +205,7 @@ test('static entry point references ordered external files without inline handle
     const corePosition = index.indexOf('src="js/core.js"');
     const comicCorePosition = index.indexOf('src="js/comic-core.js"');
     const historyCorePosition = index.indexOf('src="js/history-core.js"');
+    const readerCorePosition = index.indexOf('src="js/reader-core.js"');
     const webImportCorePosition = index.indexOf('src="js/web-import-core.js"');
     const settingsPosition = index.indexOf('src="js/settings.js"');
     const imageAssetsPosition = index.indexOf('src="js/image-assets.js"');
@@ -163,7 +220,8 @@ test('static entry point references ordered external files without inline handle
         corePosition >= 0
             && comicCorePosition > corePosition
             && historyCorePosition > comicCorePosition
-            && webImportCorePosition > historyCorePosition
+            && readerCorePosition > historyCorePosition
+            && webImportCorePosition > readerCorePosition
             && androidBridgePosition > webImportCorePosition
             && settingsPosition > androidBridgePosition
             && imageAssetsPosition > settingsPosition
@@ -178,6 +236,7 @@ test('static entry point references ordered external files without inline handle
     assert.match(index, /<script src="js\/core\.js" defer><\/script>/);
     assert.match(index, /<script src="js\/comic-core\.js" defer><\/script>/);
     assert.match(index, /<script src="js\/history-core\.js" defer><\/script>/);
+    assert.match(index, /<script src="js\/reader-core\.js" defer><\/script>/);
     assert.match(index, /<script src="js\/web-import-core\.js" defer><\/script>/);
     assert.match(index, /<script src="js\/settings\.js" defer><\/script>/);
     assert.match(index, /<script src="js\/image-assets\.js" defer><\/script>/);
@@ -191,14 +250,18 @@ test('static entry point references ordered external files without inline handle
     assert.doesNotMatch(index, /<script(?![^>]*\bsrc=)/);
     assert.doesNotMatch(index, /onclick\s*=/);
     assert.match(index, /<dialog[\s\S]*id="comicReaderDialog"/);
-    assert.match(index, /id="comicReaderHint">资产保存原始页面和封面；长图仅在导出时生成/);
+    assert.doesNotMatch(index, /id="comicReaderMeta"|id="comicReaderHint"|>连续阅读</);
     assert.match(index, /最多 80 张 · 500 MiB · 原图无损封装/);
     assert.doesNotMatch(index, /id="exportComicLongImageButton"/);
     assert.doesNotMatch(index, /id="downloadComicLongImage"/);
-    assert.match(index, /id="collapseComicReaderHeaderButton"[^>]*aria-expanded="true"/);
-    assert.match(index, /id="expandComicReaderHeaderButton"[^>]*aria-expanded="false"/);
+    assert.match(index, /id="openReaderDrawerButton"[^>]*aria-controls="comicReaderDrawer"/);
+    assert.match(index, /id="resetReaderOrderButton"[^>]*aria-label="恢复默认漫画排序"/);
+    assert.match(index, /id="toggleReaderDrawerExpandButton"[^>]*aria-label="全屏展开漫画选择"/);
+    assert.match(index, /id="readerDrawerExpandRail"[^>]*aria-label="向右滑动全屏展开漫画选择"/);
+    assert.match(index, /id="comicReaderProgress"[^>]*type="range"/);
+    assert.match(index, /id="previousReaderPageButton"[^>]*aria-label="上一页"/);
+    assert.match(index, /id="nextReaderPageButton"[^>]*aria-label="下一页"/);
     assert.match(index, /id="closeComicReaderButton"[^>]*aria-label="关闭阅读"/);
-    assert.match(index, /id="closeCollapsedComicReaderButton"[^>]*aria-label="关闭阅读"/);
     assert.match(index, /id="historyTab"[\s\S]*data-mode="history"/);
     assert.match(index, /id="historyPanel"/);
     assert.match(index, /id="selectHistoryDirectoryButton"/);
@@ -210,8 +273,11 @@ test('static entry point references ordered external files without inline handle
     assert.match(index, /id="viewSavedComicButton"[^>]*>[\s\S]*去查看/);
     assert.match(index, /id="clearWebImportUrlButton"[^>]*aria-label="清除网页链接和当前网页任务"/);
     assert.match(index, /id="appDrawer"[^>]*aria-hidden="true"/);
-    assert.match(index, /id="localComicSourceButton"[^>]*>本地图片</);
-    assert.match(index, /id="webComicSourceButton"[^>]*>网页链接</);
+    assert.match(index, /id="localComicSourceButton"[^>]*>图片</);
+    assert.match(index, /id="webComicSourceButton"[^>]*>链接</);
+    assert.match(index, /id="archiveComicSourceButton"[^>]*>解码</);
+    assert.match(index, /id="archiveComicSourcePanel" hidden>[\s\S]*id="comicArchiveFile"/);
+    assert.equal((index.match(/class="comic-section"/g) || []).length, 1);
     assert.match(index, /id="analyzeWebImportButton"[^>]*>分析网页</);
     assert.match(index, /识别网页图片清单、滚动列表或翻页阅读器，根据顺序导入/);
     assert.match(index, /class="button-group comic-actions"[\s\S]*id="downloadComicArchive"/);
@@ -234,6 +300,12 @@ test('static entry point references ordered external files without inline handle
     assert.match(comicApp, /startJob\('historySave'/);
     assert.match(comicApp, /function createHistoryMenuButton\(book\)/);
     assert.match(comicApp, /GROUP_DATABASE_NAME = 'ecryptees-groups-v1'/);
+    assert.match(comicApp, /READER_ORDER_STORE = 'readerOrder'/);
+    assert.match(comicApp, /persistReaderOrder\('manual', orderedIds\)/);
+    assert.match(comicApp, /persistReaderOrder\('natural', \[\]\)/);
+    assert.match(comicApp, /className = 'comic-reader-book-drag'/);
+    assert.match(comicApp, /function setReaderDrawerExpanded\(expanded\)/);
+    assert.match(comicApp, /getDrawerExpandDirection/);
     assert.match(comicApp, /createObjectStore\(GROUP_STORE, \{ keyPath: 'groupId' \}\)/);
     assert.match(comicApp, /createObjectStore\(GROUP_MEMBERSHIP_STORE, \{ keyPath: 'bookId' \}\)/);
     assert.match(comicApp, /function openHistoryFolderDialog\(bookId = ''\)/);
@@ -253,9 +325,10 @@ test('static entry point references ordered external files without inline handle
     assert.match(comicApp, /已使用 \$\{used\} · 剩余 \$\{remaining\}/);
     assert.match(comicApp, /downloadLongImageFile\(message\.file, message\.name, message\.opfsName, message\.storageKind\)/);
     assert.match(comicApp, /function getComicParallelism\(\)/);
-    assert.match(comicApp, /READER_HEADER_STORAGE_KEY/);
-    assert.match(comicApp, /setReaderHeaderCollapsed\(readReaderHeaderPreference\(\), false, false\)/);
-    assert.match(comicApp, /header\.inert = readerHeaderCollapsed/);
+    assert.match(comicApp, /function setReaderControlsVisible\(visible, schedule = true\)/);
+    assert.match(comicApp, /function renderReaderNavigation\(\)/);
+    assert.match(comicApp, /function switchReaderBook\(direction\)/);
+    assert.match(comicApp, /readerCore\.getSwipeDirection/);
     assert.doesNotMatch(comicApp, /downloadComicLongImage|autoDownloadLongImage/);
     assert.match(comicWorker, /opfsName: entryName/);
     assert.match(comicWorker, /post\(payload\.resultType === 'historyExport' \? 'historyLongImageReady' : 'complete'/);
@@ -355,7 +428,7 @@ test('PWA entry point is installable and caches only the application shell', () 
     assert.match(index, /id="installAppButton"[^>]*>安装到桌面</);
     assert.match(pwa, /beforeinstallprompt/);
     assert.match(pwa, /navigator\.serviceWorker\.register\('\.\/service-worker\.js'\)/);
-    assert.match(pwa, /supportedProtocol && !isAndroidAssetHost && window\.isSecureContext/);
+    assert.match(pwa, /supportedProtocol && !isAndroidAssetHost && !isDesktopRuntime && window\.isSecureContext/);
     assert.match(serviceWorker, /const APP_SHELL = \[/);
     assert.match(serviceWorker, /'\.\/js\/comic-worker\.js'/);
     assert.match(serviceWorker, /'\.\/js\/android-bridge\.js'/);
@@ -542,9 +615,11 @@ test('JPG and JPEG remain selectable in browsers and the Android photo picker', 
     assert.match(activity, /new ActivityResultContracts\.PickVisualMedia\(\)/);
     assert.match(activity, /new ActivityResultContracts\.PickMultipleVisualMedia\(80\)/);
     assert.match(activity, /PickVisualMedia\.ImageOnly\.INSTANCE/);
-    assert.match(appBuild, /versionCode 16/);
-    assert.match(appBuild, /versionName '1\.0\.15'/);
-    assert.match(serviceWorker, /const CACHE_NAME = 'ecryptees-app-v15'/);
+    assert.match(appBuild, /versionCode 20/);
+    assert.match(appBuild, /versionName '1\.1\.3'/);
+    assert.match(serviceWorker, /const CACHE_NAME = 'ecryptees-app-v21-desktop'/);
+    assert.match(serviceWorker, /'\.\/js\/desktop-storage\.js'/);
+    assert.match(serviceWorker, /'\.\/js\/reader-core\.js'/);
 });
 
 test('Android comic picker preserves system photo selection order without broad storage access', () => {
@@ -572,6 +647,6 @@ test('Android comic picker preserves system photo selection order without broad 
     assert.match(comicApp, /items\.push\(\.\.\.prepared\)/);
     assert.match(comicApp, /items\.length >= format\.MAX_PAGES/);
     assert.match(comicApp, /已按系统相册返回顺序加入/);
-    assert.match(appBuild, /versionCode 16/);
-    assert.match(appBuild, /versionName '1\.0\.15'/);
+    assert.match(appBuild, /versionCode 20/);
+    assert.match(appBuild, /versionName '1\.1\.3'/);
 });

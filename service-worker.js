@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE_NAME = 'ecryptees-app-v15';
+const CACHE_NAME = 'ecryptees-app-v21-desktop';
 const APP_SHELL = [
     './',
     './index.html',
@@ -11,16 +11,24 @@ const APP_SHELL = [
     './assets/icon-512.png',
     './js/core.js',
     './js/comic-core.js',
+    './js/video-core.js',
     './js/history-core.js',
+    './js/reader-core.js',
     './js/web-import-core.js',
     './js/settings.js',
+    './js/asset-storage.js',
+    './js/asset-center.js',
     './js/image-assets.js',
+    './js/video-assets.js',
     './js/app.js',
     './js/comic-worker.js',
+    './js/video-worker.js',
     './js/comic-app.js',
     './js/image-assets-app.js',
+    './js/video-app.js',
     './js/pwa.js',
-    './js/android-bridge.js'
+    './js/android-bridge.js',
+    './js/desktop-storage.js'
 ];
 
 const APP_URLS = new Set(APP_SHELL.map(path => new URL(path, self.registration.scope).href));

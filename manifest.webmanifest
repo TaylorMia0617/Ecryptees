@@ -1,8 +1,8 @@
 {
     "id": "./",
-    "name": "Ecryptees 本地加密与漫画阅读",
+    "name": "Ecryptees 本地加密与媒体资产",
     "short_name": "Ecryptees",
-    "description": "在设备本地进行文本、图片和漫画归档处理与阅读。",
+    "description": "在设备本地处理文本、图片、漫画和原始 MP4 视频资产。",
     "lang": "zh-CN",
     "start_url": "./index.html",
     "scope": "./",
@@ -11,7 +11,7 @@
     "orientation": "any",
     "background_color": "#fce4ec",
     "theme_color": "#ff4081",
-    "categories": ["utilities", "books"],
+    "categories": ["utilities", "books", "entertainment"],
     "prefer_related_applications": false,
     "icons": [
         {

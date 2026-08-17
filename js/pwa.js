@@ -6,6 +6,7 @@
     const supportedProtocol = location.protocol === 'https:'
         || (location.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(location.hostname));
     const isAndroidAssetHost = location.hostname === 'appassets.androidplatform.net';
+    const isDesktopRuntime = !!window.__TAURI_INTERNALS__;
     let installPrompt = null;
 
     function isStandalone() {
@@ -40,7 +41,7 @@
         });
     }
 
-    if ('serviceWorker' in navigator && supportedProtocol && !isAndroidAssetHost && window.isSecureContext) {
+    if ('serviceWorker' in navigator && supportedProtocol && !isAndroidAssetHost && !isDesktopRuntime && window.isSecureContext) {
         window.addEventListener('load', () => {
             navigator.serviceWorker.register('./service-worker.js').catch(error => {
                 console.warn('离线应用注册失败：', error);

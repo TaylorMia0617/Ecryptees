@@ -4,8 +4,9 @@
     const LOCK_STORAGE_KEY = 'ecryptees-app-lock-v1';
     const LOCK_VERSION = 1;
     const LOCK_ITERATIONS = 210000;
-    const VERSION_FALLBACK = Object.freeze({ versionName: '1.0.15', versionCode: 16 });
+    const VERSION_FALLBACK = Object.freeze({ versionName: '1.1.3', versionCode: 20 });
     const nativeBridge = root.AndroidFileBridge || null;
+    const desktopStorage = root.EcrypteesDesktopStorage || null;
 
     let unlockResolve;
     const whenUnlocked = new Promise(resolve => {
@@ -25,6 +26,9 @@
     const disableLockButton = document.getElementById('disableAppLockButton');
     const disguiseToggle = document.getElementById('launcherDisguiseToggle');
     const disguiseSummary = document.getElementById('launcherDisguiseSummary');
+    const desktopStorageSettings = document.getElementById('desktopStorageSettings');
+    const desktopPathDialog = document.getElementById('desktopPathDialog');
+    let pendingDesktopPath = null;
 
     function bytesToBase64(bytes) {
         let binary = '';
@@ -214,6 +218,117 @@
         if (!settingsDialog.open) {
             settingsDialog.showModal();
         }
+    }
+
+    function formatDesktopBytes(bytes) {
+        const value = Math.max(0, Number(bytes) || 0);
+        if (!Number.isFinite(Number(bytes))) return '剩余空间未知';
+        const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+        let size = value;
+        let unit = 0;
+        while (size >= 1024 && unit < units.length - 1) {
+            size /= 1024;
+            unit += 1;
+        }
+        return `剩余 ${size >= 10 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
+    }
+
+    function desktopKindLabel(kind) {
+        return { image: '图片', comic: '漫画', video: '视频' }[kind] || '资产';
+    }
+
+    function renderDesktopSettings(value) {
+        if (!desktopStorage?.available || !value) return;
+        desktopStorageSettings.hidden = false;
+        const notice = document.getElementById('desktopStorageNotice');
+        const warnings = Array.isArray(value.warnings) ? value.warnings.filter(Boolean) : [];
+        notice.textContent = warnings.join('；');
+        notice.hidden = warnings.length === 0;
+        for (const kind of ['image', 'comic', 'video']) {
+            const title = kind[0].toUpperCase() + kind.slice(1);
+            const path = document.getElementById(`desktop${title}Path`);
+            const space = document.getElementById(`desktop${title}Space`);
+            const current = value[kind];
+            path.textContent = current?.activePath || '目录不可用';
+            path.title = current?.activePath || '';
+            space.textContent = current?.available
+                ? `${formatDesktopBytes(current.availableBytes)}${current.legacyPaths?.length ? ` · 另有 ${current.legacyPaths.length} 个历史目录` : ''}`
+                : '目录不可用；该类型的导入和修改已暂停';
+            space.dataset.kind = current?.available ? 'success' : 'error';
+        }
+        if (value.version) {
+            document.getElementById('appVersionInfo').textContent = `${value.version} · Windows x64`;
+        }
+    }
+
+    function setDesktopPathBusy(busy) {
+        desktopPathDialog.querySelectorAll('button').forEach(button => {
+            button.disabled = busy;
+        });
+    }
+
+    function closeDesktopPathDialog() {
+        pendingDesktopPath = null;
+        document.getElementById('desktopPathError').hidden = true;
+        if (desktopPathDialog.open) desktopPathDialog.close();
+    }
+
+    async function commitDesktopPath(migrate) {
+        if (!pendingDesktopPath) return;
+        const error = document.getElementById('desktopPathError');
+        error.hidden = true;
+        setDesktopPathBusy(true);
+        try {
+            const value = await desktopStorage.setRoot(
+                pendingDesktopPath.kind,
+                pendingDesktopPath.path,
+                migrate
+            );
+            renderDesktopSettings(value);
+            closeDesktopPathDialog();
+        } catch (failure) {
+            error.textContent = failure?.message || String(failure) || '无法更改桌面保存位置';
+            error.hidden = false;
+        } finally {
+            setDesktopPathBusy(false);
+        }
+    }
+
+    if (desktopStorage?.available) {
+        desktopStorage.whenReady.then(renderDesktopSettings);
+        document.querySelectorAll('[data-desktop-change]').forEach(button => {
+            button.addEventListener('click', async () => {
+                try {
+                    const kind = button.dataset.desktopChange;
+                    const path = await desktopStorage.pickRoot();
+                    if (!path) return;
+                    pendingDesktopPath = { kind, path };
+                    document.getElementById('desktopPathDialogTitle').textContent = `更改${desktopKindLabel(kind)}保存位置`;
+                    document.getElementById('desktopPathDialogDescription').textContent = '迁移会在完整复制并校验成功后切换目录；也可以只让新资产写入新目录。';
+                    document.getElementById('desktopPathTarget').textContent = path;
+                    desktopPathDialog.showModal();
+                } catch (failure) {
+                    disguiseSummary.textContent = failure?.message || String(failure);
+                }
+            });
+        });
+        document.querySelectorAll('[data-desktop-open]').forEach(button => {
+            button.addEventListener('click', () => {
+                desktopStorage.openRoot(button.dataset.desktopOpen).catch(failure => {
+                    const title = button.dataset.desktopOpen;
+                    const element = document.getElementById(`desktop${title[0].toUpperCase() + title.slice(1)}Space`);
+                    element.textContent = failure?.message || String(failure);
+                    element.dataset.kind = 'error';
+                });
+            });
+        });
+        document.getElementById('desktopPathMigrateButton').addEventListener('click', () => commitDesktopPath(true));
+        document.getElementById('desktopPathFutureButton').addEventListener('click', () => commitDesktopPath(false));
+        document.getElementById('desktopPathCancelButton').addEventListener('click', closeDesktopPathDialog);
+        desktopPathDialog.addEventListener('cancel', event => {
+            if (desktopPathDialog.querySelector('button:disabled')) event.preventDefault();
+            else closeDesktopPathDialog();
+        });
     }
 
     function readNativeVersion() {

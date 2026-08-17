@@ -10,6 +10,9 @@ Thumbs.db
 /.gstack/
 *.log
 /coverage/
+/node_modules/
+/desktop-dist/
+/src-tauri/target/
 
 # Web and Android release artifacts
 /dist/

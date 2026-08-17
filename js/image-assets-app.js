@@ -3,7 +3,8 @@
 
     const store = root.EcrypteesImageAssets;
     const core = root.Ecryptees?.core;
-    if (!store || !core) {
+    const assetCenter = root.EcrypteesAssetCenter;
+    if (!store || !core || !assetCenter) {
         return;
     }
 
@@ -20,6 +21,7 @@
     let selectedAssetId = '';
     let viewerUrl = '';
     let busy = false;
+    let refreshSequence = 0;
 
     function setStatus(message, kind = 'info') {
         status.textContent = message || '';
@@ -48,29 +50,10 @@
         }).format(new Date(timestamp));
     }
 
-    function setTypeButtons() {
-        document.getElementById('assetTypeComicButton').classList.toggle('is-active', !active);
-        document.getElementById('assetTypeComicButton').setAttribute('aria-pressed', String(!active));
-        document.getElementById('assetTypeImageButton').classList.toggle('is-active', active);
-        document.getElementById('assetTypeImageButton').setAttribute('aria-pressed', String(active));
-        panel.classList.toggle('image-assets-active', active);
-    }
-
     function updateImageSortOptions() {
         const select = document.getElementById('historySort');
         select.replaceChildren();
         for (const [value, label] of [['recent', '最近查看'], ['converted', '最近加入'], ['title', '标题']]) {
-            const option = document.createElement('option');
-            option.value = value;
-            option.textContent = label;
-            select.append(option);
-        }
-    }
-
-    function restoreComicSortOptions() {
-        const select = document.getElementById('historySort');
-        select.replaceChildren();
-        for (const [value, label] of [['recent', '最近阅读'], ['converted', '最近加入'], ['title', '标题']]) {
             const option = document.createElement('option');
             option.value = value;
             option.textContent = label;
@@ -134,7 +117,7 @@
     }
 
     function render() {
-        if (!active) {
+        if (!active || !assetCenter.isActive('image')) {
             return;
         }
         revokeCoverUrls();
@@ -159,7 +142,10 @@
             const thumbnail = document.createElement('img');
             thumbnail.className = 'image-asset-thumbnail';
             thumbnail.alt = `${asset.title} 预览`;
-            if (asset.mime === 'image/heic' || asset.mime === 'image/heif') {
+            if (asset.fileAvailable === false) {
+                thumbnail.hidden = true;
+                card.classList.add('image-asset-unavailable');
+            } else if (asset.mime === 'image/heic' || asset.mime === 'image/heif') {
                 thumbnail.hidden = true;
                 card.classList.add('image-asset-needs-decoder');
             } else {
@@ -177,16 +163,24 @@
             const meta = document.createElement('p');
             meta.className = 'history-card-meta';
             const dimensions = asset.width && asset.height ? ` · ${asset.width}×${asset.height}` : '';
-            meta.textContent = `${asset.mime.replace('image/', '').toUpperCase()} · ${utils.formatBytes(asset.size)}${dimensions}`;
+            meta.textContent = asset.fileAvailable === false
+                ? `文件不可用 · ${utils.formatBytes(asset.size)}`
+                : `${asset.mime.replace('image/', '').toUpperCase()} · ${utils.formatBytes(asset.size)}${dimensions}`;
             const time = document.createElement('p');
             time.className = 'history-card-time';
             time.textContent = `最近：${formatDate(asset.lastOpenedAt || asset.createdAt)}`;
             const actions = document.createElement('div');
             actions.className = 'image-asset-actions';
+            const openButton = createAction('查看', 'open', asset.assetId);
+            const txtButton = createAction('导出 TXT', 'exportTxt', asset.assetId);
+            const imageButton = createAction('导出图片', 'exportImage', asset.assetId);
+            openButton.disabled = asset.fileAvailable === false;
+            txtButton.disabled = asset.fileAvailable === false;
+            imageButton.disabled = asset.fileAvailable === false;
             actions.append(
-                createAction('查看', 'open', asset.assetId),
-                createAction('导出 TXT', 'exportTxt', asset.assetId),
-                createAction('导出图片', 'exportImage', asset.assetId),
+                openButton,
+                txtButton,
+                imageButton,
                 createAction('删除', 'delete', asset.assetId, 'image-asset-delete')
             );
             card.append(thumbnail, header, meta, time, actions);
@@ -202,8 +196,12 @@
     }
 
     async function refresh() {
-        if (!active) return;
+        if (!active || !assetCenter.isActive('image')) return;
+        const sequence = ++refreshSequence;
+        const activation = assetCenter.getSequence();
         const state = await store.listImageAssets();
+        assetCenter.setCount('image', state.assets.length);
+        if (!active || !assetCenter.isCurrent('image', activation) || sequence !== refreshSequence) return;
         assets = state.assets;
         folders = state.folders.sort((a, b) => a.createdAt - b.createdAt);
         memberships = new Map(state.memberships.map(item => [item.assetId, item.folderId]));
@@ -237,14 +235,7 @@
     async function openAsset(assetId) {
         const asset = await store.getImageAsset(assetId);
         if (!asset) throw new Error('图片资产不存在');
-        active = true;
-        setTypeButtons();
-        updateImageSortOptions();
-        document.getElementById('historyDirectoryPanel').hidden = true;
-        document.getElementById('historyDescription').textContent = '图片以原始格式保存在应用私有资产中。';
-        document.getElementById('clearHistoryButton').textContent = '清空图片';
-        document.getElementById('historyTab').click();
-        await refresh();
+        if (!assetCenter.isActive('image')) await assetCenter.activate('image');
         const dialog = document.getElementById('imageAssetViewerDialog');
         const viewer = document.getElementById('imageAssetViewerImage');
         const message = document.getElementById('imageAssetViewerMessage');
@@ -324,7 +315,6 @@
 
     async function activateImages() {
         active = true;
-        setTypeButtons();
         updateImageSortOptions();
         document.getElementById('historyDirectoryPanel').hidden = true;
         document.getElementById('historyDescription').textContent = '图片以原始格式保存在应用私有资产中。';
@@ -333,64 +323,45 @@
         await refresh();
     }
 
-    function activateComics() {
+    function deactivate() {
         active = false;
-        setTypeButtons();
-        restoreComicSortOptions();
-        document.getElementById('historyDirectoryPanel').hidden = !!root.AndroidFileBridge;
-        document.getElementById('historyDescription').textContent = root.AndroidFileBridge
-            ? '漫画保存在应用私有数据中；覆盖更新会保留，清除应用数据或卸载会删除。'
-            : '独立目录保存永久文件；浏览器数据库只作为可重建的阅读缓存。';
-        document.getElementById('clearHistoryButton').textContent = '清空漫画';
-        document.getElementById('historySearch').value = '';
-        document.getElementById('historyTab').click();
+        refreshSequence += 1;
+        revokeCoverUrls();
+        panel.classList.remove('image-assets-active');
     }
 
-    document.getElementById('assetTypeImageButton').addEventListener('click', activateImages);
-    document.getElementById('assetTypeComicButton').addEventListener('click', activateComics);
-    document.getElementById('historyGrid').addEventListener('click', event => {
-        const button = event.target.closest('button[data-image-asset-action]');
-        if (button) handleAction(button.dataset.imageAssetAction, button.dataset.assetId).catch(error => setStatus(error.message, 'error'));
-    });
-    document.getElementById('historyGroupFilterSelect').addEventListener('change', event => {
-        if (!active) return;
-        event.stopImmediatePropagation();
-        selectedFolder = event.currentTarget.value;
-        document.getElementById('historyViewMenu').open = false;
-        render();
-    }, true);
-    document.getElementById('historySort').addEventListener('change', event => {
-        if (!active) return;
-        event.stopImmediatePropagation();
-        document.getElementById('assetSortMenu').open = false;
-        render();
-    }, true);
-    document.getElementById('historySearch').addEventListener('input', event => {
-        if (active) {
-            event.stopImmediatePropagation();
+    assetCenter.register('image', {
+        activate: activateImages,
+        deactivate,
+        render,
+        refresh,
+        handleGridClick(event) {
+            const button = event.target.closest('button[data-image-asset-action]');
+            if (button) handleAction(button.dataset.imageAssetAction, button.dataset.assetId).catch(error => setStatus(error.message, 'error'));
+        },
+        handleGroupChange(event) {
+            selectedFolder = event.currentTarget.value;
+            document.getElementById('historyViewMenu').open = false;
             render();
+        },
+        handleSortChange() {
+            document.getElementById('assetSortMenu').open = false;
+            render();
+        },
+        handleSearchInput: render,
+        handleAddFolder() {
+            const name = prompt('图片文件夹名称');
+            if (name) store.createImageFolder(name).then(refresh).catch(error => setStatus(error.message, 'error'));
+        },
+        handleClear() {
+            if (assets.length && confirm('清空全部图片资产？此操作无法撤销。')) {
+                store.clearImageAssets().then(refresh).catch(error => setStatus(error.message, 'error'));
+            }
+        },
+        handleEmptyAction() {
+            document.getElementById('imageTab').click();
         }
-    }, true);
-    document.getElementById('addHistoryFolderButton').addEventListener('click', event => {
-        if (!active) return;
-        event.stopImmediatePropagation();
-        const name = prompt('图片文件夹名称');
-        if (name) store.createImageFolder(name).then(refresh).catch(error => setStatus(error.message, 'error'));
-    }, true);
-    document.getElementById('clearHistoryButton').addEventListener('click', event => {
-        if (!active) return;
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        if (assets.length && confirm('清空全部图片资产？此操作无法撤销。')) {
-            store.clearImageAssets().then(refresh).catch(error => setStatus(error.message, 'error'));
-        }
-    }, true);
-    document.getElementById('historyGoToComicButton').addEventListener('click', event => {
-        if (!active) return;
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        document.getElementById('imageTab').click();
-    }, true);
+    });
     document.getElementById('imageAssetMenuCancelButton').addEventListener('click', () => closeDialog(document.getElementById('imageAssetMenuDialog')));
     document.getElementById('imageAssetRenameButton').addEventListener('click', async () => {
         const asset = assets.find(item => item.assetId === selectedAssetId);
@@ -436,8 +407,11 @@
         if (active) refresh();
     });
 
+    store.listImageAssets().then(state => assetCenter.setCount('image', state.assets.length)).catch(() => {});
+
     root.EcrypteesImageAssetsUI = Object.freeze({
-        isActive: () => active,
+        isActive: () => active && assetCenter.isActive('image'),
+        deactivate,
         render,
         refresh,
         openAsset

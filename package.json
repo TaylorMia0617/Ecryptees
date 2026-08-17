@@ -1,0 +1,16 @@
+{
+    "name": "ecryptees-desktop",
+    "private": true,
+    "version": "1.1.4",
+    "description": "Ecryptees offline Windows desktop wrapper",
+    "scripts": {
+        "desktop:prepare": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-desktop.ps1",
+        "tauri": "tauri",
+        "desktop:dev": "tauri dev",
+        "desktop:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-desktop.ps1",
+        "desktop:verify": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-desktop.ps1"
+    },
+    "devDependencies": {
+        "@tauri-apps/cli": "2.11.4"
+    }
+}

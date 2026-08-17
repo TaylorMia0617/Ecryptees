@@ -24,4 +24,6 @@ Keep `D:\Android\signing\ecryptees-release.p12` and `ecryptees-signing.propertie
 - The app-private shelf stores original pages, covers, metadata, reading progress, and lightweight folder assignments. It does not persist `.ecomic` archives or generated long PNGs; both are created temporarily on explicit export.
 - The app-private shelf survives ordinary cache cleanup and in-place APK updates, but is removed if the user clears app data or uninstalls the APK. Exported files remain in the user-selected document location.
 - The activity accepts single-file `ACTION_VIEW` and `ACTION_SEND` handoffs from other apps. Broad candidate registration is followed by strict `.ecomic` filename, size, magic, and archive-authentication checks.
+- Video assets store their original MP4 bytes in app-private storage, matching the comic shelf's original-page model. `.emp4` is decrypted on import and generated temporarily only for explicit export.
+- The activity accepts both `.ecomic` and `.emp4` handoffs. Video handoffs are capped independently and keep all Android transfers chunked.
 - Future channel, server, and peer-to-peer concepts are not implemented. The current network bridge is scoped to static webpage/image import and must not be reused for background sync without a separate architecture and privacy review.
