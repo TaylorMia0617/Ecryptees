@@ -1,0 +1,14 @@
+{
+    "$schema": "../gen/schemas/desktop-schema.json",
+    "identifier": "isolated-render-capture",
+    "description": "Allows isolated HTTPS capture windows to send token-scoped capture events only",
+    "local": false,
+    "remote": {
+        "urls": ["https://*"]
+    },
+    "windows": ["capture-*"],
+    "permissions": [
+        "core:event:allow-emit"
+    ],
+    "platforms": ["windows"]
+}

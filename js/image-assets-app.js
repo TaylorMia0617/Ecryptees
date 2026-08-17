@@ -116,6 +116,24 @@
         return button;
     }
 
+    function createGroupControl(asset) {
+        const folderId = memberships.get(asset.assetId) || '';
+        const folderName = folders.find(folder => folder.folderId === folderId)?.name || '未分组';
+        const control = document.createElement('div');
+        control.className = 'history-card-group-control';
+        const label = document.createElement('span');
+        label.className = 'history-card-group-label';
+        label.textContent = Array.from(folderName).slice(0, 3).join('');
+        label.title = folderName;
+        const button = createAction('移除分组', 'removeGroup', asset.assetId, 'history-remove-group-button');
+        button.disabled = !folderId;
+        button.title = folderId ? `移出“${folderName}”` : '当前图片未分组';
+        button.setAttribute('aria-label', folderId ? `将“${asset.title}”移出分组“${folderName}”` : `“${asset.title}”当前未分组`);
+        button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h6l2 2h10v12H3V5Zm4 7v2h10v-2H7Z"/></svg>';
+        control.append(label, button);
+        return control;
+    }
+
     function render() {
         if (!active || !assetCenter.isActive('image')) {
             return;
@@ -159,7 +177,10 @@
             const title = document.createElement('h3');
             title.className = 'history-card-title';
             title.textContent = asset.title;
-            header.append(title, createMenuButton(asset));
+            const headerTools = document.createElement('div');
+            headerTools.className = 'history-card-header-tools';
+            headerTools.append(createGroupControl(asset), createMenuButton(asset));
+            header.append(title, headerTools);
             const meta = document.createElement('p');
             meta.className = 'history-card-meta';
             const dimensions = asset.width && asset.height ? ` · ${asset.width}×${asset.height}` : '';
@@ -306,6 +327,10 @@
                 await refresh();
                 setStatus('图片资产已删除。', 'success');
             }
+        } else if (action === 'removeGroup') {
+            await store.setImageAssetFolder(assetId, '');
+            await refresh();
+            setStatus(`“${asset.title}”已移出分组。`, 'success');
         } else if (action === 'menu') {
             selectedAssetId = assetId;
             document.getElementById('imageAssetMenuTitle').textContent = asset.title;
@@ -352,6 +377,24 @@
         handleAddFolder() {
             const name = prompt('图片文件夹名称');
             if (name) store.createImageFolder(name).then(refresh).catch(error => setStatus(error.message, 'error'));
+        },
+        listGroups() {
+            return folders.map(folder => ({ groupId: folder.folderId, name: folder.name }));
+        },
+        async createGroup(name) {
+            const folder = await store.createImageFolder(name);
+            await refresh();
+            return folder;
+        },
+        async renameGroup(folderId, name) {
+            const folder = await store.renameImageFolder(folderId, name);
+            await refresh();
+            return folder;
+        },
+        async deleteGroup(folderId) {
+            if (selectedFolder === folderId) selectedFolder = 'all';
+            await store.deleteImageFolder(folderId);
+            await refresh();
         },
         handleClear() {
             if (assets.length && confirm('清空全部图片资产？此操作无法撤销。')) {

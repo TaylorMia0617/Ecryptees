@@ -4,9 +4,9 @@
 
 Ecryptees 可以把多张图片打包成带认证的 `.ecomic`，也可以直接保存和播放原始 MP4，并在分享时按需生成 `.emp4`。Android 与现代浏览器都能离线整理漫画、图片和视频资产，并按需导出原文件。
 
-当前 Android 版本：`1.1.3`（versionCode 20）。
+当前 Android 版本：`1.1.4`（versionCode 21）。
 
-当前 Windows 桌面版本：`1.1.4`（Tauri v2，Windows x64）。
+当前 Windows 桌面版本：`1.1.5`（Tauri v2，Windows x64）。
 
 ## 它能做什么
 
@@ -60,12 +60,12 @@ Ecryptees 可以把多张图片打包成带认证的 `.ecomic`，也可以直接
 
 ## Android 使用
 
-1. 安装 `dist/Ecryptees-v1.1.3.apk`；从旧版本升级时直接覆盖安装，不要先卸载。
+1. 安装 `dist/Ecryptees-v1.1.4.apk`；从旧版本升级时直接覆盖安装，不要先卸载。
 2. 在“漫画”中选择图片、调整顺序并点击“加密并加入资产”。
 3. 完成后点击“去查看”直接阅读；需要文件时从漫画资产卡导出 `.ecomic` 或长图。
 4. 在 QQ 或文件管理器中对 `.ecomic` 或 `.emp4` 使用“其他应用打开”或“发送”，然后选择 Ecryptees。
 
-也可以在“漫画 → 网页链接”中粘贴 HTTPS 页面地址。点击“分析网页”才会联网；分析结果按页面顺序列出，用户确认、删除或调整顺序后才加入漫画。应用会依次识别 `<img>`、页面内嵌图片清单、滚动列表和翻页阅读器。Android APK 必要时会创建隔离的临时 WebView，运行目标页面脚本并分块复制最终图片，随后销毁临时页面及其 Cookie、缓存和站点存储。该环境不读取 Ecryptees 主 WebView 状态，但目标页面脚本本身仍会向其网站及页面引用的第三方地址发起请求。
+也可以在“漫画 → 网页链接”中粘贴 HTTPS 页面地址。点击“分析网页”才会联网；分析结果按页面顺序列出，用户确认、删除或调整顺序后才加入漫画。Windows 1.1.5 和 Android 使用受控原生网络读取静态 HTML 与图片，浏览器/PWA 继续使用标准跨域请求。应用会依次识别 `<img>`、页面内嵌图片清单、滚动列表和翻页阅读器。Windows 与 Android 必要时会创建隔离的临时 WebView，运行目标页面脚本并分块复制最终图片，随后销毁临时页面及其 Cookie、缓存和站点存储。Windows 检测到 Cloudflare 验证响应时会显示这个独立窗口供用户正常完成验证；关闭窗口或验证超时会给出明确原因。该环境不读取 Ecryptees 主 WebView 状态；Windows 还会逐项拦截并校验动态页面的网络资源，只允许公网 HTTPS，但目标页面脚本本身仍会向其网站及页面引用的第三方公网地址发起请求。
 
 为了兼容不同 Android 厂商和应用不稳定的 MIME 标记，Ecryptees 会出现在较多文件的打开或分享候选中。真正导入前仍会检查 `.ecomic` 文件名、大小、`ECRCOM1` 文件头和完整归档认证；无效文件不会进入书架。
 
@@ -102,7 +102,7 @@ Windows 版首次启动会在“文档\Ecryptees”下创建“图片”“漫�
 ## 数据与安全边界
 
 - 应用冷启动、切换页面、本地导入、阅读、书架和导出不会自动联网；只有用户点击“分析网页”后才访问该 HTTPS 页面，确认下载后才访问图片地址。
-- 网页导入优先解析静态 HTML 和页面内嵌清单；检测到少量预览图、虚拟列表或翻页阅读器时，Android 才在无既有 Cookie 和登录状态的临时 WebView 中运行页面脚本，并在完成后清除临时站点数据。浏览器/PWA 版本仍受目标网站 CORS 策略限制。
+- 网页导入优先解析静态 HTML 和页面内嵌清单；Windows 和 Android 的静态 HTML、图片请求不受浏览器 CORS 限制，并拒绝本机、局域网及非 HTTPS 目标。检测到少量预览图、虚拟列表或翻页阅读器时，Windows 和 Android 才在无既有 Cookie 和登录状态的临时 WebView 中运行页面脚本，并在完成后清除临时站点数据。Windows 不会把 Clash 使用的 `198.18.0.0/15` Fake-IP 网段当作公网放行；使用 Clash 时，应只为目标网站、图片 CDN 和验证服务的域名配置 `fake-ip-filter`，或改用 `redir-host`。浏览器/PWA 版本仍受目标网站 CORS 策略限制。
 - 没有账号、云同步、分析统计、广告 SDK 或远程素材。
 - Android 书架中的原始页面是应用私有数据，不是再次加密保存的 `.ecomic`。
 - 显式导出的 `.ecomic`、TXT 和 PNG 位于用户选择的外部位置，不会随应用卸载而自动删除。
@@ -146,7 +146,7 @@ node --check js/comic-app.js
 powershell -ExecutionPolicy Bypass -File .\android-app\build-apk.ps1
 ```
 
-构建脚本会生成版本化 APK，例如 `dist/Ecryptees-v1.1.3.apk`，并同步覆盖稳定文件名 `dist/Ecryptees.apk`。脚本会验证 APK 内部版本和发布证书；覆盖安装必须继续使用同一个 applicationId 与签名证书。
+构建脚本会生成版本化 APK，例如 `dist/Ecryptees-v1.1.4.apk`，并同步覆盖稳定文件名 `dist/Ecryptees.apk`。脚本会验证 APK 内部版本和发布证书；覆盖安装必须继续使用同一个 applicationId 与签名证书。
 
 准备并构建 Windows x64 NSIS 安装包：
 
@@ -155,7 +155,7 @@ npm install
 npm run desktop:build
 ```
 
-构建脚本固定使用单个 Cargo 任务以降低 Windows 编译内存峰值，并自动执行资源准备和成品校验。成功后会输出 `dist/windows/Ecryptees-v1.1.4-x64-setup.exe`、稳定别名 `dist/windows/Ecryptees-Setup.exe` 和对应的 SHA-256 文件。`scripts/prepare-desktop.ps1` 只复制网页外壳所需的 HTML、CSS、JavaScript、图标和清单，不会将测试、Android 工程或用户文件打入安装包。
+构建脚本固定使用单个 Cargo 任务以降低 Windows 编译内存峰值，并自动执行资源准备和成品校验。成功后会输出 `dist/windows/Ecryptees-v1.1.5-x64-setup.exe`、稳定别名 `dist/windows/Ecryptees-Setup.exe` 和对应的 SHA-256 文件。`scripts/prepare-desktop.ps1` 只复制网页外壳所需的 HTML、CSS、JavaScript、图标和清单，不会将测试、Android 工程或用户文件打入安装包。
 
 ## 项目结构
 

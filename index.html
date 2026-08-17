@@ -247,7 +247,7 @@
                         <button class="web-import-clear-url" id="clearWebImportUrlButton" type="button" aria-label="清除网页链接和当前网页任务" title="清除网页链接和当前网页任务">×</button>
                         <button id="analyzeWebImportButton" type="button">分析网页</button>
                     </div>
-                    <p class="web-import-network-note">仅点击“分析网页”后联网；Android 会优先读取页面内嵌清单，必要时在隔离临时页运行阅读器并收集翻页图片。需要开启 VPN 或 Clash。</p>
+                    <p class="web-import-network-note">仅点击“分析网页”后联网；Windows 和 Android 使用受控原生网络读取，浏览器版本仍受目标网站跨域策略限制。使用 Clash Fake-IP 时，请为目标域名、图片域名及验证域名启用 fake-ip-filter，或改用 redir-host。</p>
                     <div class="web-import-results" id="webImportResults" hidden>
                         <div class="web-import-results-header">
                             <strong id="webImportSummary">尚未分析</strong>
@@ -329,6 +329,9 @@
             </div>
             <div class="history-toolbar">
                 <div class="history-sort-actions asset-toolbar-actions">
+                    <button class="history-folder-manage" id="manageHistoryFoldersButton" type="button" aria-label="管理分组" title="管理分组">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 4l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h5Zm-.8 2H5v12h14V8h-7.8l-2-2Zm3.8 4v2H7v-2h6Zm4 4v2H7v-2h10Z"/></svg>
+                    </button>
                     <label class="history-view-menu" id="historyViewMenu" for="historyGroupFilterSelect">
                         <span class="sr-only" id="historyViewSummary">全部文件夹</span>
                         <select id="historyGroupFilterSelect" aria-label="选择文件夹">
@@ -364,6 +367,27 @@
         </section>
         <p class="sr-only" id="copyStatus" role="status" aria-live="polite"></p>
     </main>
+
+    <dialog class="asset-group-manager-dialog" id="assetGroupManagerDialog" aria-labelledby="assetGroupManagerTitle">
+        <div class="asset-group-manager-shell">
+            <header>
+                <div>
+                    <span>本地资产</span>
+                    <h2 id="assetGroupManagerTitle">管理分组</h2>
+                </div>
+                <button id="closeAssetGroupManagerButton" type="button" aria-label="关闭分组管理">×</button>
+            </header>
+            <form class="asset-group-create-form" id="assetGroupCreateForm">
+                <label class="sr-only" for="assetGroupCreateInput">新分组名称</label>
+                <input id="assetGroupCreateInput" type="text" maxlength="40" autocomplete="off" placeholder="输入新分组名称" required>
+                <button type="submit">新建</button>
+            </form>
+            <div class="asset-group-manager-list" id="assetGroupManagerList" role="list"></div>
+            <p class="asset-group-manager-empty" id="assetGroupManagerEmpty" hidden>还没有自定义分组。</p>
+            <p class="asset-group-manager-status" id="assetGroupManagerStatus" role="status" aria-live="polite"></p>
+            <p class="asset-group-manager-note">删除分组只会移除资产的分组归属，不会删除图片、漫画或视频。</p>
+        </div>
+    </dialog>
 
     <dialog class="app-settings-dialog" id="appSettingsDialog" aria-labelledby="appSettingsTitle">
         <div class="app-settings-shell">
@@ -431,7 +455,7 @@
                 <h3 id="versionSettingsTitle">应用信息</h3>
                 <div class="app-version-row">
                     <span>版本</span>
-                    <strong id="appVersionInfo">1.1.3 · code 20</strong>
+                    <strong id="appVersionInfo">1.1.4 · code 21</strong>
                 </div>
             </section>
         </div>
@@ -736,6 +760,7 @@
     <script src="js/web-import-core.js" defer></script>
     <script src="js/android-bridge.js" defer></script>
     <script src="js/desktop-storage.js" defer></script>
+    <script src="js/desktop-network.js" defer></script>
     <script src="js/settings.js" defer></script>
     <script src="js/asset-storage.js" defer></script>
     <script src="js/asset-center.js" defer></script>

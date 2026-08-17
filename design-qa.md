@@ -265,6 +265,38 @@ No actionable build, lint, packaging, signing, or chunk-transfer issue remains. 
 
 final result: passed with device coverage gap
 
+## APK 1.1.4 asset remove-group control verification
+
+- Date: 2026-08-17. Image, comic, and video asset cards now place a folder-minus icon immediately beside the three-dot menu. The current group name appears to the icon's left and is limited to the first three characters; ungrouped assets show `未分组` with the icon disabled.
+- Activating the icon deletes only that asset's lightweight group membership. Original image bytes, comic shelf pages and archives, video files, metadata, and group definitions are unchanged.
+- Node regressions passed 58/58, including direct remove-group coverage for all three asset types. JavaScript syntax checks and `git diff --check` passed.
+- Gradle `clean assembleRelease lintRelease` passed. Output metadata confirmed `com.ecryptees.offline`, version 1.1.4 (code 21). The release signing certificate SHA-256 remained `91306e7c15932646a58ffbd3443f541be57401f1f64106d8dcd0e97fbc5687e8`.
+- The packaged APK assets were inspected directly and contain the new controls in the comic, image, and video controllers plus the shared styling. `dist/Ecryptees-v1.1.4.apk` and `dist/Ecryptees.apk` are byte-identical, 3,518,955 bytes, with SHA-256 `FA473A506DE87467B9E09178417C4CD245BD7FF7E3D88DB5428E25B86B0CBD18`.
+
+**Findings**
+
+No actionable format, storage, static integration, build, lint, signing, versioning, or packaging issue remains. No physical Android device was connected, so final touch-target feel and OEM WebView rendering remain device-level acceptance coverage.
+
+final result: passed with device coverage gap
+
+## Windows Tauri 1.1.5 native and dynamic web import verification
+
+- Date: 2026-08-17. Release builds use the Windows GUI subsystem while debug builds retain the console. The final `ecryptees-desktop.exe` reports PE subsystem 2 (`Windows GUI`) and file/product version 1.1.5.
+- Static HTML and comic images use the Rust desktop network bridge instead of browser `fetch`. Responses stream to token-named temporary files and return to the frontend as raw IPC chunks. The main-window CSP still has no arbitrary HTTPS `connect-src` permission.
+- The bridge accepts only HTTPS without embedded credentials, disables proxies and automatic redirects, re-resolves and pins every redirect hop to validated public addresses, caps redirects at five and active tasks at two, and enforces 5 MiB HTML / 500 MiB image limits. Cancellation, release, normal window destruction, and stale-startup cleanup remove owned temporary files.
+- JavaScript-dependent pages normally use a hidden, unfocused, task-specific WebView2 with an independent browser-data directory. When the static response explicitly contains `Cf-Mitigated: challenge`, the same isolated view is shown as a temporary verification window and capture starts only after the challenge page has navigated to the requested content. Closing the window or reaching the timeout produces an explicit verification error instead of an HTML parsing retry. New windows, downloads, clipboard access, autofill, password saving, DevTools, context menus, and every WebView2 permission request are disabled. A native resource-request filter validates every HTTPS top-level and subresource URL and rejects HTTP, file, local, private, link-local, unspecified, and other non-public targets.
+- The `198.18.0.0/15` benchmark range used by Clash Fake-IP remains rejected and is not globally allowlisted. A rejected lookup now identifies the affected hostname and asks for a per-domain `fake-ip-filter` rule or `redir-host`; redirects and dynamically loaded image/challenge subresources remain subject to the same public-address checks.
+- The capture capability matches only `capture-*` windows and remote HTTPS pages, disables local origins, and grants only `core:event:allow-emit`. Random task tokens scope captured source URLs and blob chunks; blob data is written in 192 KiB chunks to owned temporary files and returned to the main window through fixed-size raw IPC reads. Completion, failure, timeout, cancellation, window destruction, and startup cleanup close the isolated view and retire owned data.
+- The APK comic folder creation path discards UI event objects before IndexedDB persistence. Shared group management supports create, rename, and non-destructive delete for image, comic, and video groups; deleting a group removes memberships only. Android remains 1.1.4 / versionCode 21 and was not rebuilt during the final Windows pass.
+- Node regressions passed 59/59. JavaScript syntax checks, Rust unit tests (9/9), `cargo fmt --check`, Clippy with warnings denied, desktop asset preparation, `git diff --check`, and the optimized Tauri/NSIS build passed.
+- The final Release EXE launched from the build path with an `Ecryptees` main window and zero TCP connections during a five-second idle startup smoke test. The final Windows installer and stable alias are byte-identical, 219,206,429 bytes, SHA-256 `E31D906AB8E5774013DE8EA09DF65C3858A3A55D424F1261FA3C7C39925E2B0D`.
+
+**Remaining device/site acceptance boundary**
+
+No physical Windows 10/11 install/uninstall cycle or externally hosted controlled JavaScript/no-CORS/certificate/redirect fixture was available in this workspace. Live acceptance for the reported sites also requires the user's external Clash configuration to bypass Fake-IP for the target, image-CDN, and Cloudflare verification hostnames; the application does not modify that configuration. Those site- and device-specific cases remain manual acceptance coverage; the corresponding URL, redirect, resource-policy, size, token, chunk, timeout, and cleanup paths are covered by static integration and Rust tests.
+
+final result: Windows P0/P1/P2 implementation, regression, Release build, packaging, and local startup verification passed
+
 ## Windows Tauri 1.1.4 release build verification
 
 - Date: 2026-08-17. Rustup stable MSVC was reinstalled successfully; `rustc 1.97.1`, `cargo 1.97.1`, Visual Studio Community 2026, Windows SDK, and WebView2 151 are detected by `tauri info`.

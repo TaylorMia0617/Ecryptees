@@ -1,7 +1,7 @@
 {
     "$schema": "https://schema.tauri.app/config/2",
     "productName": "Ecryptees",
-    "version": "1.1.4",
+    "version": "1.1.5",
     "identifier": "com.ecryptees.desktop",
     "build": {
         "beforeDevCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-desktop.ps1",
@@ -36,7 +36,7 @@
         "targets": ["nsis"],
         "category": "Utility",
         "shortDescription": "本地加密与媒体资产工具",
-        "longDescription": "完全离线处理文本、图片、漫画与原始 MP4 视频资产。",
+        "longDescription": "安装、启动与本地资产处理完全离线；仅在用户主动使用网页链接导入时访问指定 HTTPS 网站。",
         "icon": [
             "icons/32x32.png",
             "icons/128x128.png",

@@ -1,7 +1,7 @@
 {
     "name": "ecryptees-desktop",
     "private": true,
-    "version": "1.1.4",
+    "version": "1.1.5",
     "description": "Ecryptees offline Windows desktop wrapper",
     "scripts": {
         "desktop:prepare": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-desktop.ps1",

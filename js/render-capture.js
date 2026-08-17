@@ -30,9 +30,12 @@
         childList: true,
         subtree: true
     });
-    let capturedCount = typeof bridge?.getRenderedImageCount === 'function'
-        ? Number(bridge.getRenderedImageCount(token)) || 0
-        : 0;
+    let capturedCount = Math.max(
+        Array.isArray(restoredState.sources) ? restoredState.sources.length : 0,
+        typeof bridge?.getRenderedImageCount === 'function'
+            ? Number(await Promise.resolve(bridge.getRenderedImageCount(token))) || 0
+            : 0
+    );
 
     function saveCaptureState(extra = {}) {
         try {
@@ -186,7 +189,7 @@
         }
         if (/^https:\/\//i.test(source)) {
             if (typeof bridge.addRenderedPageSource !== 'function'
-                    || !bridge.addRenderedPageSource(token, source)) {
+                    || !await Promise.resolve(bridge.addRenderedPageSource(token, source))) {
                 throw new Error(`第 ${capturedCount + 1} 张动态图片地址无法写入任务`);
             }
             capturedSources.add(source);
@@ -205,23 +208,23 @@
                 throw new Error(`第 ${capturedCount + 1} 张动态图片内容无效`);
             }
             const order = capturedCount;
-            const capturedIndex = Number(bridge.beginRenderedImage(
+            const capturedIndex = Number(await Promise.resolve(bridge.beginRenderedImage(
                 token,
                 order,
                 safeName(source, order, mime),
                 mime,
                 blob.size
-            ));
+            )));
             if (!Number.isInteger(capturedIndex) || capturedIndex < 0) {
                 throw new Error(`第 ${order + 1} 张动态图片无法写入临时空间`);
             }
             for (let offset = 0; offset < blob.size; offset += 192 * 1024) {
                 const bytes = new Uint8Array(await blob.slice(offset, offset + 192 * 1024).arrayBuffer());
-                if (!bridge.writeRenderedImageChunk(token, capturedIndex, encodeBase64(bytes))) {
+                if (!await Promise.resolve(bridge.writeRenderedImageChunk(token, capturedIndex, encodeBase64(bytes)))) {
                     throw new Error(`第 ${order + 1} 张动态图片写入失败`);
                 }
             }
-            if (!bridge.finishRenderedImage(token, capturedIndex)) {
+            if (!await Promise.resolve(bridge.finishRenderedImage(token, capturedIndex))) {
                 throw new Error(`第 ${order + 1} 张动态图片写入不完整`);
             }
             capturedSources.add(source);
@@ -278,7 +281,8 @@
             const navigationKey = `ecryptees-reader-${token}`;
             if (readerUrl && sessionStorage.getItem(navigationKey) !== readerUrl) {
                 sessionStorage.setItem(navigationKey, readerUrl);
-                if (typeof bridge.navigateRenderedPage === 'function' && bridge.navigateRenderedPage(token, readerUrl)) {
+                if (typeof bridge.navigateRenderedPage === 'function'
+                        && await Promise.resolve(bridge.navigateRenderedPage(token, readerUrl))) {
                     return;
                 }
             }
@@ -348,9 +352,9 @@
         if (!capturedCount) {
             throw new Error('页面运行完成后仍未找到漫画图片');
         }
-        bridge.finishRenderedPage(token, capturedCount);
+        await Promise.resolve(bridge.finishRenderedPage(token, capturedCount));
     } catch (error) {
-        bridge?.failRenderedPage(token, error?.message || '动态网页分析失败');
+        await Promise.resolve(bridge?.failRenderedPage(token, error?.message || '动态网页分析失败'));
     } finally {
         mutationObserver.disconnect();
         scrollTo(0, 0);

@@ -16,6 +16,7 @@
     const androidMedia = root.EcrypteesAndroidMedia;
     const androidNetwork = root.AndroidNetworkBridge;
     const desktopStorage = root.EcrypteesDesktopStorage?.available ? root.EcrypteesDesktopStorage : null;
+    const desktopNetwork = root.EcrypteesDesktopNetwork?.available ? root.EcrypteesDesktopNetwork : null;
     const comicFilesInput = document.getElementById('comicFiles');
     const archiveInput = document.getElementById('comicArchiveFile');
     const fileList = document.getElementById('comicFileList');
@@ -33,6 +34,10 @@
     const historyStatus = document.getElementById('historyStatus');
     const isAndroidRuntime = !!root.AndroidFileBridge || /EcrypteesAndroid\//.test(root.navigator.userAgent);
     const isDesktopRuntime = !!desktopStorage;
+    const nativeNetwork = isAndroidRuntime ? androidNetwork : desktopNetwork;
+    const hasNativeNetwork = !!nativeNetwork;
+    const renderedNetwork = isAndroidRuntime ? androidNetwork : desktopNetwork;
+    const hasRenderedNetwork = typeof renderedNetwork?.beginRenderedPageCapture === 'function';
     const directoryPickerSupported = isDesktopRuntime || typeof root.showDirectoryPicker === 'function';
     const DIRECTORY_DATABASE_NAME = 'ecryptees-directory-v1';
     const DIRECTORY_HANDLE_STORE = 'handles';
@@ -184,6 +189,7 @@
             document.getElementById('historyViewMenu').open = false;
         }
         document.getElementById('addHistoryFolderButton').disabled = busy;
+        document.getElementById('manageHistoryFoldersButton').disabled = busy;
         document.getElementById('selectHistoryDirectoryButton').disabled = busy || !directoryPickerSupported;
         document.getElementById('migrateHistoryButton').disabled = busy
             || !directoryPermissionGranted
@@ -419,6 +425,7 @@
 
     async function createHistoryGroup(name, bookId = '') {
         const normalizedName = normalizeHistoryGroupName(name);
+        const normalizedBookId = typeof bookId === 'string' ? bookId : '';
         if (!normalizedName) {
             throw new Error('文件夹名称不能为空。');
         }
@@ -431,8 +438,12 @@
         try {
             const transaction = database.transaction([GROUP_STORE, GROUP_MEMBERSHIP_STORE], 'readwrite');
             transaction.objectStore(GROUP_STORE).add(group);
-            if (bookId) {
-                transaction.objectStore(GROUP_MEMBERSHIP_STORE).put({ bookId, groupId: group.groupId, updatedAt: now });
+            if (normalizedBookId) {
+                transaction.objectStore(GROUP_MEMBERSHIP_STORE).put({
+                    bookId: normalizedBookId,
+                    groupId: group.groupId,
+                    updatedAt: now
+                });
             }
             await transactionToPromise(transaction, '无法保存文件夹');
         } finally {
@@ -441,6 +452,51 @@
         await loadHistoryGroupState();
         await persistDesktopComicLibrary();
         return group;
+    }
+
+    async function renameHistoryGroup(groupId, name) {
+        const id = String(groupId || '');
+        const normalizedName = normalizeHistoryGroupName(name);
+        if (!normalizedName) throw new Error('文件夹名称不能为空。');
+        const group = historyGroups.find(item => item.groupId === id);
+        if (!group) throw new Error('文件夹已不存在。');
+        if (historyGroups.some(item => item.groupId !== id
+            && item.name.toLocaleLowerCase() === normalizedName.toLocaleLowerCase())) {
+            throw new Error('已经存在同名文件夹。');
+        }
+        const updated = { ...group, name: normalizedName, updatedAt: Date.now() };
+        const database = await openHistoryGroupDatabase();
+        try {
+            const transaction = database.transaction(GROUP_STORE, 'readwrite');
+            transaction.objectStore(GROUP_STORE).put(updated);
+            await transactionToPromise(transaction, '无法保存文件夹名称');
+        } finally {
+            database.close();
+        }
+        await loadHistoryGroupState();
+        await persistDesktopComicLibrary();
+        return updated;
+    }
+
+    async function deleteHistoryGroup(groupId) {
+        const id = String(groupId || '');
+        if (!historyGroups.some(group => group.groupId === id)) throw new Error('文件夹已不存在。');
+        const affectedBookIds = Array.from(historyGroupMemberships)
+            .filter(([, assignedGroupId]) => assignedGroupId === id)
+            .map(([bookId]) => bookId);
+        const database = await openHistoryGroupDatabase();
+        try {
+            const transaction = database.transaction([GROUP_STORE, GROUP_MEMBERSHIP_STORE], 'readwrite');
+            transaction.objectStore(GROUP_STORE).delete(id);
+            const memberships = transaction.objectStore(GROUP_MEMBERSHIP_STORE);
+            affectedBookIds.forEach(bookId => memberships.delete(bookId));
+            await transactionToPromise(transaction, '无法删除文件夹');
+        } finally {
+            database.close();
+        }
+        if (selectedHistoryGroup === id) selectedHistoryGroup = 'all';
+        await loadHistoryGroupState();
+        await persistDesktopComicLibrary();
     }
 
     async function setHistoryBookGroup(bookId, groupId) {
@@ -941,6 +997,24 @@
         return button;
     }
 
+    function createHistoryGroupControl(book) {
+        const groupId = historyGroupMemberships.get(book.bookId) || '';
+        const groupName = historyGroups.find(group => group.groupId === groupId)?.name || '未分组';
+        const control = document.createElement('div');
+        control.className = 'history-card-group-control';
+        const label = document.createElement('span');
+        label.className = 'history-card-group-label';
+        label.textContent = Array.from(groupName).slice(0, 3).join('');
+        label.title = groupName;
+        const button = createHistoryButton('移除分组', 'removeGroup', book.bookId, 'history-remove-group-button');
+        button.disabled = !groupId;
+        button.title = groupId ? `移出“${groupName}”` : '当前漫画未分组';
+        button.setAttribute('aria-label', groupId ? `将《${book.title}》移出分组“${groupName}”` : `《${book.title}》当前未分组`);
+        button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h6l2 2h10v12H3V5Zm4 7v2h10v-2H7Z"/></svg>';
+        control.append(label, button);
+        return control;
+    }
+
     function renderHistoryViewMenu() {
         const select = document.getElementById('historyGroupFilterSelect');
         select.replaceChildren();
@@ -1062,7 +1136,10 @@
             title.className = 'history-card-title';
             title.title = book.title;
             title.textContent = book.title;
-            cardHeader.append(title, createHistoryMenuButton(book));
+            const headerTools = document.createElement('div');
+            headerTools.className = 'history-card-header-tools';
+            headerTools.append(createHistoryGroupControl(book), createHistoryMenuButton(book));
+            cardHeader.append(title, headerTools);
             const meta = document.createElement('p');
             meta.className = 'history-card-meta';
             meta.textContent = `${book.pageCount} 页 · ${formatBytes(book.totalSize)}${book.archiveFile ? ' · 独立目录' : ''}`;
@@ -1336,7 +1413,7 @@
     }
 
     function openHistoryFolderDialog(bookId = '') {
-        folderAssignmentBookId = bookId;
+        folderAssignmentBookId = typeof bookId === 'string' ? bookId : '';
         const dialog = document.getElementById('historyFolderDialog');
         const input = document.getElementById('historyFolderName');
         const error = document.getElementById('historyFolderError');
@@ -1463,11 +1540,15 @@
         }
     }
 
+    function parseNativeNetworkStatus(value) {
+        return typeof value === 'string' ? JSON.parse(value || '{}') : (value || {});
+    }
+
     async function awaitNativeRemoteFetch(token, signal) {
         activeRemoteFetchTokens.add(token);
         const cancel = () => {
             try {
-                androidNetwork.cancelRemoteFetch(token);
+                Promise.resolve(nativeNetwork.cancelRemoteFetch(token)).catch(() => {});
             } catch (error) {
                 // The task may already have finished.
             }
@@ -1478,12 +1559,18 @@
                 if (signal?.aborted) {
                     throw new DOMException('操作已取消', 'AbortError');
                 }
-                const info = JSON.parse(androidNetwork.getRemoteFetchStatus(token) || '{}');
+                const info = parseNativeNetworkStatus(await nativeNetwork.getRemoteFetchStatus(token));
+                if (activeJobType === 'webAnalyze' && info.state === 'running') {
+                    const total = Number(info.contentLength) > 0 ? `/${formatBytes(Number(info.contentLength))}` : '';
+                    setStatus(`正在安全读取网页 · ${formatBytes(Number(info.bytesRead) || 0)}${total}`);
+                }
                 if (info.state === 'ready') {
                     return info;
                 }
                 if (info.state === 'error' || info.state === 'cancelled' || !info.state) {
-                    throw new Error(info.error || '网络请求失败');
+                    const error = new Error(info.error || '网络请求失败');
+                    error.code = String(info.errorCode || '');
+                    throw error;
                 }
                 await waitForRemoteStatus();
             }
@@ -1492,43 +1579,53 @@
         }
     }
 
-    function releaseNativeRemoteFetch(token) {
+    async function readNativeRemoteFetchChunk(token, offset) {
+        const value = await nativeNetwork.readRemoteFetchChunk(token, 768 * 1024, offset);
+        return isAndroidRuntime ? decodeBase64Chunk(value) : value;
+    }
+
+    async function releaseNativeRemoteFetch(token) {
         activeRemoteFetchTokens.delete(token);
         try {
-            androidNetwork.releaseRemoteFetch(token);
+            await nativeNetwork.releaseRemoteFetch(token);
         } catch (error) {
             // Native cold-start cleanup is the fallback.
         }
     }
 
     function releaseRenderedPageCapture() {
-        if (!webImportRenderedToken || typeof androidNetwork?.releaseRenderedPageCapture !== 'function') {
+        if (!webImportRenderedToken || typeof renderedNetwork?.releaseRenderedPageCapture !== 'function') {
             webImportRenderedToken = '';
             return;
         }
-        try {
-            androidNetwork.releaseRenderedPageCapture(webImportRenderedToken);
-        } catch (error) {
-            // Native Activity cleanup is the final fallback.
-        }
+        const token = webImportRenderedToken;
         webImportRenderedToken = '';
+        try {
+            Promise.resolve(renderedNetwork.releaseRenderedPageCapture(token)).catch(() => {});
+        } catch (error) {
+            // Native shutdown cleanup is the final fallback.
+        }
     }
 
-    async function captureRenderedPage(url, maximum, signal) {
+    async function captureRenderedPage(url, maximum, signal, interactiveVerification = false) {
         const timeoutAt = Date.now() + 150_000;
-        if (!isAndroidRuntime || typeof androidNetwork?.beginRenderedPageCapture !== 'function') {
-            throw new Error('网页依赖脚本生成图片；请使用支持动态网页分析的 Android APK');
+        if (!hasRenderedNetwork) {
+            throw new Error('网页依赖脚本生成图片；当前运行环境不支持隔离动态分析');
         }
-        const token = androidNetwork.beginRenderedPageCapture(url, maximum);
+        const token = await renderedNetwork.beginRenderedPageCapture(
+            url,
+            maximum,
+            interactiveVerification
+        );
         if (!token) {
             throw new Error('无法启动动态网页分析');
         }
         webImportRenderedToken = token;
         const cancel = () => {
             try {
-                androidNetwork.releaseRenderedPageCapture(token);
+                Promise.resolve(renderedNetwork.releaseRenderedPageCapture(token)).catch(() => {});
             } catch (error) {
-                // Native cleanup also runs when the Activity closes.
+                // Native cleanup also runs when the host closes.
             }
         };
         signal.addEventListener('abort', cancel, { once: true });
@@ -1540,7 +1637,15 @@
                 if (Date.now() >= timeoutAt) {
                     throw new Error('动态网页分析超过 150 秒，任务已停止；请清除后重试');
                 }
-                const status = JSON.parse(androidNetwork.getRenderedPageCaptureStatus(token) || '{}');
+                const status = parseNativeNetworkStatus(
+                    await renderedNetwork.getRenderedPageCaptureStatus(token)
+                );
+                if (status.state === 'awaitingVerification') {
+                    setStatus('网页要求人机验证 · 请在独立验证窗口中正常完成验证…');
+                }
+                if (status.state === 'running') {
+                    setStatus(`正在运行动态页面 · 已捕获 ${status.images?.length || 0} 张 · ${formatBytes(Number(status.bytesWritten) || 0)}`);
+                }
                 if (status.state === 'ready') {
                     return status;
                 }
@@ -1559,11 +1664,11 @@
 
     async function fetchHtmlForImport(url, signal) {
         const maximumBytes = 5 * 1024 * 1024;
-        if (isAndroidRuntime) {
-            if (!androidNetwork) {
+        if (hasNativeNetwork) {
+            if (!nativeNetwork) {
                 throw new Error('当前 APK 缺少网页导入网络桥，请安装 1.0.11 或更高版本');
             }
-            const token = androidNetwork.beginRemoteFetch(url, 'html', '');
+            const token = await nativeNetwork.beginRemoteFetch(url, 'html', '');
             if (!token) {
                 throw new Error('无法启动网页请求');
             }
@@ -1572,11 +1677,10 @@
                 const chunks = [];
                 let size = 0;
                 while (true) {
-                    const encoded = androidNetwork.readRemoteFetchChunk(token, 768 * 1024);
-                    if (!encoded) {
+                    const chunk = await readNativeRemoteFetchChunk(token, size);
+                    if (!chunk.length) {
                         break;
                     }
-                    const chunk = decodeBase64Chunk(encoded);
                     size += chunk.length;
                     if (size > maximumBytes) {
                         throw new Error('网页 HTML 不能超过 5 MiB');
@@ -1587,8 +1691,17 @@
                     html: decodeHtmlBytes(concatByteChunks(chunks, size), info.contentType),
                     finalUrl: info.finalUrl || url
                 };
+            } catch (error) {
+                if (error.code === 'cloudflareChallenge' && isDesktopRuntime && hasRenderedNetwork) {
+                    return {
+                        html: '',
+                        finalUrl: url,
+                        requiresInteractiveVerification: true
+                    };
+                }
+                throw error;
             } finally {
-                releaseNativeRemoteFetch(token);
+                await releaseNativeRemoteFetch(token);
             }
         }
 
@@ -1728,7 +1841,7 @@
     }
 
     async function streamNativeImageToWritable(candidate, writable, signal, budget) {
-        const token = androidNetwork.beginRemoteFetch(candidate.url, 'image', webImportFinalUrl);
+        const token = await nativeNetwork.beginRemoteFetch(candidate.url, 'image', webImportFinalUrl);
         if (!token) {
             throw new Error('无法启动图片请求');
         }
@@ -1736,11 +1849,10 @@
         try {
             const info = await awaitNativeRemoteFetch(token, signal);
             while (true) {
-                const encoded = androidNetwork.readRemoteFetchChunk(token, 768 * 1024);
-                if (!encoded) {
+                const chunk = await readNativeRemoteFetchChunk(token, localBytes);
+                if (!chunk.length) {
                     break;
                 }
-                const chunk = decodeBase64Chunk(encoded);
                 localBytes += chunk.length;
                 budget.bytes += chunk.length;
                 if (budget.bytes > budget.limit) {
@@ -1753,12 +1865,12 @@
             budget.bytes -= localBytes;
             throw error;
         } finally {
-            releaseNativeRemoteFetch(token);
+            await releaseNativeRemoteFetch(token);
         }
     }
 
     async function streamCapturedImageToWritable(candidate, writable, signal, budget) {
-        if (!webImportRenderedToken || typeof androidNetwork?.readRenderedPageImageChunk !== 'function') {
+        if (!webImportRenderedToken || typeof renderedNetwork?.readRenderedPageImageChunk !== 'function') {
             throw new Error('动态网页图片已经释放，请重新分析网页');
         }
         let localBytes = 0;
@@ -1767,16 +1879,16 @@
                 if (signal.aborted) {
                     throw new DOMException('操作已取消', 'AbortError');
                 }
-                const encoded = androidNetwork.readRenderedPageImageChunk(
+                const value = await renderedNetwork.readRenderedPageImageChunk(
                     webImportRenderedToken,
                     candidate.capturedIndex,
-                    localBytes,
-                    768 * 1024
+                    isAndroidRuntime ? localBytes : 768 * 1024,
+                    isAndroidRuntime ? 768 * 1024 : localBytes
                 );
-                if (!encoded) {
+                if (!value || (!isAndroidRuntime && !value.length)) {
                     break;
                 }
-                const chunk = decodeBase64Chunk(encoded);
+                const chunk = isAndroidRuntime ? decodeBase64Chunk(value) : value;
                 localBytes += chunk.length;
                 budget.bytes += chunk.length;
                 if (budget.bytes > budget.limit) {
@@ -1888,7 +2000,7 @@
             writable = await handle.createWritable();
             const result = candidate.capturedIndex >= 0
                 ? await streamCapturedImageToWritable(candidate, writable, signal, budget)
-                : (isAndroidRuntime
+                : (hasNativeNetwork
                     ? await streamNativeImageToWritable(candidate, writable, signal, budget)
                     : await streamBrowserImageToWritable(candidate, writable, signal, budget));
             completedBytes = result.bytes;
@@ -2216,6 +2328,7 @@
                 }
                 candidate.error = '';
                 candidate.loading = true;
+                setStatus(`正在下载第 ${index + 1}/${selected.length} 张图片 · 已处理 ${formatBytes(budget.bytes)}/${formatBytes(budget.limit)}`);
                 candidate.abortController = new AbortController();
                 const abortCandidate = () => candidate.abortController?.abort();
                 signal.addEventListener('abort', abortCandidate, { once: true });
@@ -2233,6 +2346,7 @@
                     } else {
                         completed += 1;
                         setProgress(completed, selected.length);
+                        setStatus(`正在下载第 ${Math.min(selected.length, index + 2)}/${selected.length} 张图片 · 已处理 ${formatBytes(budget.bytes)}/${formatBytes(budget.limit)}`);
                     }
                 } catch (error) {
                     if (candidate.selected) {
@@ -2318,9 +2432,10 @@
         activeJobType = 'webAnalyze';
         setBusy(activeJobType);
         setProgress(0, 1);
-        setStatus('正在读取网页 HTML…');
+        setStatus('正在安全读取网页…');
         try {
             const result = await fetchHtmlForImport(url, webImportAbortController.signal);
+            setStatus('正在分析静态内容…');
             const elementCandidates = webImportCore.extractImageCandidates(result.html, result.finalUrl);
             const embeddedCandidates = webImportCore.extractEmbeddedImageCandidates(result.html, result.finalUrl);
             let extracted = webImportCore.uniqueImageCandidates(
@@ -2333,10 +2448,15 @@
                     throw new Error('当前漫画已经没有可用页数');
                 }
                 setStatus(extracted.length
-                    ? '检测到阅读器或少量预览图，正在隔离运行页面并收集完整页序…'
-                    : '静态 HTML 没有图片，正在隔离运行页面并等待漫画内容加载…');
+                    ? '正在运行动态页面 · 检测到阅读器或少量预览图，正在隔离运行页面并收集完整页序…'
+                    : '正在运行动态页面 · 静态内容没有图片，正在隔离运行页面并等待漫画内容加载…');
                 try {
-                    const captured = await captureRenderedPage(result.finalUrl, maximumSelected, webImportAbortController.signal);
+                    const captured = await captureRenderedPage(
+                        result.finalUrl,
+                        maximumSelected,
+                        webImportAbortController.signal,
+                        result.requiresInteractiveVerification === true
+                    );
                     const renderedCandidates = webImportCore.uniqueImageCandidates((captured.images || []).map(image => ({
                         url: image.sourceUrl || `${captured.finalUrl || result.finalUrl}#dynamic-page-${image.index + 1}`,
                         duplicateOf: -1,
@@ -4249,6 +4369,11 @@
             exportHistoryLongImage(bookId);
         } else if (historyAction === 'menu') {
             openHistoryBookMenu(bookId);
+        } else if (historyAction === 'removeGroup') {
+            const book = historyBooks.find(item => item.bookId === bookId);
+            setHistoryBookGroup(bookId, '')
+                .then(() => setHistoryStatus(`《${book?.title || '漫画'}》已移出分组。`, 'success'))
+                .catch(error => setHistoryStatus(error.message || '无法移除漫画分组。', 'error'));
         } else if (historyAction === 'delete') {
             requestDeleteHistoryBook(bookId);
         }
@@ -4269,7 +4394,17 @@
             renderHistory();
         },
         handleSearchInput: renderHistory,
-        handleAddFolder: openHistoryFolderDialog,
+        handleAddFolder() {
+            openHistoryFolderDialog();
+        },
+        listGroups() {
+            return historyGroups.map(group => ({ groupId: group.groupId, name: group.name }));
+        },
+        createGroup(name) {
+            return createHistoryGroup(name);
+        },
+        renameGroup: renameHistoryGroup,
+        deleteGroup: deleteHistoryGroup,
         handleClear: requestClearHistory,
         handleEmptyAction() {
             document.getElementById('comicTab').click();
@@ -4345,7 +4480,7 @@
         releaseRenderedPageCapture();
         for (const token of activeRemoteFetchTokens) {
             try {
-                androidNetwork?.cancelRemoteFetch(token);
+                Promise.resolve(nativeNetwork?.cancelRemoteFetch(token)).catch(() => {});
             } catch (error) {
                 // Native cleanup also runs when the Activity is destroyed.
             }

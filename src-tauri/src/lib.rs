@@ -1,4 +1,16 @@
+mod network;
+mod render_capture;
+
 use fs2::available_space;
+use network::{
+    NetworkManager, begin_desktop_network_fetch, cancel_desktop_network_fetch,
+    get_desktop_network_status, read_desktop_network_chunk, release_desktop_network_fetch,
+};
+use render_capture::{
+    RenderCaptureManager, begin_desktop_rendered_page_capture,
+    get_desktop_rendered_page_capture_status, read_desktop_rendered_page_image_chunk,
+    release_desktop_rendered_page_capture,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -8,7 +20,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Listener, Manager, State};
 use tauri_plugin_fs::FsExt;
 use uuid::Uuid;
 
@@ -1198,14 +1210,43 @@ fn open_desktop_asset_root(kind: String, state: State<'_, DesktopState>) -> Resu
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let capture_manager = RenderCaptureManager::default();
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_persisted_scope::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(DesktopState::default())
+        .manage(NetworkManager::default())
+        .manage(capture_manager.clone())
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                if window.label() == "main" {
+                    window.state::<NetworkManager>().shutdown();
+                    window
+                        .state::<RenderCaptureManager>()
+                        .shutdown(window.app_handle());
+                } else {
+                    window
+                        .state::<RenderCaptureManager>()
+                        .window_destroyed(window.label());
+                }
+            }
+        })
         .setup(|app| {
             let state = app.state::<DesktopState>();
             initialize(app.handle(), &state).map_err(std::io::Error::other)?;
+            let temp_root = app.path().temp_dir().map_err(std::io::Error::other)?;
+            app.state::<NetworkManager>()
+                .initialize(&temp_root)
+                .map_err(std::io::Error::other)?;
+            app.state::<RenderCaptureManager>()
+                .initialize(&temp_root)
+                .map_err(std::io::Error::other)?;
+            let capture_app = app.handle().clone();
+            let capture_manager = app.state::<RenderCaptureManager>().inner().clone();
+            app.listen("ecryptees-capture-message", move |event| {
+                capture_manager.process_payload(&capture_app, event.payload());
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1221,7 +1262,16 @@ pub fn run() {
             update_desktop_library,
             trash_desktop_asset,
             set_desktop_asset_root,
-            open_desktop_asset_root
+            open_desktop_asset_root,
+            begin_desktop_network_fetch,
+            get_desktop_network_status,
+            read_desktop_network_chunk,
+            cancel_desktop_network_fetch,
+            release_desktop_network_fetch,
+            begin_desktop_rendered_page_capture,
+            get_desktop_rendered_page_capture_status,
+            read_desktop_rendered_page_image_chunk,
+            release_desktop_rendered_page_capture
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Ecryptees desktop application");

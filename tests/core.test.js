@@ -309,6 +309,9 @@ test('static entry point references ordered external files without inline handle
     assert.match(comicApp, /createObjectStore\(GROUP_STORE, \{ keyPath: 'groupId' \}\)/);
     assert.match(comicApp, /createObjectStore\(GROUP_MEMBERSHIP_STORE, \{ keyPath: 'bookId' \}\)/);
     assert.match(comicApp, /function openHistoryFolderDialog\(bookId = ''\)/);
+    assert.match(comicApp, /folderAssignmentBookId = typeof bookId === 'string' \? bookId : ''/);
+    assert.match(comicApp, /const normalizedBookId = typeof bookId === 'string' \? bookId : ''/);
+    assert.doesNotMatch(comicApp, /handleAddFolder: openHistoryFolderDialog/);
     assert.match(comicApp, /function openHistoryGroupDialog\(bookId\)/);
     assert.match(comicApp, /historyAction === 'menu'/);
     assert.match(comicApp, /createHistoryButton\('阅读', 'open'/);
@@ -543,7 +546,7 @@ test('Android wrapper loads local HTTPS assets and streams downloads through SAF
     assert.match(renderedCapture, /getRenderedImageCount/);
     assert.match(renderedCapture, /scrollIntoView/);
     assert.match(renderedCapture, /if \(\/\^https:\\\/\\\/\/i\.test\(source\)\)[\s\S]*bridge\.addRenderedPageSource\(token, source\)[\s\S]*return true;[\s\S]*const response = await fetch\(source/);
-    assert.match(renderedCapture, /const capturedIndex = Number\(bridge\.beginRenderedImage/);
+    assert.match(renderedCapture, /const capturedIndex = Number\(await Promise\.resolve\(bridge\.beginRenderedImage/);
     assert.match(renderedCapture, /blob\.slice\(offset, offset \+ 192 \* 1024\)/);
     assert.match(renderedCapture, /bridge\.finishRenderedPage/);
     assert.match(activity, /"https"\.equalsIgnoreCase\(url\.getProtocol\(\)\)/);
@@ -615,9 +618,9 @@ test('JPG and JPEG remain selectable in browsers and the Android photo picker', 
     assert.match(activity, /new ActivityResultContracts\.PickVisualMedia\(\)/);
     assert.match(activity, /new ActivityResultContracts\.PickMultipleVisualMedia\(80\)/);
     assert.match(activity, /PickVisualMedia\.ImageOnly\.INSTANCE/);
-    assert.match(appBuild, /versionCode 20/);
-    assert.match(appBuild, /versionName '1\.1\.3'/);
-    assert.match(serviceWorker, /const CACHE_NAME = 'ecryptees-app-v21-desktop'/);
+    assert.match(appBuild, /versionCode 21/);
+    assert.match(appBuild, /versionName '1\.1\.4'/);
+    assert.match(serviceWorker, /const CACHE_NAME = 'ecryptees-app-v23-web-verification'/);
     assert.match(serviceWorker, /'\.\/js\/desktop-storage\.js'/);
     assert.match(serviceWorker, /'\.\/js\/reader-core\.js'/);
 });
@@ -647,6 +650,6 @@ test('Android comic picker preserves system photo selection order without broad 
     assert.match(comicApp, /items\.push\(\.\.\.prepared\)/);
     assert.match(comicApp, /items\.length >= format\.MAX_PAGES/);
     assert.match(comicApp, /已按系统相册返回顺序加入/);
-    assert.match(appBuild, /versionCode 20/);
-    assert.match(appBuild, /versionName '1\.1\.3'/);
+    assert.match(appBuild, /versionCode 21/);
+    assert.match(appBuild, /versionName '1\.1\.4'/);
 });

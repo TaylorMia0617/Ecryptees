@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $bundleRoot = Join-Path $repositoryRoot 'src-tauri\target\release\bundle\nsis'
 $distributionRoot = Join-Path $repositoryRoot 'dist\windows'
-$expectedName = 'Ecryptees-v1.1.4-x64-setup.exe'
+$expectedName = 'Ecryptees-v1.1.5-x64-setup.exe'
 
 if (-not (Test-Path -LiteralPath $bundleRoot)) {
     throw "Tauri NSIS output is missing: $bundleRoot"

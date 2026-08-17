@@ -388,6 +388,49 @@
         return folder;
     }
 
+    async function renameVideoFolder(folderId, name) {
+        const id = String(folderId || '');
+        const normalized = normalizeText(name, '', 40);
+        if (!normalized) throw new Error('文件夹名称不能为空');
+        const state = await listVideoAssets();
+        const folder = state.folders.find(item => item.folderId === id);
+        if (!folder) throw new Error('文件夹已不存在');
+        if (state.folders.some(item => item.folderId !== id
+            && item.name.toLocaleLowerCase() === normalized.toLocaleLowerCase())) {
+            throw new Error('已经存在同名文件夹');
+        }
+        const updated = { ...folder, name: normalized, updatedAt: Date.now() };
+        const database = await openDatabase();
+        try {
+            const transaction = database.transaction(FOLDER_STORE, 'readwrite');
+            transaction.objectStore(FOLDER_STORE).put(updated);
+            await transactionToPromise(transaction);
+        } finally {
+            database.close();
+        }
+        await persistDesktopLibrary();
+        return updated;
+    }
+
+    async function deleteVideoFolder(folderId) {
+        const id = String(folderId || '');
+        const state = await listVideoAssets();
+        if (!state.folders.some(folder => folder.folderId === id)) throw new Error('文件夹已不存在');
+        const database = await openDatabase();
+        try {
+            const transaction = database.transaction([FOLDER_STORE, MEMBERSHIP_STORE], 'readwrite');
+            transaction.objectStore(FOLDER_STORE).delete(id);
+            const memberships = transaction.objectStore(MEMBERSHIP_STORE);
+            state.memberships
+                .filter(item => item.folderId === id)
+                .forEach(item => memberships.delete(item.assetId));
+            await transactionToPromise(transaction);
+        } finally {
+            database.close();
+        }
+        await persistDesktopLibrary();
+    }
+
     async function setVideoAssetFolder(assetId, folderId) {
         const database = await openDatabase();
         try {
@@ -439,6 +482,8 @@
         auditVideoAssets,
         deleteVideoAsset,
         createVideoFolder,
+        renameVideoFolder,
+        deleteVideoFolder,
         setVideoAssetFolder,
         clearVideoAssets,
         removeStoredFile,

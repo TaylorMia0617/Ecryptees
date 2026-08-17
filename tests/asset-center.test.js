@@ -64,10 +64,47 @@ test('only the asset center owns shared shelf control listeners', () => {
     const comic = fs.readFileSync(path.resolve(__dirname, '../js/comic-app.js'), 'utf8');
     const image = fs.readFileSync(path.resolve(__dirname, '../js/image-assets-app.js'), 'utf8');
     const video = fs.readFileSync(path.resolve(__dirname, '../js/video-app.js'), 'utf8');
-    for (const id of ['historyGrid', 'historyGroupFilterSelect', 'historySort', 'historySearch', 'addHistoryFolderButton', 'clearHistoryButton']) {
+    for (const id of ['historyGrid', 'historyGroupFilterSelect', 'historySort', 'historySearch', 'manageHistoryFoldersButton', 'addHistoryFolderButton', 'clearHistoryButton']) {
         assert.match(center, new RegExp(`${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\\n]*addEventListener`));
         assert.doesNotMatch(comic, new RegExp(`${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\\n]*addEventListener`));
         assert.doesNotMatch(image, new RegExp(`${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\\n]*addEventListener`));
         assert.doesNotMatch(video, new RegExp(`${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\\n]*addEventListener`));
     }
+});
+
+test('all asset types expose non-destructive group management', () => {
+    const html = fs.readFileSync(path.resolve(__dirname, '../index.html'), 'utf8');
+    const center = fs.readFileSync(path.resolve(__dirname, '../js/asset-center.js'), 'utf8');
+    const comic = fs.readFileSync(path.resolve(__dirname, '../js/comic-app.js'), 'utf8');
+    const imageStore = fs.readFileSync(path.resolve(__dirname, '../js/image-assets.js'), 'utf8');
+    const videoStore = fs.readFileSync(path.resolve(__dirname, '../js/video-assets.js'), 'utf8');
+
+    assert.match(html, /id="manageHistoryFoldersButton"[\s\S]*id="historyGroupFilterSelect"/);
+    assert.match(html, /删除分组只会移除资产的分组归属/);
+    assert.match(center, /renameGroup/);
+    assert.match(center, /deleteGroup/);
+    assert.match(comic, /renameHistoryGroup/);
+    assert.match(comic, /deleteHistoryGroup/);
+    assert.match(imageStore, /renameImageFolder/);
+    assert.match(imageStore, /deleteImageFolder/);
+    assert.match(videoStore, /renameVideoFolder/);
+    assert.match(videoStore, /deleteVideoFolder/);
+});
+
+test('all asset cards expose a compact direct remove-group control', () => {
+    const styles = fs.readFileSync(path.resolve(__dirname, '../css/styles.css'), 'utf8');
+    const comic = fs.readFileSync(path.resolve(__dirname, '../js/comic-app.js'), 'utf8');
+    const image = fs.readFileSync(path.resolve(__dirname, '../js/image-assets-app.js'), 'utf8');
+    const video = fs.readFileSync(path.resolve(__dirname, '../js/video-app.js'), 'utf8');
+
+    for (const source of [comic, image, video]) {
+        assert.match(source, /history-card-group-control/);
+        assert.match(source, /history-remove-group-button/);
+        assert.match(source, /Array\.from\([^)]+\)\.slice\(0, 3\)\.join\(''\)/);
+        assert.match(source, /['"]removeGroup['"]/);
+    }
+    assert.match(comic, /setHistoryBookGroup\(bookId, ''\)/);
+    assert.match(image, /setImageAssetFolder\(assetId, ''\)/);
+    assert.match(video, /setVideoAssetFolder\(assetId, ''\)/);
+    assert.match(styles, /\.history-card-group-label\s*\{[^}]*width:\s*3em/s);
 });

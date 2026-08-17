@@ -1165,6 +1165,24 @@
         return button;
     }
 
+    function createVideoGroupControl(asset) {
+        const folderId = memberships.get(asset.assetId) || '';
+        const folderName = folders.find(folder => folder.folderId === folderId)?.name || '未分组';
+        const control = document.createElement('div');
+        control.className = 'history-card-group-control';
+        const label = document.createElement('span');
+        label.className = 'history-card-group-label';
+        label.textContent = Array.from(folderName).slice(0, 3).join('');
+        label.title = folderName;
+        const button = actionButton('移除分组', 'removeGroup', asset.assetId, 'history-remove-group-button');
+        button.disabled = !folderId;
+        button.title = folderId ? `移出“${folderName}”` : '当前视频未分组';
+        button.setAttribute('aria-label', folderId ? `将《${asset.title}》移出分组“${folderName}”` : `《${asset.title}》当前未分组`);
+        button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h6l2 2h10v12H3V5Zm4 7v2h10v-2H7Z"/></svg>';
+        control.append(label, button);
+        return control;
+    }
+
     function render() {
         if (!active || !assetCenter.isActive('video')) return;
         renderFolders();
@@ -1212,7 +1230,10 @@
             const menu = actionButton('更多操作', 'menu', asset.assetId, 'history-menu-button');
             menu.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 6a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 6a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z"/></svg>';
             menu.setAttribute('aria-label', `打开《${asset.title}》的更多操作`);
-            header.append(title, menu);
+            const headerTools = document.createElement('div');
+            headerTools.className = 'history-card-header-tools';
+            headerTools.append(createVideoGroupControl(asset), menu);
+            header.append(title, headerTools);
             const meta = document.createElement('p');
             meta.className = 'history-card-meta';
             meta.textContent = missing
@@ -1336,6 +1357,20 @@
             if (!dialog.open) dialog.showModal();
             return;
         }
+        if (action === 'removeGroup') {
+            try {
+                busy = true;
+                await store.setVideoAssetFolder(assetId, '');
+                await refresh();
+                setStatus(`《${asset.title}》已移出分组。`, 'success');
+            } catch (error) {
+                setStatus(error.message || '无法移除视频分组。', 'error');
+            } finally {
+                busy = false;
+                if (active) render();
+            }
+            return;
+        }
         try {
             busy = true;
             render();
@@ -1414,6 +1449,24 @@
             const dialog = document.getElementById('videoAssetMenuDialog');
             if (!dialog.open) dialog.showModal();
             document.getElementById('videoAssetNewGroupInput').focus();
+        },
+        listGroups() {
+            return folders.map(folder => ({ groupId: folder.folderId, name: folder.name }));
+        },
+        async createGroup(name) {
+            const folder = await store.createVideoFolder(name);
+            await refresh();
+            return folder;
+        },
+        async renameGroup(folderId, name) {
+            const folder = await store.renameVideoFolder(folderId, name);
+            await refresh();
+            return folder;
+        },
+        async deleteGroup(folderId) {
+            if (selectedFolder === folderId) selectedFolder = 'all';
+            await store.deleteVideoFolder(folderId);
+            await refresh();
         },
         handleClear() {
             if (assets.length && confirm('清空全部视频资产？此操作无法撤销。')) {
