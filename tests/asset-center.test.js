@@ -108,3 +108,15 @@ test('all asset cards expose a compact direct remove-group control', () => {
     assert.match(video, /setVideoAssetFolder\(assetId, ''\)/);
     assert.match(styles, /\.history-card-group-label\s*\{[^}]*width:\s*3em/s);
 });
+
+test('comic shelf owns Android long press instead of yielding to the native callout', () => {
+    const center = fs.readFileSync(path.resolve(__dirname, '../js/asset-center.js'), 'utf8');
+    const comic = fs.readFileSync(path.resolve(__dirname, '../js/comic-app.js'), 'utf8');
+    const styles = fs.readFileSync(path.resolve(__dirname, '../css/styles.css'), 'utf8');
+
+    assert.match(center, /addEventListener\('contextmenu'/);
+    assert.match(comic, /handleGridContextMenu: suppressHistoryContextMenu/);
+    assert.match(comic, /AndroidFileBridge\?\.performSelectionHaptic/);
+    assert.match(styles, /-webkit-touch-callout:\s*none/);
+    assert.match(styles, /touch-action:\s*pan-y/);
+});

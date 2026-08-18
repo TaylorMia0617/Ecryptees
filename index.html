@@ -275,12 +275,35 @@
                 </div>
 
                 <div class="comic-decode-panel" id="archiveComicSourcePanel" hidden>
-                    <span class="image-meta" id="comicArchiveMeta">尚未选择 .ecomic</span>
+                    <span class="image-meta" id="comicArchiveMeta">尚未选择 .ecomic 或漫画包 ZIP</span>
                     <div class="cipher-file-actions">
-                        <input class="file-input" id="comicArchiveFile" type="file" accept=".ecomic,application/vnd.ecryptees.ecomic">
-                        <label class="file-picker" id="comicArchiveFilePicker" for="comicArchiveFile" tabindex="0">选择 .ecomic</label>
+                        <input class="file-input" id="comicArchiveFile" type="file" accept=".ecomic,.zip,application/vnd.ecryptees.ecomic,application/zip">
+                        <label class="file-picker" id="comicArchiveFilePicker" for="comicArchiveFile" tabindex="0">选择 .ecomic / ZIP</label>
                         <button id="openComicButton" type="button" disabled>解密、转存并阅读</button>
                     </div>
+                    <section class="comic-bundle-import-summary" id="comicBundleImportSummary" aria-live="polite" hidden>
+                        <div class="comic-bundle-import-heading">
+                            <div>
+                                <span>漫画包导入</span>
+                                <strong id="comicBundleFileName">尚未选择 ZIP</strong>
+                            </div>
+                            <button class="secondary-button" id="comicBundleImportButton" type="button" disabled>导入漫画包</button>
+                        </div>
+                        <progress id="comicBundleImportProgress" max="100" value="0" aria-label="漫画包导入进度"></progress>
+                        <p id="comicBundleImportState">等待解析 Ecryptees 漫画包</p>
+                        <div class="comic-bundle-result" id="comicBundleImportResult">
+                            <span>成功 <strong id="comicBundleSuccessCount">0</strong></span>
+                            <span>替换 <strong id="comicBundleReplaceCount">0</strong></span>
+                            <span>跳过 <strong id="comicBundleSkippedCount">0</strong></span>
+                            <span>失败 <strong id="comicBundleFailedCount">0</strong></span>
+                        </div>
+                        <label class="comic-bundle-conflict" for="comicBundleConflictPolicy">同一漫画再次导入</label>
+                        <select id="comicBundleConflictPolicy">
+                            <option value="replace">原子替换现有漫画</option>
+                            <option value="skip">保留现有漫画并跳过</option>
+                        </select>
+                        <ul class="comic-bundle-failures" id="comicBundleFailureList" hidden></ul>
+                    </section>
                 </div>
 
                 <ol class="comic-file-list" id="comicFileList" aria-label="漫画页面顺序" data-comic-create-only></ol>
@@ -320,6 +343,14 @@
                 <button class="is-active" id="assetTypeComicButton" type="button" aria-pressed="true">漫画 <span class="asset-type-count" data-asset-count="comic" aria-label="0 项">0</span></button>
                 <button id="assetTypeImageButton" type="button" aria-pressed="false">图片 <span class="asset-type-count" data-asset-count="image" aria-label="0 项">0</span></button>
                 <button id="assetTypeVideoButton" type="button" aria-pressed="false">视频 <span class="asset-type-count" data-asset-count="video" aria-label="0 项">0</span></button>
+            </div>
+            <div class="history-selection-bar" id="historySelectionBar" hidden>
+                <button class="history-selection-close" id="historySelectionCancelButton" type="button" aria-label="退出漫画多选">×</button>
+                <div>
+                    <strong id="historySelectionCount" role="status" aria-live="polite">已选 0 本</strong>
+                    <span id="historySelectionHint">轻点漫画继续选择</span>
+                </div>
+                <button class="history-selection-all" id="historySelectionAllButton" type="button">全选</button>
             </div>
             <div class="history-directory" id="historyDirectoryPanel">
                 <div>
@@ -367,6 +398,13 @@
                 <button id="historyGoToComicButton" type="button">前往漫画模式</button>
             </div>
             <div class="history-grid" id="historyGrid" aria-live="polite"></div>
+            <div class="history-bundle-export-bar" id="historyBundleExportBar" hidden>
+                <button id="historyBundleExportButton" type="button">
+                    <span aria-hidden="true">⇩</span>
+                    <strong>导出 0 本为 ZIP</strong>
+                </button>
+                <span id="historyBundleExportSize">约 0 B</span>
+            </div>
             <p class="image-status" id="historyStatus" role="status" aria-live="polite"></p>
         </section>
         <p class="sr-only" id="copyStatus" role="status" aria-live="polite"></p>
@@ -473,7 +511,7 @@
                 <h3 id="versionSettingsTitle">应用信息</h3>
                 <div class="app-version-row">
                     <span>版本</span>
-                    <strong id="appVersionInfo">1.1.5 · code 23</strong>
+                    <strong id="appVersionInfo">1.1.8 · code 26</strong>
                 </div>
             </section>
         </div>
@@ -525,14 +563,97 @@
         </form>
     </dialog>
 
-    <dialog class="history-action-dialog" id="historyBookMenuDialog" aria-labelledby="historyBookMenuTitle">
-        <div class="history-dialog-shell">
-            <h2 id="historyBookMenuTitle">漫画操作</h2>
-            <div class="history-menu-actions">
-                <button id="historyMenuRenameButton" type="button">修改名称</button>
-                <button id="historyMenuGroupButton" class="secondary-button" type="button">添加分组</button>
-                <button id="historyMenuCancelButton" class="secondary-button" type="button">取消</button>
+    <dialog class="video-action-sheet-dialog" id="historyBookMenuDialog" aria-labelledby="historyBookMenuTitle">
+        <div class="video-action-sheet" id="historyBookActionSheet">
+            <button class="video-sheet-drag-handle" id="historyBookMenuCancelButton" type="button" aria-label="关闭漫画操作"></button>
+            <header class="video-sheet-header">
+                <div>
+                    <span class="video-sheet-eyebrow">漫画操作</span>
+                    <h2 id="historyBookMenuTitle">漫画</h2>
+                </div>
+                <button class="video-sheet-close" id="historyBookMenuCloseButton" type="button" aria-label="关闭漫画操作">×</button>
+            </header>
+            <div class="video-sheet-view" id="historyBookMenuView">
+                <div class="video-sheet-list">
+                    <button id="historyMenuRenameButton" type="button"><span aria-hidden="true">✎</span><span>修改名称</span></button>
+                    <button id="historyMenuGroupButton" type="button"><span aria-hidden="true">▱</span><span>添加至分组</span></button>
+                    <button id="historyMenuEditButton" type="button"><span aria-hidden="true">▤</span><span>编辑漫画</span></button>
+                    <button id="historyMenuExportArchiveButton" type="button"><span aria-hidden="true">⇩</span><span>导出 .ecomic</span></button>
+                    <button id="historyMenuExportLongButton" type="button"><span aria-hidden="true">⇩</span><span>导出长图</span></button>
+                </div>
+                <button class="video-sheet-danger" id="historyMenuDeleteButton" type="button"><span aria-hidden="true">⌫</span><span>删除漫画</span></button>
             </div>
+            <form class="video-sheet-view" id="historyMenuRenameForm" hidden>
+                <label for="historyMenuRenameInput">漫画名称</label>
+                <input id="historyMenuRenameInput" type="text" maxlength="120" autocomplete="off" required>
+                <div class="video-sheet-actions">
+                    <button class="secondary-button" id="historyMenuRenameCancelButton" type="button">返回</button>
+                    <button type="submit">保存名称</button>
+                </div>
+            </form>
+            <form class="video-sheet-view" id="historyGroupForm" hidden>
+                <label for="historyGroupSelect">选择分组</label>
+                <select id="historyGroupSelect"></select>
+                <button class="history-dialog-create-folder secondary-button" id="historyGroupCreateFolderButton" type="button">新建文件夹</button>
+                <div class="video-sheet-actions">
+                    <button class="secondary-button" id="historyGroupCancelButton" type="button">返回</button>
+                    <button type="submit">保存分组</button>
+                </div>
+            </form>
+            <div class="video-sheet-view video-delete-confirm" id="historyMenuDeleteConfirm" hidden>
+                <strong>确认删除这本漫画？</strong>
+                <p>删除只会在再次确认后执行。编辑页里标记的页面在保存前也不会从资产中移除。</p>
+                <div class="video-sheet-actions">
+                    <button class="secondary-button" id="historyMenuDeleteCancelButton" type="button">取消</button>
+                    <button class="danger-button" id="historyMenuDeleteConfirmButton" type="button">继续删除</button>
+                </div>
+            </div>
+        </div>
+    </dialog>
+
+    <dialog class="comic-editor-dialog" id="comicEditorDialog" aria-labelledby="comicEditorTitle">
+        <div class="comic-editor-shell">
+            <header class="comic-editor-header">
+                <button id="comicEditorCancelButton" type="button">取消</button>
+                <h2 id="comicEditorTitle">编辑漫画</h2>
+                <button id="comicEditorSaveButton" type="button">保存</button>
+            </header>
+            <div class="comic-editor-content">
+                <section class="comic-editor-url-card">
+                    <label for="comicEditorUrlInput"><img src="assets/material-link.svg" alt="">从网址添加页面</label>
+                    <input id="comicEditorUrlInput" type="url" inputmode="url" placeholder="https://example.com/chapter/12" autocomplete="off" aria-describedby="comicEditorUrlStatus">
+                    <button id="comicEditorFetchButton" type="button">获取页面</button>
+                    <p id="comicEditorUrlStatus" role="status" aria-live="polite">新页面会在预览勾选后自动添加到末尾</p>
+                    <div class="comic-editor-local-row">
+                        <span>也可以直接追加本地图片</span>
+                        <input class="file-input" id="comicEditorLocalFiles" type="file" accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,.avif,.heic,.heif,image/png,image/jpeg,image/jpg,image/gif,image/webp,image/bmp,image/avif,image/heic,image/heif" multiple>
+                        <label class="secondary-button" for="comicEditorLocalFiles">选择本地图片</label>
+                    </div>
+                    <div class="comic-editor-web-preview" id="comicEditorWebPreview" hidden>
+                        <div><strong id="comicEditorWebSummary">等待获取</strong><button class="secondary-button" id="comicEditorWebToggleAll" type="button">全选</button></div>
+                        <ol id="comicEditorWebList"></ol>
+                        <div class="comic-editor-web-actions">
+                            <button class="secondary-button" id="comicEditorWebClear" type="button">清除</button>
+                            <button id="comicEditorWebAppend" type="button">追加已勾选页面</button>
+                        </div>
+                    </div>
+                </section>
+                <div class="comic-editor-pages-heading">
+                    <h3>当前页面 <span id="comicEditorPageCount">0</span></h3>
+                </div>
+                <ol class="comic-editor-page-list" id="comicEditorPageList"></ol>
+            </div>
+            <footer class="comic-editor-footer">
+                <div id="comicEditorChangeSummary">尚未修改页面</div>
+                <button id="comicEditorSaveChangesButton" type="button">保存修改</button>
+                <div class="comic-editor-save-confirm" id="comicEditorSaveConfirm" hidden>
+                    <strong id="comicEditorConfirmSummary">确认保存页面修改？</strong>
+                    <div>
+                        <button class="secondary-button" id="comicEditorConfirmCancelButton" type="button">返回检查</button>
+                        <button id="comicEditorConfirmButton" type="button">确认保存</button>
+                    </div>
+                </div>
+            </footer>
         </div>
     </dialog>
 
@@ -545,19 +666,6 @@
             <div class="history-dialog-actions">
                 <button class="secondary-button" id="historyFolderCancelButton" type="button">取消</button>
                 <button type="submit">创建</button>
-            </div>
-        </form>
-    </dialog>
-
-    <dialog class="history-action-dialog" id="historyGroupDialog" aria-labelledby="historyGroupDialogTitle">
-        <form class="history-dialog-shell" id="historyGroupForm" method="dialog">
-            <h2 id="historyGroupDialogTitle">添加分组</h2>
-            <label for="historyGroupSelect">选择文件夹</label>
-            <select id="historyGroupSelect"></select>
-            <button class="history-dialog-create-folder secondary-button" id="historyGroupCreateFolderButton" type="button">新建文件夹</button>
-            <div class="history-dialog-actions">
-                <button class="secondary-button" id="historyGroupCancelButton" type="button">取消</button>
-                <button type="submit">保存</button>
             </div>
         </form>
     </dialog>

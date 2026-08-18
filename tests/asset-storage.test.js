@@ -4,8 +4,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function loadStorage(estimate) {
+function loadStorage(estimate, deviceAvailableBytes = null) {
     const context = {
+        AndroidFileBridge: deviceAvailableBytes === null ? undefined : {
+            getAvailableStorageBytes: () => deviceAvailableBytes
+        },
         navigator: {
             storage: {
                 estimate: async () => estimate,
@@ -43,4 +46,18 @@ test('storage deletion guards reject other asset namespaces', () => {
         () => storage.assertOwnedName('../ecryptees-video-asset-abc.mp4', ['ecryptees-video-asset-']),
         /不属于当前资产类型/
     );
+});
+
+test('Android capacity uses actual device free space and summaries stay in decimal GB', async () => {
+    const storage = loadStorage(
+        { quota: 20 * 1000 ** 3, usage: 2 * 1000 ** 3 },
+        3.25 * 1000 ** 3
+    );
+    const status = await storage.getStorageStatus();
+    assert.equal(status.source, 'device');
+    assert.equal(status.availableBytes, 3.25 * 1000 ** 3);
+    assert.equal(storage.formatGigabytes(1.5 * 1000 ** 3), '1.50 GB');
+    const element = { textContent: '' };
+    await storage.updateStorageSummary(element);
+    assert.equal(element.textContent, '应用占用 2.00 GB · 设备可用 3.25 GB');
 });

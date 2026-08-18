@@ -1258,9 +1258,7 @@
         document.getElementById('historyGoToComicButton').textContent = '前往视频模式';
         document.getElementById('clearHistoryButton').disabled = busy || assets.length === 0;
         if (playerDialog.open) renderEpisodeDrawer();
-        navigator.storage?.estimate?.().then(estimate => {
-            document.getElementById('historyStorageSummary').textContent = `已使用 ${formatBytes(estimate.usage || 0)} · 剩余 ${formatBytes(Math.max(0, (estimate.quota || 0) - (estimate.usage || 0)))}`;
-        }).catch(() => {});
+        assetStorage.updateStorageSummary(document.getElementById('historyStorageSummary')).catch(() => {});
     }
 
     async function refresh() {
@@ -1268,6 +1266,7 @@
         const sequence = ++refreshSequence;
         const activation = assetCenter.getSequence();
         let state = await store.auditVideoAssets();
+        const recoveredIds = new Set(state.recoveredIds || []);
         assetCenter.setCount('video', state.assets.length);
         for (const legacy of state.assets.filter(asset =>
             !legacyMigrationAttempts.has(asset.assetId)
@@ -1282,6 +1281,7 @@
             }
         }
         state = await store.auditVideoAssets();
+        for (const assetId of state.recoveredIds || []) recoveredIds.add(assetId);
         assetCenter.setCount('video', state.assets.length);
         if (!active || !assetCenter.isCurrent('video', activation) || sequence !== refreshSequence) return;
         const listedIds = new Set(state.assets.map(asset => asset.assetId));
@@ -1291,6 +1291,9 @@
         memberships = new Map(state.memberships.map(item => [item.assetId, item.folderId]));
         missingAssetIds = new Set(state.missingIds);
         render();
+        if (recoveredIds.size) {
+            setStatus(`已从保留的原始 MP4 恢复 ${recoveredIds.size} 个视频索引。`, 'success');
+        }
     }
 
     async function activateVideos() {

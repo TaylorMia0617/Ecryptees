@@ -265,6 +265,61 @@ No actionable build, lint, packaging, signing, or chunk-transfer issue remains. 
 
 final result: passed with device coverage gap
 
+## 2026-08-18 漫画多选导出、底部抽屉与页面编辑 UI
+
+### Evidence
+
+- Visual truth — multi-select: `C:\Users\user\.codex\generated_images\01a0120e-1c58-7802-94d2-db40c82e2342\exec-f730a45b-5e05-4069-bde5-522461bc259b.png`
+- Visual truth — page editor: `C:\Users\user\.codex\generated_images\01a0120e-1c58-7802-94d2-db40c82e2342\exec-9569292f-b816-4f0a-b43e-c5636dbc08b1.png`
+- Visual truth — video three-dot sheet: `C:\Users\user\AppData\Local\Temp\ecryptees-ui-reference\video-three-dot-menu.png`
+- Edge implementation captures: `C:\Users\user\AppData\Local\Temp\ecryptees-ui-qa\comic-shelf.png`, `comic-selection.png`, `comic-action-sheet.png`, `comic-editor.png`, `comic-editor-confirm.png`, `comic-zip-import.png`, and `comic-shelf-desktop.png`
+- Same-canvas comparisons: `C:\Users\user\AppData\Local\Temp\ecryptees-ui-qa\compare-selection.png`, `compare-editor.png`, and `compare-action-sheet.png`. Each comparison places the source on the left and the implementation on the right; mobile inputs were normalized to the same 390 × 844 canvas without changing their aspect ratio.
+- Primary mobile viewport: 390 × 844 CSS/PNG px, device scale factor 1. Desktop resilience viewport: 1024 × 768 CSS/PNG px, device scale factor 1.
+
+### Full-view comparison
+
+- Typography: the implementation retains the product's system-font hierarchy and compact metadata treatment. Selection count, sheet actions, editor headings, summaries, and danger text match the visual references' relative emphasis.
+- Spacing and geometry: mobile selection becomes a dedicated management view with a compact top bar, edge-to-edge cover rows, and a fixed export action. The editor keeps the reference's dense URL panel, page list, and fixed save area while retaining 44–48 px touch targets. The action sheet follows the video's rounded top corners, grab handle, stacked rows, separators, and isolated danger region.
+- Colors: the existing Ecryptees rose accent, pale pink selection surface, neutral sheets, muted metadata, and semantic red danger treatment are reused consistently.
+- Imagery and icons: QA uses the real bundled background asset as actual persisted comic covers; no placeholder boxes or fabricated assets are introduced. Existing product glyphs and controls are reused for offline compatibility.
+- Copy and content: visible text is the approved UI-preview language. ZIP and editor actions explicitly state that real parsing, downloading, and storage commits are deferred, so the UI does not imply completed data operations.
+
+### Focused state and interaction checks
+
+- A 450 ms pointer hold enters selection with the pressed comic selected. The implementation cancels the timer when pointer movement exceeds 10 px. Ordinary clicks toggle selection while the mode is active.
+- `全选当前结果`, selection count updates, exit-selection, the fixed `导出 N 本为 ZIP` preview action, and filtered-visible selection semantics are wired.
+- The three-dot control opens the video-style bottom sheet. Rename, group, edit, two existing export entries, and the separate delete danger area are reachable; downward drag closes the sheet.
+- The page editor opens with real page rows, URL input, preview action, staged delete/undo, all-pages deletion prevention, close-without-commit behavior, and a second save confirmation showing added/deleted counts. Confirming remains UI-only and performs no shelf write.
+- The archive picker accepts `.ecomic` and `.zip`; selecting a ZIP opens a batch progress/result preview without parsing the file or modifying storage.
+- Edge reported zero console exceptions/errors. Mobile document and viewport widths both remained 390 px; desktop content width remained within the 1024 px viewport. No horizontal clipping was observed in the six mobile states or the desktop shelf.
+
+### Iteration history and remaining differences
+
+- Pass 1 P1: selection mode still exposed the ordinary directory, sort, filter, and search controls. Fixed by switching to the dedicated selection-management surface shown by the reference.
+- Pass 1 P2: the editor's URL panel and page rows were too tall. Fixed by tightening internal spacing and row density while preserving accessible touch targets.
+- Pass 2: no actionable P0, P1, or P2 visual or interaction mismatch remained. P3-only differences are intentional dynamic content: QA has four real local books instead of the reference's illustrative count, and controls are slightly taller where needed for mobile touch accessibility.
+- This is intentionally the UI-only milestone. Worker messages, ZIP encoding/validation, archive import, atomic generation commits, Android ZIP intent handling, and real export/storage operations are not implemented in this pass.
+
+final result: passed
+
+## APK 1.1.5 Android shelf durability and remote-capture hardening
+
+- Date: 2026-08-18. The Android shelf investigation found two application-controlled ways for comic pages to appear missing. First, cold-start cleanup and a simultaneous shelf save could race while the new generation had page files but no committed metadata yet; the old cleanup treated those files as unreferenced. Second, records already identify their `opfs` or `indexeddb` backend, but page reads, exports, deletes, and cleanup previously reopened only the currently preferred backend. A WebView/OS capability change could therefore make intact files in the other backend look absent.
+- Shelf mutations are now serialized. Startup waits for cleanup to finish before listing, reopening, or accepting a deferred external archive. New generations remain protected by a seven-day orphan grace period, and the prior generation is removed only after the replacement record commits. Metadata progress, rename, open, delete, save, and aggressive cleanup no longer overwrite one another through stale reads.
+- Every page operation follows the record's `storageKind`. Cleanup scans both available backends and maintains a separate reference set for each. IndexedDB presence checks also verify that every declared chunk exists. A malformed record is isolated and reported instead of aborting the complete shelf listing; while any malformed record exists, orphan-history deletion is skipped so potentially recoverable source pages are retained.
+- Books with missing original pages stay visible, are labeled `原页缺失`, and keep their delete action. Reading and export are disabled with a re-import instruction. Re-importing the same authenticated `.ecomic` replaces malformed metadata and commits a fresh generation.
+- Data can still disappear outside the application's control after uninstall, Android “clear data”, or destructive origin-data eviction by the OS/WebView. Cache cleanup and an in-place APK update remain non-destructive. The internal shelf still does not persist `.ecomic` archives, so an external archive remains the only independent recovery copy.
+- The Android rendered-page bridge now rejects Base64 text above the encoded 1 MiB chunk ceiling before decoding, rechecks decoded byte length and the declared remaining image size, bounds untrusted names/MIME/error strings, and closes partial files immediately on failure. URL trust behavior is unchanged: user-supplied HTTPS destinations are still accepted, including environments affected by Clash fake-IP handling.
+- Remote capture uses the AndroidX WebKit `ecryptees-capture` profile when multi-profile support is available. Profile cookies and browsing data are cleared before and after a capture. Older providers use visited-site cleanup without globally deleting the main application's cookies or storage. A following capture cannot start until final cleanup completes.
+- Node regressions passed 62/62; `node --check` passed for the changed scripts; `git diff --check` passed. Rust formatting, strict Clippy, and locked tests passed 10/10, with no Windows/Tauri source changes. Gradle `clean assembleRelease lintRelease` passed, and the build script verified the configured release certificate.
+- Final APK: `dist/Ecryptees-v1.1.5.apk`, 3,526,481 bytes; SHA-256 `386D99589CB8AD85065B61BAAB826FCCF907BC0C864DD9DE96CE1F4C41C1D13E`. `dist/Ecryptees.apk` is byte-identical.
+
+**Findings**
+
+No actionable P1/P2 bridge bound, remote-profile isolation, shelf backend routing, cleanup ordering, build, lint, or signing issue remains in the automated review. No physical Android device or emulator is connected, so an in-place upgrade with a pre-existing OPFS/IndexedDB shelf, forced WebView provider change, Clash-enabled dynamic capture, and post-capture cookie inspection remain device-level acceptance items.
+
+final result: passed with device coverage gap
+
 ## APK 1.1.4 asset remove-group control verification
 
 - Date: 2026-08-17. Image, comic, and video asset cards now place a folder-minus icon immediately beside the three-dot menu. The current group name appears to the icon's left and is limited to the first three characters; ungrouped assets show `未分组` with the icon disabled.
@@ -611,3 +666,51 @@ final result: passed with device coverage gap
 No actionable archive-format, database, static UI, network-boundary, build, lint, storage-permission, signing, or packaging issue remains. The optional browser QA helper was unavailable in this Windows environment, and no physical Android device was connected, so drawer touch behavior, OEM WebView networking, site-specific anti-hotlink behavior, and in-place installation remain device-level acceptance coverage.
 
 final result: passed with device coverage gap
+
+## APK 1.1.6 comic shelf safety and UI-preview verification
+
+- Date: 2026-08-18. The comic shelf now exposes 450 ms long-press multi-selection, a video-style bottom action sheet, a page-editor preview, and `.zip` bundle-selection preview. These three new workflows remain UI-only and do not import, export, delete, or rewrite comic assets.
+- Shelf mutations are serialized across workers and browser windows with Web Locks plus an expiring IndexedDB lease fallback. Replacement writes a new generation and commits metadata before reclaiming the previous generation; malformed metadata no longer masks storage read failures.
+- Cold-start cleanup blocks shelf access until ownership checks finish, has a 15-second fail-safe that skips deletion, retains all orphans whenever metadata ownership is uncertain, and only reclaims unreferenced generations older than seven days. Legacy long-image metadata is committed before its former file is removed.
+- An isolated Edge run at 390 × 844 and 1024 × 768 created four real four-page books, reloaded the shelf, and verified the invalid-metadata guard, seven-day orphan boundary, long-press movement/cancel thresholds, select-all, action sheet, editor delete/confirm/undo states, no editor metadata writes, ZIP preview isolation, and absence of console errors or horizontal overflow.
+- JavaScript syntax checks, `git diff --check`, and all 62 Node tests passed. Gradle release build, lint, packaging, version verification, and APK Signature Scheme v2 verification passed.
+- Final APK: `dist/Ecryptees-v1.1.6.apk` and byte-identical `dist/Ecryptees.apk`, versionCode 24, 3,536,665 bytes; SHA-256 `709805AC379C1069E6CC5787762D4CB995AA321174A1D387D460E74759180F27`. Signing certificate SHA-256 remains `91306e7c15932646a58ffbd3443f541be57401f1f64106d8dcd0e97fbc5687e8`.
+
+**Findings**
+
+No actionable storage, concurrency, cleanup, browser UI, build, lint, versioning, or signing issue remains. A physical Android device was not connected, so OEM WebView cleanup callbacks, touch interaction, system document handoff, and in-place installation remain device-level acceptance coverage.
+
+final result: passed with device coverage gap
+
+## APK 1.1.7 Android long-press, storage reporting, and video recovery verification
+
+- Date: 2026-08-18. The comic shelf now suppresses the Android WebView native callout and context menu, retains the 450 ms/10 px gesture boundary, and requests native long-press haptic feedback only after multi-selection succeeds.
+- Android capacity checks use `StatFs` free bytes from the application data filesystem. Image, video, and comic write preflights take the conservative minimum of actual device availability and the browser-origin estimate while retaining the 64 MiB reserve. Shelf summaries use decimal GB and distinguish `设备可用` from `浏览器估算可用`.
+- Image assets remain atomic IndexedDB records containing both bytes and metadata. Video MP4 bytes remain in OPFS, with a schema-v1 JSON recovery sidecar added beside each committed MP4. Startup audit backfills sidecars for existing indexed videos and reconstructs a missing IndexedDB record from a retained MP4 without deleting the source file. Playback progress writes do not repeatedly rewrite the sidecar.
+- The 1.1.5 and 1.1.6 packaged image/video controllers were byte-identical, and no startup path was found that deletes committed `ecryptees-video-asset-*.mp4` files. The prior empty shelf is consistent with loss of the separate video IndexedDB index; 1.1.7 can recover it only when the OPFS MP4 remains present.
+- An isolated Edge test created an image and MP4, reloaded them, deleted only the video IndexedDB record, recovered the original title and index from the retained MP4, then exercised a real CDP touch long-press with no console errors or horizontal overflow.
+- All 64 Node tests, JavaScript syntax checks, `git diff --check`, isolated Edge verification, Gradle `clean assembleRelease lintRelease`, APK version validation, and APK Signature Scheme v2 verification passed. Android lint reported zero errors and six pre-existing dependency/manifest-style warnings.
+- `aapt2` confirmed `com.ecryptees.offline`, version 1.1.7 (code 25), minSdk 26, targetSdk 36, and no broad storage permission. Final APK: `dist/Ecryptees-v1.1.7.apk` and byte-identical `dist/Ecryptees.apk`, 3,539,197 bytes; SHA-256 `91E034C6160C8272F835A04A8A9EA02526F013F4E78C17ADB875D8706C17E757`. Signing certificate SHA-256 remains `91306e7c15932646a58ffbd3443f541be57401f1f64106d8dcd0e97fbc5687e8`.
+
+**Findings**
+
+No actionable deletion, capacity, long-press, archive-format, browser regression, build, lint-error, versioning, or signing issue remains. A physical Android device was not connected, so OEM WebView long-press behavior, real filesystem free-byte changes under pressure, in-place update recovery, and whether the affected device still retains its former OPFS MP4 files remain device-level acceptance items.
+
+final result: passed with device coverage gap
+
+## APK 1.1.8 comic bundle and page-editor verification
+
+- Date: 2026-08-18. The comic shelf now performs real 450 ms long-press multi-selection, serial multi-book ZIP export, authenticated bundle import, and atomic page editing instead of the former preview-only flows.
+- The editor displays stored page thumbnails, supports URL capture and multi-file local image append, marks removals for undo, and confirms the final added/deleted counts before committing. Local selection has no per-batch count limit; the unchanged `.ecomic` v1 whole-book limits of 80 pages and 500 MiB are enforced at save time with a visible reduction prompt.
+- A successful edit writes every retained and added page into a new generation, regenerates the cover, maps reading progress, commits metadata last, clears stale long-image metadata, and only then reclaims the former generation. Cancellation and any pre-commit failure leave the original book unchanged.
+- Bundle export writes `ecryptees-bundle.json` plus stored `books/<bookId>.ecomic` entries, keeps only the final ZIP and current temporary archive, and rejects 4 GiB overflow before output. Import rejects ZIP64, encrypted/compressed entries, traversal, duplicates, malformed boundaries, CRC damage, undeclared files, and unauthenticated `.ecomic` data while continuing with unaffected books.
+- Android accepts `.zip` through system open/share handoff and retains chunked OPFS input plus SAF output. It adds no broad storage permission. Existing image and video recovery/storage protections from 1.1.7 remain covered by the 64-test regression suite.
+- An isolated Microsoft Edge run at 439 px mobile width and 1024 px desktop width created four real four-page books, verified touch long-press and movement cancellation, edited one book from four to five pages using two locally selected images and one pending deletion, confirmed every committed page moved to the new generation, exported and replaced four books through ZIP, then damaged one archive and confirmed the other three still imported. No console errors, exceptions, or horizontal overflow occurred.
+- JavaScript syntax checks, `git diff --check`, all 64 Node tests, Edge interaction verification, Gradle release build, Android lint, version validation, and APK Signature Scheme v2 verification passed.
+- Final APK: `dist/Ecryptees-v1.1.8.apk` and byte-identical `dist/Ecryptees.apk`, versionCode 26, 3,552,473 bytes; SHA-256 `75B9B9CE2B2E560282E0BC59CEE5165FF5F90C98CF6149995C164D084704589F`. Signing certificate SHA-256 remains `91306e7c15932646a58ffbd3443f541be57401f1f64106d8dcd0e97fbc5687e8`.
+
+**Findings**
+
+No actionable editor, atomic-storage, ZIP-validation, partial-import, long-press, browser-layout, regression, build, lint, versioning, or signing issue remains. A physical Android device was not connected, so OEM document-provider ZIP handoff, sustained near-limit storage pressure, in-place update recovery, and native haptic feel remain device-level acceptance items.
+
+final result: passed

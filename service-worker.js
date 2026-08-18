@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE_NAME = 'ecryptees-app-v26-network-adapter-hitomi';
+const CACHE_NAME = 'ecryptees-app-v29-comic-bundle-editor';
 const APP_SHELL = [
     './',
     './index.html',
@@ -9,6 +9,8 @@ const APP_SHELL = [
     './assets/background.jpg',
     './assets/icon-192.png',
     './assets/icon-512.png',
+    './assets/material-link.svg',
+    './assets/material-delete-outline.svg',
     './js/core.js',
     './js/comic-core.js',
     './js/video-core.js',

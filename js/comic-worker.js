@@ -10,14 +10,27 @@ const comic = self.Ecryptees.comic;
 const history = self.Ecryptees.history;
 const { format, crypto: comicCrypto, ComicError } = comic;
 const TEMP_PREFIX = 'ecryptees-temp-';
+const HISTORY_ORPHAN_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
+const HISTORY_MUTATION_LOCK_NAME = 'ecryptees-history-mutation-v1';
+const HISTORY_LEASE_DATABASE_NAME = 'ecryptees-history-lock-v1';
+const HISTORY_LEASE_STORE = 'leases';
+const HISTORY_LEASE_KEY = 'history-mutation';
+const HISTORY_LEASE_TTL_MS = 30 * 1000;
+const HISTORY_LEASE_RENEW_MS = 5 * 1000;
 const sessions = new Map();
 const cancelledJobs = new Set();
 const nativeDecodeRequests = new Map();
 let nativeDecodeSequence = 0;
 let messageSink = message => self.postMessage(message);
-let storageBackendPromise = null;
+let preferredStorageBackendPromise = null;
+let opfsBackendPromise = null;
+let indexedDbBackendPromise = null;
 let historyDatabasePromise = null;
+let historyLeaseDatabasePromise = null;
 let codecTaskPool = null;
+let historyMutationTail = Promise.resolve();
+let historyMutationUsingLease = false;
+let activeHistoryLeaseOwner = '';
 
 const CODEC_WORKER_SOURCE = `
 'use strict';
@@ -372,6 +385,100 @@ function transactionToPromise(transaction) {
     });
 }
 
+function delay(milliseconds) {
+    return new Promise(resolve => setTimeout(resolve, milliseconds));
+}
+
+function openHistoryLeaseDatabase() {
+    if (!historyLeaseDatabasePromise) {
+        historyLeaseDatabasePromise = new Promise((resolve, reject) => {
+            const request = self.indexedDB.open(HISTORY_LEASE_DATABASE_NAME, 1);
+            request.onupgradeneeded = () => {
+                const database = request.result;
+                if (!database.objectStoreNames.contains(HISTORY_LEASE_STORE)) {
+                    database.createObjectStore(HISTORY_LEASE_STORE);
+                }
+            };
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error || new Error('漫画书架跨窗口锁不可用'));
+        });
+    }
+    return historyLeaseDatabasePromise;
+}
+
+async function updateHistoryLease(owner, operation) {
+    const database = await openHistoryLeaseDatabase();
+    const transaction = database.transaction(HISTORY_LEASE_STORE, 'readwrite');
+    const store = transaction.objectStore(HISTORY_LEASE_STORE);
+    const current = await requestToPromise(store.get(HISTORY_LEASE_KEY));
+    const now = Date.now();
+    let updated = false;
+    if (operation === 'acquire' && (!current || current.owner === owner || current.expiresAt <= now)) {
+        store.put({ owner, expiresAt: now + HISTORY_LEASE_TTL_MS }, HISTORY_LEASE_KEY);
+        updated = true;
+    } else if (operation === 'renew' && current?.owner === owner && current.expiresAt > now) {
+        store.put({ owner, expiresAt: now + HISTORY_LEASE_TTL_MS }, HISTORY_LEASE_KEY);
+        updated = true;
+    } else if (operation === 'release' && current?.owner === owner) {
+        store.delete(HISTORY_LEASE_KEY);
+        updated = true;
+    }
+    await transactionToPromise(transaction);
+    return updated;
+}
+
+async function assertHistoryMutationOwnership() {
+    if (!historyMutationUsingLease) {
+        return;
+    }
+    if (!activeHistoryLeaseOwner) {
+        throw new ComicError('HISTORY_LOCK_LOST', '漫画书架被其他窗口修改，请重试');
+    }
+    const database = await openHistoryLeaseDatabase();
+    const transaction = database.transaction(HISTORY_LEASE_STORE, 'readonly');
+    const current = await requestToPromise(transaction.objectStore(HISTORY_LEASE_STORE).get(HISTORY_LEASE_KEY));
+    await transactionToPromise(transaction);
+    if (current?.owner !== activeHistoryLeaseOwner || current.expiresAt <= Date.now()) {
+        activeHistoryLeaseOwner = '';
+        throw new ComicError('HISTORY_LOCK_LOST', '漫画书架被其他窗口修改，请重试');
+    }
+}
+
+async function withHistoryLease(task) {
+    const owner = typeof self.crypto?.randomUUID === 'function'
+        ? self.crypto.randomUUID()
+        : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    while (!(await updateHistoryLease(owner, 'acquire'))) {
+        await delay(50 + Math.trunc(Math.random() * 100));
+    }
+    historyMutationUsingLease = true;
+    activeHistoryLeaseOwner = owner;
+    const renewal = setInterval(() => {
+        updateHistoryLease(owner, 'renew').then(renewed => {
+            if (!renewed && activeHistoryLeaseOwner === owner) activeHistoryLeaseOwner = '';
+        }).catch(() => {
+            if (activeHistoryLeaseOwner === owner) activeHistoryLeaseOwner = '';
+        });
+    }, HISTORY_LEASE_RENEW_MS);
+    try {
+        return await task();
+    } finally {
+        clearInterval(renewal);
+        if (activeHistoryLeaseOwner === owner) activeHistoryLeaseOwner = '';
+        historyMutationUsingLease = false;
+        await updateHistoryLease(owner, 'release').catch(() => {});
+    }
+}
+
+function withHistoryMutation(task) {
+    const crossContextTask = () => self.navigator?.locks?.request
+        ? self.navigator.locks.request(HISTORY_MUTATION_LOCK_NAME, { mode: 'exclusive' }, task)
+        : withHistoryLease(task);
+    const run = historyMutationTail.catch(() => {}).then(crossContextTask);
+    historyMutationTail = run.catch(() => {});
+    return run;
+}
+
 function openHistoryDatabase() {
     if (!historyDatabasePromise) {
         historyDatabasePromise = new Promise((resolve, reject) => {
@@ -393,25 +500,47 @@ function openHistoryDatabase() {
 }
 
 async function getHistoryRecord(bookId) {
+    const record = await getRawHistoryRecord(bookId);
+    return record ? history.validateRecord(record) : null;
+}
+
+async function getRawHistoryRecord(bookId) {
     const database = await openHistoryDatabase();
     const transaction = database.transaction(history.config.BOOK_STORE, 'readonly');
     const record = await requestToPromise(transaction.objectStore(history.config.BOOK_STORE).get(bookId));
     await transactionToPromise(transaction);
-    return record ? history.validateRecord(record) : null;
+    return record || null;
+}
+
+async function readHistoryRecords() {
+    const database = await openHistoryDatabase();
+    const transaction = database.transaction(history.config.BOOK_STORE, 'readonly');
+    const rawRecords = await requestToPromise(transaction.objectStore(history.config.BOOK_STORE).getAll());
+    await transactionToPromise(transaction);
+    const records = [];
+    const invalidRecords = [];
+    for (const rawRecord of rawRecords) {
+        try {
+            records.push(history.validateRecord(rawRecord));
+        } catch (error) {
+            invalidRecords.push({
+                bookId: /^[0-9a-f]{32}$/.test(rawRecord?.bookId || '') ? rawRecord.bookId : '',
+                title: history.normalizeTitle(rawRecord?.title),
+                message: error?.message || '漫画元数据损坏'
+            });
+        }
+    }
+    records.sort((left, right) => (right.lastOpenedAt || right.updatedAt) - (left.lastOpenedAt || left.updatedAt));
+    return { records, invalidRecords };
 }
 
 async function listHistoryRecords() {
-    const database = await openHistoryDatabase();
-    const transaction = database.transaction(history.config.BOOK_STORE, 'readonly');
-    const records = await requestToPromise(transaction.objectStore(history.config.BOOK_STORE).getAll());
-    await transactionToPromise(transaction);
-    return records
-        .map(record => history.validateRecord(record))
-        .sort((left, right) => (right.lastOpenedAt || right.updatedAt) - (left.lastOpenedAt || left.updatedAt));
+    return (await readHistoryRecords()).records;
 }
 
 async function putHistoryRecord(record) {
     const valid = history.validateRecord(record);
+    await assertHistoryMutationOwnership();
     const database = await openHistoryDatabase();
     const transaction = database.transaction(history.config.BOOK_STORE, 'readwrite');
     transaction.objectStore(history.config.BOOK_STORE).put(valid);
@@ -420,6 +549,7 @@ async function putHistoryRecord(record) {
 }
 
 async function removeHistoryRecord(bookId) {
+    await assertHistoryMutationOwnership();
     const database = await openHistoryDatabase();
     const transaction = database.transaction(history.config.BOOK_STORE, 'readwrite');
     transaction.objectStore(history.config.BOOK_STORE).delete(bookId);
@@ -509,6 +639,47 @@ async function createIndexedDbBackend() {
             }
             return new File(parts, name, { lastModified: metadata.lastModified });
         },
+        async has(name) {
+            const metaTransaction = database.transaction('entries', 'readonly');
+            const metadata = await requestToPromise(metaTransaction.objectStore('entries').get(name));
+            await transactionToPromise(metaTransaction);
+            if (!metadata || !Number.isInteger(metadata.parts) || metadata.parts < 1) {
+                return false;
+            }
+            const partsTransaction = database.transaction('parts', 'readonly');
+            const range = IDBKeyRange.bound(`${name}:`, `${name}:\uffff`);
+            const partCount = await requestToPromise(partsTransaction.objectStore('parts').count(range));
+            await transactionToPromise(partsTransaction);
+            return partCount === metadata.parts;
+        },
+        async listCompleteNames() {
+            const metaTransaction = database.transaction('entries', 'readonly');
+            const metadataPromise = requestToPromise(metaTransaction.objectStore('entries').getAll());
+            const namesPromise = requestToPromise(metaTransaction.objectStore('entries').getAllKeys());
+            const [metadata, names] = await Promise.all([metadataPromise, namesPromise]);
+            await transactionToPromise(metaTransaction);
+
+            const partsTransaction = database.transaction('parts', 'readonly');
+            const partKeys = await requestToPromise(partsTransaction.objectStore('parts').getAllKeys());
+            await transactionToPromise(partsTransaction);
+            const partCounts = new Map();
+            for (const rawKey of partKeys) {
+                const key = String(rawKey);
+                const separator = key.lastIndexOf(':');
+                if (separator <= 0) continue;
+                const name = key.slice(0, separator);
+                partCounts.set(name, (partCounts.get(name) || 0) + 1);
+            }
+            const complete = new Set();
+            for (let index = 0; index < names.length; index++) {
+                const name = String(names[index]);
+                const expected = metadata[index]?.parts;
+                if (Number.isInteger(expected) && expected > 0 && partCounts.get(name) === expected) {
+                    complete.add(name);
+                }
+            }
+            return complete;
+        },
         async remove(name) {
             await deleteParts(name);
             const transaction = database.transaction('entries', 'readwrite');
@@ -555,6 +726,20 @@ async function createOpfsBackend() {
             const handle = await root.getFileHandle(name);
             return handle.getFile();
         },
+        async has(name) {
+            try {
+                await root.getFileHandle(name);
+                return true;
+            } catch (error) {
+                if (error?.name === 'NotFoundError') {
+                    return false;
+                }
+                throw error;
+            }
+        },
+        async listCompleteNames() {
+            return new Set(await this.listNames());
+        },
         async remove(name) {
             await root.removeEntry(name);
         },
@@ -586,28 +771,90 @@ async function createOpfsBackend() {
     };
 }
 
-async function getStorageBackend() {
-    if (!storageBackendPromise) {
-        storageBackendPromise = (async () => {
+async function getOpfsBackend() {
+    if (!opfsBackendPromise) {
+        opfsBackendPromise = createOpfsBackend().catch(error => {
+            opfsBackendPromise = null;
+            throw error;
+        });
+    }
+    return opfsBackendPromise;
+}
+
+async function getIndexedDbBackend() {
+    if (!indexedDbBackendPromise) {
+        indexedDbBackendPromise = createIndexedDbBackend().catch(error => {
+            indexedDbBackendPromise = null;
+            throw error;
+        });
+    }
+    return indexedDbBackendPromise;
+}
+
+async function getStorageBackend(kind = '') {
+    if (kind === 'opfs') {
+        return getOpfsBackend();
+    }
+    if (kind === 'indexeddb') {
+        return getIndexedDbBackend();
+    }
+    if (!preferredStorageBackendPromise) {
+        preferredStorageBackendPromise = (async () => {
             try {
-                return await createOpfsBackend();
+                return await getOpfsBackend();
             } catch (error) {
-                return createIndexedDbBackend();
+                return getIndexedDbBackend();
             }
         })();
     }
-    return storageBackendPromise;
+    return preferredStorageBackendPromise;
 }
 
-async function ensureStorage(requiredBytes) {
-    if (!self.navigator.storage || typeof self.navigator.storage.estimate !== 'function') {
-        return;
+async function getAvailableStorageBackends() {
+    const backends = [];
+    try {
+        backends.push(await getOpfsBackend());
+    } catch (error) {
+        // OPFS is optional on older Android System WebView versions.
     }
-    const estimate = await self.navigator.storage.estimate();
-    if (Number.isFinite(estimate.quota) && Number.isFinite(estimate.usage)) {
-        const available = Math.max(0, estimate.quota - estimate.usage);
-        if (available < requiredBytes + format.STORAGE_RESERVE_BYTES) {
-            throw new ComicError('INSUFFICIENT_STORAGE', '浏览器本地可用空间不足，请释放空间后重试');
+    try {
+        backends.push(await getIndexedDbBackend());
+    } catch (error) {
+        // Report the original operation error if neither backend is available.
+    }
+    if (!backends.length) {
+        backends.push(await getStorageBackend());
+    }
+    return backends;
+}
+
+function formatStorageGigabytes(bytes) {
+    return `${(Math.max(0, Number(bytes) || 0) / 1_000_000_000).toFixed(2)} GB`;
+}
+
+async function ensureStorage(requiredBytes, availableStorageBytes = null) {
+    const availableCandidates = [];
+    const nativeAvailable = availableStorageBytes === null || availableStorageBytes === undefined
+        ? NaN
+        : Number(availableStorageBytes);
+    if (Number.isFinite(nativeAvailable) && nativeAvailable >= 0) {
+        availableCandidates.push(nativeAvailable);
+    }
+    if (self.navigator.storage && typeof self.navigator.storage.estimate === 'function') {
+        const estimate = await self.navigator.storage.estimate();
+        if (Number.isFinite(estimate.quota) && Number.isFinite(estimate.usage)) {
+            availableCandidates.push(Math.max(0, estimate.quota - estimate.usage));
+        }
+    }
+    if (availableCandidates.length) {
+        const available = Math.min(...availableCandidates);
+        const required = Math.max(0, Number(requiredBytes) || 0) + format.STORAGE_RESERVE_BYTES;
+        if (available < required) {
+            const source = Number.isFinite(nativeAvailable) && nativeAvailable >= 0 ? '设备实际' : '浏览器估算';
+            throw new ComicError(
+                'INSUFFICIENT_STORAGE',
+                `本次操作至少需要 ${formatStorageGigabytes(required)} 可用空间，当前${source}可用 ${formatStorageGigabytes(available)}`
+            );
         }
     }
 }
@@ -625,47 +872,81 @@ async function removeEntryQuietly(storage, name) {
     }
 }
 
+function getHistoryEntryCreatedAt(name) {
+    if (!name.startsWith(history.config.HISTORY_PREFIX)) {
+        return 0;
+    }
+    const suffix = name.slice(history.config.HISTORY_PREFIX.length);
+    const match = /^[0-9a-f]{32}-([a-z0-9]+)-/.exec(suffix);
+    const createdAt = match ? Number.parseInt(match[1], 36) : 0;
+    return Number.isSafeInteger(createdAt) && createdAt > 0 ? createdAt : 0;
+}
+
 async function cleanupStaleEntries(removeAllTemporary = false) {
-    const storage = await getStorageBackend();
-    await storage.cleanup(Date.now() - 24 * 60 * 60 * 1000, removeAllTemporary);
-    const referenced = new Set();
-    let records = await listHistoryRecords();
-    if (removeAllTemporary) {
-        const updatedRecords = [];
-        for (const record of records) {
-            const legacyLongImage = record.png?.entryName || '';
-            if (!legacyLongImage) {
-                updatedRecords.push(record);
-                continue;
-            }
-            const updated = await putHistoryRecord({
-                ...record,
-                png: {
-                    ...record.png,
-                    width: 1,
-                    height: 1,
-                    size: 0,
-                    generatedAt: 0,
-                    entryName: ''
+    return withHistoryMutation(async () => {
+        const backends = await getAvailableStorageBackends();
+        for (const backend of backends) {
+            await backend.cleanup(Date.now() - 24 * 60 * 60 * 1000, removeAllTemporary);
+        }
+
+        const historyState = await readHistoryRecords();
+        let records = historyState.records;
+        if (removeAllTemporary) {
+            const updatedRecords = [];
+            for (const record of records) {
+                const legacyLongImage = record.png?.entryName || '';
+                if (!legacyLongImage) {
+                    updatedRecords.push(record);
+                    continue;
                 }
-            });
-            updatedRecords.push(updated);
-            await removeEntryQuietly(storage, legacyLongImage);
+                try {
+                    const recordStorage = await getStorageBackend(record.storageKind);
+                    const updatedRecord = await putHistoryRecord({
+                        ...record,
+                        png: {
+                            ...record.png,
+                            width: 1,
+                            height: 1,
+                            size: 0,
+                            generatedAt: 0,
+                            entryName: ''
+                        }
+                    });
+                    updatedRecords.push(updatedRecord);
+                    await removeEntryQuietly(recordStorage, legacyLongImage);
+                } catch (error) {
+                    updatedRecords.push(record);
+                }
+            }
+            records = updatedRecords;
         }
-        records = updatedRecords;
-    }
-    for (const record of records) {
-        referenced.add(record.coverEntryName);
-        referenced.add(record.png?.entryName);
-        for (const page of record.pages) {
-            referenced.add(page.entryName);
+
+        if (!historyState.invalidRecords.length) {
+            const referencedByKind = new Map([
+                ['opfs', new Set()],
+                ['indexeddb', new Set()]
+            ]);
+            for (const record of records) {
+                const referenced = referencedByKind.get(record.storageKind);
+                referenced.add(record.coverEntryName);
+                referenced.add(record.png?.entryName);
+                for (const page of record.pages) {
+                    referenced.add(page.entryName);
+                }
+            }
+            const orphanCutoff = Date.now() - HISTORY_ORPHAN_GRACE_MS;
+            for (const storage of backends) {
+                const referenced = referencedByKind.get(storage.kind);
+                for (const name of await storage.listNames()) {
+                    const createdAt = getHistoryEntryCreatedAt(name);
+                    if (createdAt > 0 && createdAt < orphanCutoff && !referenced.has(name)) {
+                        await removeEntryQuietly(storage, name);
+                    }
+                }
+            }
         }
-    }
-    for (const name of await storage.listNames()) {
-        if (name.startsWith(history.config.HISTORY_PREFIX) && !referenced.has(name)) {
-            await removeEntryQuietly(storage, name);
-        }
-    }
+        return historyState.invalidRecords;
+    });
 }
 
 async function detectFileRecord(file) {
@@ -711,7 +992,10 @@ async function encryptArchive(jobId, payload) {
     });
     const header = format.decodeHeader(headerBytes);
     const expectedSize = format.estimateArchiveSize(manifest, manifestBytes.length);
-    await ensureStorage(expectedSize);
+    await ensureStorage(
+        expectedSize + (payload.addToShelf === false ? 0 : manifest.totalSize),
+        payload.availableStorageBytes
+    );
     assertNotCancelled(jobId);
 
     const key = await comicCrypto.deriveBuiltinKey(salt);
@@ -817,7 +1101,8 @@ async function encryptArchive(jobId, payload) {
             key,
             manifest,
             pageEntries: new Map(),
-            bookId: ''
+            bookId: '',
+            availableStorageBytes: payload.availableStorageBytes
         });
         try {
             await saveHistorySession(jobId, {
@@ -825,6 +1110,7 @@ async function encryptArchive(jobId, payload) {
                 outputName,
                 sourceName: `${outputName}.${format.EXTENSION}`,
                 parallelism,
+                availableStorageBytes: payload.availableStorageBytes,
                 progressRange: { start: 500, end: 1000, total: 1000 }
             });
         } finally {
@@ -845,7 +1131,7 @@ async function encryptArchive(jobId, payload) {
     }
 }
 
-async function createArchiveSession(jobId, file) {
+async function createArchiveSession(jobId, file, availableStorageBytes = null) {
     if (!(file instanceof Blob) || file.size < format.HEADER_SIZE + format.AUTH_TAG_SIZE) {
         throw new ComicError('TRUNCATED_ARCHIVE', '漫画归档不完整');
     }
@@ -868,12 +1154,21 @@ async function createArchiveSession(jobId, file) {
     );
     const manifest = format.validateManifest(format.decodeManifest(manifestBytes), header, file.size);
     const sessionId = `${jobId}-${self.crypto.getRandomValues(new Uint32Array(1))[0].toString(16)}`;
-    sessions.set(sessionId, { kind: 'archive', file, header, key, manifest, pageEntries: new Map(), bookId: '' });
+    sessions.set(sessionId, {
+        kind: 'archive',
+        file,
+        header,
+        key,
+        manifest,
+        pageEntries: new Map(),
+        bookId: '',
+        availableStorageBytes
+    });
     return { sessionId, manifest };
 }
 
 async function openArchive(jobId, payload) {
-    const { sessionId, manifest } = await createArchiveSession(jobId, payload.file);
+    const { sessionId, manifest } = await createArchiveSession(jobId, payload.file, payload.availableStorageBytes);
     post('opened', jobId, {
         sessionId,
         createdAt: manifest.createdAt,
@@ -896,7 +1191,7 @@ async function decryptPage(jobId, payload) {
 
     const page = session.manifest.pages[index];
     if (session.kind === 'history') {
-        const storage = await getStorageBackend();
+        const storage = await getStorageBackend(session.storageKind);
         const file = await storage.getFile(page.entryName);
         post('page', jobId, {
             sessionId: payload.sessionId,
@@ -908,7 +1203,7 @@ async function decryptPage(jobId, payload) {
         });
         return;
     }
-    await ensureStorage(page.size);
+    await ensureStorage(page.size, session.availableStorageBytes);
     const storage = await getStorageBackend();
     const pool = getCodecTaskPool(payload.parallelism);
     const oldEntry = session.pageEntries.get(index);
@@ -1165,7 +1460,7 @@ async function inspectPageWithPool(jobId, pool, file, pageName, mime) {
 }
 
 async function getExportPageFile(jobId, pool, session, sessionId, pageIndex) {
-    const storage = await getStorageBackend();
+    const storage = await getStorageBackend(session.kind === 'history' ? session.storageKind : '');
     if (session.kind === 'history') {
         const page = session.manifest.pages[pageIndex];
         return { file: await storage.getFile(page.entryName), storage, entryName: '', temporary: false };
@@ -1180,7 +1475,7 @@ async function getExportPageFile(jobId, pool, session, sessionId, pageIndex) {
     }
 
     const page = session.manifest.pages[pageIndex];
-    await ensureStorage(page.size);
+    await ensureStorage(page.size, session.availableStorageBytes);
     const entryName = `${TEMP_PREFIX}${sessionId}-${jobId}-png-page-${pageIndex}`;
     let writable;
     try {
@@ -1342,6 +1637,27 @@ async function createHistoryCover(jobId, storage, sourceFile, entryName, pageNam
     }
 }
 
+async function createHistoryThumbnail(jobId, sourceFile, pageName, mime) {
+    const bitmap = await createPageBitmap(sourceFile, pageName, mime);
+    try {
+        const scale = Math.min(1, 224 / bitmap.width, 200 / bitmap.height);
+        const width = Math.max(1, Math.round(bitmap.width * scale));
+        const height = Math.max(1, Math.round(bitmap.height * scale));
+        const canvas = new self.OffscreenCanvas(width, height);
+        const context = canvas.getContext('2d', { alpha: false });
+        if (!context || typeof canvas.convertToBlob !== 'function') {
+            throw new ComicError('THUMBNAIL_UNSUPPORTED', '当前浏览器无法生成页面缩略图');
+        }
+        context.fillStyle = '#ffffff';
+        context.fillRect(0, 0, width, height);
+        context.drawImage(bitmap, 0, 0, width, height);
+        assertNotCancelled(jobId);
+        return canvas.convertToBlob({ type: 'image/jpeg', quality: 0.72 });
+    } finally {
+        bitmap.close();
+    }
+}
+
 async function requestPersistentStorage() {
     if (self.navigator.storage && typeof self.navigator.storage.persist === 'function') {
         try {
@@ -1367,6 +1683,10 @@ function postLongImageProgress(jobId, payload, processed, message) {
 }
 
 async function saveHistorySession(jobId, payload) {
+    return withHistoryMutation(() => saveHistorySessionUnlocked(jobId, payload));
+}
+
+async function saveHistorySessionUnlocked(jobId, payload) {
     const session = sessions.get(payload.sessionId);
     if (!session || (session.kind !== 'archive' && session.kind !== 'uploads')) {
         throw new ComicError('INVALID_SESSION', '漫画阅读会话已失效');
@@ -1377,8 +1697,22 @@ async function saveHistorySession(jobId, payload) {
         session.manifest.pages.length
     );
     const pool = getCodecTaskPool(parallelism);
-    const bookId = await history.createBookId(session.header.bytes, session.file.size);
-    const existingRecord = await getHistoryRecord(bookId);
+    const requestedBookId = String(payload.bookId || '').toLowerCase();
+    const bookId = /^[a-f0-9]{32}$/.test(requestedBookId)
+        ? requestedBookId
+        : await history.createBookId(session.header.bytes, session.file.size);
+    const existingRawRecord = await getRawHistoryRecord(bookId);
+    let existingRecord = null;
+    if (existingRawRecord) {
+        try {
+            existingRecord = history.validateRecord(existingRawRecord);
+        } catch (error) {
+            if (!(error instanceof TypeError)) {
+                throw error;
+            }
+            // Re-importing the same archive may repair malformed metadata, but storage errors must abort.
+        }
+    }
     const generation = `${Date.now().toString(36)}-${jobId.replace(/[^a-z0-9-]/gi, '')}`;
     const pageReferences = new Array(session.manifest.pages.length);
     const dimensions = new Array(session.manifest.pages.length);
@@ -1386,7 +1720,10 @@ async function saveHistorySession(jobId, payload) {
     let historyCommitted = false;
 
     try {
-        await ensureStorage(session.manifest.totalSize);
+        await ensureStorage(
+            session.manifest.totalSize,
+            payload.availableStorageBytes ?? session.availableStorageBytes
+        );
         let savedPages = 0;
         await runBounded(session.manifest.pages.length, parallelism, async index => {
             assertNotCancelled(jobId);
@@ -1436,7 +1773,7 @@ async function saveHistorySession(jobId, payload) {
         const record = await putHistoryRecord({
             schemaVersion: history.config.SCHEMA_VERSION,
             bookId,
-            title: existingRecord?.title || baseName,
+            title: payload.replaceMetadata ? baseName : (existingRecord?.title || baseName),
             sourceName: payload.sourceName || session.file.name || `${baseName}.ecomic`,
             storageKind: storage.kind,
             coverEntryName,
@@ -1452,26 +1789,39 @@ async function saveHistorySession(jobId, payload) {
                 entryName: ''
             },
             progress: existingRecord?.progress || { pageIndex: 0, pageRatio: 0 },
-            createdAt: existingRecord?.createdAt || now,
+            createdAt: payload.replaceMetadata
+                ? (Number(payload.createdAt) || existingRecord?.createdAt || now)
+                : (existingRecord?.createdAt || now),
             updatedAt: now,
             lastOpenedAt: existingRecord?.lastOpenedAt || 0
         });
         historyCommitted = true;
         await requestPersistentStorage();
         if (existingRecord) {
-            for (const page of existingRecord.pages) {
-                await removeEntryQuietly(storage, page.entryName);
+            try {
+                await assertHistoryMutationOwnership();
+                const currentRecord = await getHistoryRecord(bookId);
+                if (currentRecord?.coverEntryName === coverEntryName) {
+                    const existingStorage = await getStorageBackend(existingRecord.storageKind);
+                    for (const page of existingRecord.pages) {
+                        await removeEntryQuietly(existingStorage, page.entryName);
+                    }
+                    await removeEntryQuietly(existingStorage, existingRecord.coverEntryName);
+                    await removeEntryQuietly(existingStorage, existingRecord.png?.entryName);
+                }
+            } catch (error) {
+                // The committed generation is authoritative; stale data can be reclaimed later.
             }
-            await removeEntryQuietly(storage, existingRecord.coverEntryName);
-            await removeEntryQuietly(storage, existingRecord.png?.entryName);
         }
-        post('historySaved', jobId, {
+        const result = {
             bookId,
             book: history.summarizeRecord(record),
             coverFile,
             pages: pages.length,
             size: session.manifest.totalSize
-        });
+        };
+        if (!payload.silent) post('historySaved', jobId, result);
+        return result;
     } catch (error) {
         if (!historyCommitted) {
             for (const name of newEntryNames) {
@@ -1545,7 +1895,10 @@ async function exportLongImage(jobId, payload) {
         }
         const largestPage = Math.max(...session.manifest.pages.map(page => page.size));
         const temporaryPageBytes = session.kind === 'history' ? 0 : largestPage;
-        await ensureStorage(estimatePngStorage(session, rawSize) + temporaryPageBytes);
+        await ensureStorage(
+            estimatePngStorage(session, rawSize) + temporaryPageBytes,
+            payload.availableStorageBytes ?? session.availableStorageBytes
+        );
     } catch (error) {
         throw error;
     }
@@ -1729,7 +2082,10 @@ async function exportZip(jobId, payload) {
     if (!session) {
         throw new ComicError('INVALID_SESSION', '漫画阅读会话已失效');
     }
-    await ensureStorage(session.manifest.totalSize);
+    await ensureStorage(
+        session.manifest.totalSize,
+        payload.availableStorageBytes ?? session.availableStorageBytes
+    );
     const storage = await getStorageBackend();
     const entryName = `${TEMP_PREFIX}${jobId}.zip`;
     let writable;
@@ -1822,24 +2178,50 @@ async function exportZip(jobId, payload) {
 }
 
 async function historyList(jobId) {
-    const records = await listHistoryRecords();
-    const storage = await getStorageBackend();
+    const historyState = await readHistoryRecords();
     const books = [];
-    for (const record of records) {
-        let coverFile = null;
-        if (record.coverEntryName) {
-            try {
-                coverFile = await storage.getFile(record.coverEntryName);
-            } catch (error) {
-                coverFile = null;
-            }
+    const storageByKind = new Map();
+    const completeNamesByKind = new Map();
+    for (const storageKind of new Set(historyState.records.map(record => record.storageKind))) {
+        try {
+            const storage = await getStorageBackend(storageKind);
+            storageByKind.set(storageKind, storage);
+            completeNamesByKind.set(storageKind, await storage.listCompleteNames());
+        } catch (error) {
+            completeNamesByKind.set(storageKind, new Set());
         }
-        books.push({ ...history.summarizeRecord(record), coverFile });
     }
-    post('history', jobId, { books });
+    for (const record of historyState.records) {
+        let coverFile = null;
+        const storage = storageByKind.get(record.storageKind);
+        const completeNames = completeNamesByKind.get(record.storageKind) || new Set();
+        let fileAvailable = record.pages.every(page => completeNames.has(page.entryName));
+        try {
+            if (storage && record.coverEntryName && completeNames.has(record.coverEntryName)) {
+                try {
+                    coverFile = await storage.getFile(record.coverEntryName);
+                } catch (error) {
+                    coverFile = null;
+                }
+            }
+        } catch (error) {
+            coverFile = null;
+            fileAvailable = false;
+        }
+        books.push({
+            ...history.summarizeRecord(record),
+            storageKind: record.storageKind,
+            coverFile,
+            fileAvailable
+        });
+    }
+    post('history', jobId, {
+        books,
+        invalidRecords: historyState.invalidRecords
+    });
 }
 
-function createHistorySession(record, sessionId) {
+function createHistorySession(record, sessionId, availableStorageBytes = null) {
     const manifest = {
         createdAt: record.createdAt,
         totalSize: record.totalSize,
@@ -1849,27 +2231,70 @@ function createHistorySession(record, sessionId) {
         kind: 'history',
         manifest,
         pageEntries: new Map(),
-        bookId: record.bookId
+        bookId: record.bookId,
+        storageKind: record.storageKind,
+        availableStorageBytes
     });
     return manifest;
 }
 
 async function historyOpen(jobId, payload) {
+    return withHistoryMutation(async () => {
+        const record = await getHistoryRecord(String(payload.bookId || ''));
+        if (!record) {
+            throw new ComicError('HISTORY_NOT_FOUND', '这本漫画已不在书架中');
+        }
+        const storage = await getStorageBackend(record.storageKind);
+        for (const page of record.pages) {
+            if (!(await storage.has(page.entryName))) {
+                throw new ComicError('HISTORY_ASSET_MISSING', '漫画原始页面已缺失，请重新导入原归档');
+            }
+        }
+        const now = Date.now();
+        const updated = await putHistoryRecord({ ...record, lastOpenedAt: now });
+        const sessionId = `${jobId}-history-${record.bookId}`;
+        createHistorySession(updated, sessionId, payload.availableStorageBytes);
+        post('opened', jobId, {
+            sessionId,
+            bookId: record.bookId,
+            createdAt: record.createdAt,
+            totalSize: record.totalSize,
+            progress: record.progress,
+            pages: record.pages.map(page => ({
+                name: page.name,
+                type: page.type,
+                size: page.size,
+                width: page.width,
+                height: page.height,
+                lastModified: page.lastModified
+            }))
+        });
+    });
+}
+
+async function historyEditOpen(jobId, payload) {
     const record = await getHistoryRecord(String(payload.bookId || ''));
     if (!record) {
         throw new ComicError('HISTORY_NOT_FOUND', '这本漫画已不在书架中');
     }
-    const now = Date.now();
-    const updated = await putHistoryRecord({ ...record, lastOpenedAt: now });
-    const sessionId = `${jobId}-history-${record.bookId}`;
-    createHistorySession(updated, sessionId);
-    post('opened', jobId, {
+    const storage = await getStorageBackend(record.storageKind);
+    for (const page of record.pages) {
+        if (!(await storage.has(page.entryName))) {
+            throw new ComicError('HISTORY_ASSET_MISSING', '漫画原始页面已缺失，请重新导入原归档');
+        }
+    }
+    const sessionId = `${jobId}-edit-${record.bookId}`;
+    sessions.set(sessionId, {
+        kind: 'edit',
+        record,
+        availableStorageBytes: payload.availableStorageBytes
+    });
+    post('historyEditOpened', jobId, {
         sessionId,
         bookId: record.bookId,
-        createdAt: record.createdAt,
-        totalSize: record.totalSize,
-        progress: record.progress,
-        pages: record.pages.map(page => ({
+        title: record.title,
+        pages: record.pages.map((page, index) => ({
+            index,
             name: page.name,
             type: page.type,
             size: page.size,
@@ -1880,24 +2305,203 @@ async function historyOpen(jobId, payload) {
     });
 }
 
-async function historyProgress(jobId, payload) {
-    const record = await getHistoryRecord(String(payload.bookId || ''));
-    if (!record) {
-        return;
+async function historyEditThumbnail(jobId, payload) {
+    const session = sessions.get(String(payload.sessionId || ''));
+    const index = Number(payload.index);
+    if (!session || session.kind !== 'edit' || !Number.isInteger(index)
+            || index < 0 || index >= session.record.pages.length) {
+        throw new ComicError('INVALID_SESSION', '漫画编辑会话已失效');
     }
-    const progress = history.normalizeProgress(payload.progress, record.pageCount);
-    await putHistoryRecord({ ...record, progress, lastOpenedAt: Date.now() });
-    post('historyProgressed', jobId, { bookId: record.bookId, progress });
+    const page = session.record.pages[index];
+    const storage = await getStorageBackend(session.record.storageKind);
+    const file = await storage.getFile(page.entryName);
+    const thumbnail = await createHistoryThumbnail(jobId, file, page.name, page.type);
+    post('historyEditThumbnail', jobId, {
+        sessionId: payload.sessionId,
+        index,
+        file: thumbnail
+    });
+}
+
+function mapEditedProgress(record, retainedIndexes) {
+    const oldIndex = record.progress.pageIndex;
+    const retainedPosition = retainedIndexes.indexOf(oldIndex);
+    if (retainedPosition >= 0) {
+        return { pageIndex: retainedPosition, pageRatio: record.progress.pageRatio };
+    }
+    const nextPosition = retainedIndexes.findIndex(index => index > oldIndex);
+    return {
+        pageIndex: nextPosition >= 0 ? nextPosition : Math.max(0, retainedIndexes.length - 1),
+        pageRatio: 0
+    };
+}
+
+async function historyEditCommit(jobId, payload) {
+    return withHistoryMutation(async () => {
+        const sessionId = String(payload.sessionId || '');
+        const session = sessions.get(sessionId);
+        if (!session || session.kind !== 'edit') {
+            throw new ComicError('INVALID_SESSION', '漫画编辑会话已失效');
+        }
+        const currentRecord = await getHistoryRecord(session.record.bookId);
+        if (!currentRecord) {
+            throw new ComicError('HISTORY_NOT_FOUND', '这本漫画已不在书架中');
+        }
+        if (currentRecord.updatedAt !== session.record.updatedAt
+                || currentRecord.coverEntryName !== session.record.coverEntryName) {
+            throw new ComicError('EDIT_CONFLICT', '漫画已在其他窗口发生变化，请关闭编辑器后重新打开');
+        }
+        const retainedIndexes = Array.isArray(payload.retainedIndexes)
+            ? payload.retainedIndexes.map(Number)
+            : [];
+        if (retainedIndexes.some((index, position) => !Number.isInteger(index)
+                || index < 0 || index >= currentRecord.pages.length
+                || (position > 0 && retainedIndexes[position - 1] >= index))) {
+            throw new ComicError('INVALID_EDIT', '保留页面顺序无效');
+        }
+        const newFiles = Array.isArray(payload.newFiles) ? payload.newFiles : [];
+        const newRecords = [];
+        for (const file of newFiles) {
+            assertNotCancelled(jobId);
+            newRecords.push(await detectFileRecord(file));
+        }
+        const finalRecords = [
+            ...retainedIndexes.map(index => currentRecord.pages[index]),
+            ...newRecords
+        ];
+        const manifest = format.createManifest(finalRecords, currentRecord.createdAt);
+        const storage = await getStorageBackend(currentRecord.storageKind);
+        await ensureStorage(manifest.totalSize, payload.availableStorageBytes ?? session.availableStorageBytes);
+        const generation = `${Date.now().toString(36)}-${jobId.replace(/[^a-z0-9-]/gi, '')}`;
+        const pageReferences = new Array(finalRecords.length);
+        const dimensions = new Array(finalRecords.length);
+        const newEntryNames = [];
+        let committed = false;
+        try {
+            const parallelism = Math.min(normalizeParallelism(payload.parallelism), finalRecords.length);
+            const pool = getCodecTaskPool(parallelism);
+            let completed = 0;
+            await runBounded(finalRecords.length, parallelism, async outputIndex => {
+                assertNotCancelled(jobId);
+                const originalIndex = outputIndex < retainedIndexes.length
+                    ? retainedIndexes[outputIndex]
+                    : -1;
+                const record = originalIndex >= 0
+                    ? currentRecord.pages[originalIndex]
+                    : newRecords[outputIndex - retainedIndexes.length];
+                const sourceFile = originalIndex >= 0
+                    ? await storage.getFile(record.entryName)
+                    : newFiles[outputIndex - retainedIndexes.length];
+                const entryName = `${history.config.HISTORY_PREFIX}${currentRecord.bookId}-${generation}-page-${String(outputIndex).padStart(4, '0')}`;
+                newEntryNames.push(entryName);
+                await copyStorageFile(jobId, storage, sourceFile, entryName);
+                const file = await storage.getFile(entryName);
+                pageReferences[outputIndex] = { file, entryName };
+                dimensions[outputIndex] = originalIndex >= 0
+                    ? { width: record.width, height: record.height }
+                    : await inspectPageWithPool(jobId, pool, file, record.name, record.type);
+                completed += 1;
+                post('progress', jobId, {
+                    processed: completed,
+                    total: finalRecords.length + 1,
+                    message: `正在写入第 ${completed}/${finalRecords.length} 页`
+                });
+            });
+            const pages = finalRecords.map((record, index) => ({
+                name: record.name,
+                type: record.type,
+                size: record.size,
+                width: dimensions[index].width,
+                height: dimensions[index].height,
+                lastModified: record.lastModified,
+                entryName: pageReferences[index].entryName
+            }));
+            const coverEntryName = `${history.config.HISTORY_PREFIX}${currentRecord.bookId}-${generation}-cover.jpg`;
+            newEntryNames.push(coverEntryName);
+            await createHistoryCover(
+                jobId,
+                storage,
+                pageReferences[0].file,
+                coverEntryName,
+                pages[0].name,
+                pages[0].type
+            );
+            const coverFile = await storage.getFile(coverEntryName);
+            const now = Date.now();
+            const updatedRecord = await putHistoryRecord({
+                ...currentRecord,
+                storageKind: storage.kind,
+                coverEntryName,
+                coverMime: 'image/jpeg',
+                pageCount: pages.length,
+                totalSize: manifest.totalSize,
+                pages,
+                png: {
+                    name: `${currentRecord.title}-long.png`,
+                    width: 1,
+                    height: 1,
+                    size: 0,
+                    generatedAt: 0,
+                    entryName: ''
+                },
+                progress: mapEditedProgress(currentRecord, retainedIndexes),
+                updatedAt: now
+            });
+            committed = true;
+            sessions.delete(sessionId);
+            try {
+                await assertHistoryMutationOwnership();
+                const authoritative = await getHistoryRecord(currentRecord.bookId);
+                if (authoritative?.coverEntryName === coverEntryName) {
+                    for (const page of currentRecord.pages) await removeEntryQuietly(storage, page.entryName);
+                    await removeEntryQuietly(storage, currentRecord.coverEntryName);
+                    await removeEntryQuietly(storage, currentRecord.png?.entryName);
+                }
+            } catch (error) {
+                // The new generation is committed; orphan cleanup can reclaim the old one later.
+            }
+            post('historyEditCommitted', jobId, {
+                book: history.summarizeRecord(updatedRecord),
+                coverFile,
+                removed: currentRecord.pages.length - retainedIndexes.length,
+                added: newFiles.length
+            });
+        } catch (error) {
+            if (!committed) {
+                for (const entryName of newEntryNames) await removeEntryQuietly(storage, entryName);
+            }
+            throw error;
+        }
+    });
+}
+
+async function historyEditCancel(payload) {
+    const session = sessions.get(String(payload.sessionId || ''));
+    if (session?.kind === 'edit') sessions.delete(String(payload.sessionId || ''));
+}
+
+async function historyProgress(jobId, payload) {
+    return withHistoryMutation(async () => {
+        const record = await getHistoryRecord(String(payload.bookId || ''));
+        if (!record) {
+            return;
+        }
+        const progress = history.normalizeProgress(payload.progress, record.pageCount);
+        await putHistoryRecord({ ...record, progress, lastOpenedAt: Date.now() });
+        post('historyProgressed', jobId, { bookId: record.bookId, progress });
+    });
 }
 
 async function historyRename(jobId, payload) {
-    const record = await getHistoryRecord(String(payload.bookId || ''));
-    if (!record) {
-        throw new ComicError('HISTORY_NOT_FOUND', '这本漫画已不在书架中');
-    }
-    const title = history.normalizeTitle(payload.title);
-    const updated = await putHistoryRecord({ ...record, title, updatedAt: Date.now() });
-    post('historyRenamed', jobId, { book: history.summarizeRecord(updated) });
+    return withHistoryMutation(async () => {
+        const record = await getHistoryRecord(String(payload.bookId || ''));
+        if (!record) {
+            throw new ComicError('HISTORY_NOT_FOUND', '这本漫画已不在书架中');
+        }
+        const title = history.normalizeTitle(payload.title);
+        const updated = await putHistoryRecord({ ...record, title, updatedAt: Date.now() });
+        post('historyRenamed', jobId, { book: history.summarizeRecord(updated) });
+    });
 }
 
 async function deleteOneHistoryBook(record, storage) {
@@ -1915,20 +2519,23 @@ async function deleteOneHistoryBook(record, storage) {
 }
 
 async function historyDelete(jobId, payload) {
-    const storage = await getStorageBackend();
-    if (payload.bookId === '*') {
-        const records = await listHistoryRecords();
-        for (const record of records) {
+    return withHistoryMutation(async () => {
+        if (payload.bookId === '*') {
+            const records = await listHistoryRecords();
+            for (const record of records) {
+                const storage = await getStorageBackend(record.storageKind);
+                await deleteOneHistoryBook(record, storage);
+            }
+            post('historyDeleted', jobId, { bookId: '*', count: records.length });
+            return;
+        }
+        const record = await getHistoryRecord(String(payload.bookId || ''));
+        if (record) {
+            const storage = await getStorageBackend(record.storageKind);
             await deleteOneHistoryBook(record, storage);
         }
-        post('historyDeleted', jobId, { bookId: '*', count: records.length });
-        return;
-    }
-    const record = await getHistoryRecord(String(payload.bookId || ''));
-    if (record) {
-        await deleteOneHistoryBook(record, storage);
-    }
-    post('historyDeleted', jobId, { bookId: String(payload.bookId || ''), count: record ? 1 : 0 });
+        post('historyDeleted', jobId, { bookId: String(payload.bookId || ''), count: record ? 1 : 0 });
+    });
 }
 
 async function historyStorage(jobId) {
@@ -1951,10 +2558,10 @@ async function historyExportLongImage(jobId, payload) {
     let title = String(payload.outputName || '').trim();
     if (record) {
         sessionId = `${jobId}-history-long-${record.bookId}`;
-        createHistorySession(record, sessionId);
+        createHistorySession(record, sessionId, payload.availableStorageBytes);
         title = record.title;
     } else if (payload.file instanceof Blob) {
-        const opened = await createArchiveSession(jobId, payload.file);
+        const opened = await createArchiveSession(jobId, payload.file, payload.availableStorageBytes);
         sessionId = opened.sessionId;
     } else {
         throw new ComicError('HISTORY_NOT_FOUND', '这本漫画已不在书架中');
@@ -1966,7 +2573,8 @@ async function historyExportLongImage(jobId, payload) {
             title: title || 'comic',
             bookId,
             resultType: 'historyExport',
-            parallelism: payload.parallelism
+            parallelism: payload.parallelism,
+            availableStorageBytes: payload.availableStorageBytes
         });
     } finally {
         sessions.delete(sessionId);
@@ -1982,7 +2590,7 @@ async function historyArchive(jobId, payload) {
     if (!record) {
         throw new ComicError('HISTORY_NOT_FOUND', '这本漫画已不在书架中');
     }
-    const storage = await getStorageBackend();
+    const storage = await getStorageBackend(record.storageKind);
     const files = [];
     for (const page of record.pages) {
         assertNotCancelled(jobId);
@@ -1993,7 +2601,8 @@ async function historyArchive(jobId, payload) {
         files,
         outputName: record.title,
         addToShelf: false,
-        parallelism: payload.parallelism
+        parallelism: payload.parallelism,
+        availableStorageBytes: payload.availableStorageBytes
     });
 }
 
@@ -2002,7 +2611,7 @@ async function historyExportArchive(jobId, payload) {
     if (!record) {
         throw new ComicError('HISTORY_NOT_FOUND', '这本漫画已不在书架中');
     }
-    const storage = await getStorageBackend();
+    const storage = await getStorageBackend(record.storageKind);
     const files = [];
     for (const page of record.pages) {
         assertNotCancelled(jobId);
@@ -2014,7 +2623,407 @@ async function historyExportArchive(jobId, payload) {
         outputName: record.title,
         addToShelf: false,
         resultType: 'historyExport',
-        parallelism: payload.parallelism
+        parallelism: payload.parallelism,
+        availableStorageBytes: payload.availableStorageBytes
+    });
+}
+
+async function createPortableHistoryArchive(jobId, record, storage, parallelism) {
+    const files = [];
+    const records = [];
+    for (const page of record.pages) {
+        assertNotCancelled(jobId);
+        const stored = await storage.getFile(page.entryName);
+        const file = new File([stored], page.name, { type: page.type, lastModified: page.lastModified });
+        files.push(file);
+        records.push(await detectFileRecord(file));
+    }
+    const manifest = format.createManifest(records, record.createdAt);
+    const manifestBytes = format.encodeManifest(manifest);
+    const salt = self.crypto.getRandomValues(new Uint8Array(16));
+    const noncePrefix = self.crypto.getRandomValues(new Uint8Array(8));
+    const headerBytes = format.encodeHeader({
+        salt,
+        noncePrefix,
+        keyId: await comicCrypto.getBuiltinKeyId(),
+        manifestCipherLength: manifestBytes.length + format.AUTH_TAG_SIZE,
+        totalPlainSize: manifest.totalSize
+    });
+    const header = format.decodeHeader(headerBytes);
+    const key = await comicCrypto.deriveBuiltinKey(salt);
+    const laneCount = Math.min(
+        normalizeParallelism(parallelism),
+        manifest.pages.reduce((sum, page) => sum + page.chunkCount, 0)
+    );
+    const pool = getCodecTaskPool(laneCount);
+    const entryName = `${TEMP_PREFIX}${jobId}-${record.bookId}.ecomic`;
+    let writable;
+    try {
+        writable = (await createWritableEntry(storage, entryName)).writable;
+        await writable.write(headerBytes);
+        await writable.write(await encryptChunkWithPool(jobId, pool, key, headerBytes, noncePrefix, 0, manifestBytes));
+        const chunks = [];
+        let counter = 1;
+        for (const file of files) {
+            for (let offset = 0; offset < file.size; offset += format.CHUNK_SIZE) {
+                chunks.push({ file, offset, counter });
+                counter += 1;
+            }
+        }
+        const pending = new Array(chunks.length);
+        const startChunk = index => {
+            const chunk = chunks[index];
+            pending[index] = (async () => {
+                assertNotCancelled(jobId);
+                const plain = await chunk.file.slice(chunk.offset, chunk.offset + format.CHUNK_SIZE).arrayBuffer();
+                return encryptChunkWithPool(
+                    jobId,
+                    pool,
+                    key,
+                    header.bytes,
+                    header.noncePrefix,
+                    chunk.counter,
+                    plain
+                );
+            })();
+        };
+        for (let index = 0; index < Math.min(laneCount, chunks.length); index++) startChunk(index);
+        for (let index = 0; index < chunks.length; index++) {
+            await writable.write(await pending[index]);
+            if (index + laneCount < chunks.length) startChunk(index + laneCount);
+        }
+        await writable.close();
+        writable = null;
+        return { file: await storage.getFile(entryName), entryName };
+    } catch (error) {
+        try { await writable?.abort(error); } catch (abortError) { /* Preserve original error. */ }
+        await removeEntryQuietly(storage, entryName);
+        throw error;
+    }
+}
+
+async function appendStoredZipFile(jobId, writable, source, path, offset, timestamp = Date.now()) {
+    const nameBytes = new TextEncoder().encode(path);
+    const stamp = getDosDateTime(timestamp);
+    const localHeader = zipLocalHeader(nameBytes, stamp);
+    await writable.write(localHeader);
+    let nextOffset = offset + localHeader.length;
+    let crc = 0xFFFFFFFF;
+    for (let sourceOffset = 0; sourceOffset < source.size; sourceOffset += 1024 * 1024) {
+        assertNotCancelled(jobId);
+        const bytes = new Uint8Array(await source.slice(sourceOffset, sourceOffset + 1024 * 1024).arrayBuffer());
+        crc = updateCrc32(crc, bytes);
+        await writable.write(bytes);
+        nextOffset += bytes.length;
+    }
+    crc = (crc ^ 0xFFFFFFFF) >>> 0;
+    const descriptor = zipDataDescriptor(crc, source.size);
+    await writable.write(descriptor);
+    nextOffset += descriptor.length;
+    return {
+        offset: nextOffset,
+        record: { nameBytes, stamp, crc, size: source.size, offset }
+    };
+}
+
+async function historyExportBundle(jobId, payload) {
+    const bookIds = Array.isArray(payload.bookIds)
+        ? [...new Set(payload.bookIds.map(value => String(value || '').toLowerCase()))]
+        : [];
+    if (!bookIds.length) throw new ComicError('EMPTY_BUNDLE', '请至少选择一本漫画');
+    if (bookIds.length + 1 > 0xFFFF) throw new ComicError('BUNDLE_TOO_LARGE', '单个漫画包包含的漫画数量过多');
+    const records = [];
+    let estimatedZipSize = 0;
+    let largestArchive = 0;
+    for (const bookId of bookIds) {
+        const record = await getHistoryRecord(bookId);
+        if (!record) throw new ComicError('HISTORY_NOT_FOUND', '所选漫画已不在书架中，请刷新后重试');
+        const archiveManifest = format.createManifest(record.pages, record.createdAt);
+        const archiveSize = format.estimateArchiveSize(archiveManifest, format.encodeManifest(archiveManifest).length);
+        estimatedZipSize += archiveSize + 256;
+        largestArchive = Math.max(largestArchive, archiveSize);
+        records.push(record);
+    }
+    if (estimatedZipSize >= 0xFFFFFFFF) {
+        throw new ComicError('BUNDLE_TOO_LARGE', '所选漫画包将达到 4 GB，请拆分选择后再导出');
+    }
+    await ensureStorage(estimatedZipSize + largestArchive, payload.availableStorageBytes);
+    const outputStorage = await getStorageBackend();
+    const outputEntryName = `${TEMP_PREFIX}${jobId}.zip`;
+    let writable;
+    let currentTempName = '';
+    let currentTempStorage = null;
+    try {
+        writable = (await createWritableEntry(outputStorage, outputEntryName)).writable;
+        const centralRecords = [];
+        const manifestBooks = [];
+        let offset = 0;
+        for (let index = 0; index < records.length; index++) {
+            const record = records[index];
+            const sourceStorage = await getStorageBackend(record.storageKind);
+            const archive = await createPortableHistoryArchive(jobId, record, sourceStorage, payload.parallelism);
+            currentTempName = archive.entryName;
+            currentTempStorage = sourceStorage;
+            const path = `books/${record.bookId}.ecomic`;
+            const appended = await appendStoredZipFile(jobId, writable, archive.file, path, offset, record.updatedAt);
+            offset = appended.offset;
+            centralRecords.push(appended.record);
+            manifestBooks.push({
+                bookId: record.bookId,
+                title: record.title,
+                path,
+                size: archive.file.size,
+                createdAt: record.createdAt
+            });
+            await removeEntryQuietly(sourceStorage, currentTempName);
+            currentTempName = '';
+            currentTempStorage = null;
+            post('progress', jobId, {
+                processed: index + 1,
+                total: records.length + 1,
+                message: `已打包第 ${index + 1}/${records.length} 本漫画`
+            });
+        }
+        const bundleManifest = new Blob([JSON.stringify({
+            format: 'ecryptees-comic-bundle',
+            version: 1,
+            createdAt: Date.now(),
+            books: manifestBooks
+        })], { type: 'application/json' });
+        const manifestAppend = await appendStoredZipFile(
+            jobId,
+            writable,
+            bundleManifest,
+            'ecryptees-bundle.json',
+            offset
+        );
+        offset = manifestAppend.offset;
+        centralRecords.push(manifestAppend.record);
+        const centralOffset = offset;
+        for (const centralRecord of centralRecords) {
+            const header = zipCentralHeader(centralRecord);
+            await writable.write(header);
+            offset += header.length;
+        }
+        const centralSize = offset - centralOffset;
+        if (offset + 22 >= 0xFFFFFFFF) throw new ComicError('BUNDLE_TOO_LARGE', '漫画包超过 4 GB，请拆分选择');
+        await writable.write(zipEnd(centralRecords.length, centralSize, centralOffset));
+        await writable.close();
+        writable = null;
+        const file = await outputStorage.getFile(outputEntryName);
+        post('historyBundleReady', jobId, {
+            file,
+            opfsName: outputEntryName,
+            storageKind: outputStorage.kind,
+            name: `Ecryptees-comics-${new Date().toISOString().slice(0, 10)}.zip`,
+            size: file.size,
+            count: records.length
+        });
+    } catch (error) {
+        try { await writable?.abort(error); } catch (abortError) { /* Preserve original error. */ }
+        if (currentTempName && currentTempStorage) await removeEntryQuietly(currentTempStorage, currentTempName);
+        await removeEntryQuietly(outputStorage, outputEntryName);
+        throw error;
+    }
+}
+
+function assertSafeBundlePath(name) {
+    if (!name || name.includes('\\') || name.startsWith('/') || name.includes('\0')
+            || name.split('/').some(part => !part || part === '.' || part === '..')) {
+        throw new ComicError('INVALID_BUNDLE_PATH', '漫画包包含不安全的文件路径');
+    }
+}
+
+async function verifyZipEntryCrc(file, entry) {
+    let crc = 0xFFFFFFFF;
+    for (let offset = 0; offset < entry.size; offset += 1024 * 1024) {
+        const end = Math.min(entry.size, offset + 1024 * 1024);
+        const bytes = new Uint8Array(await file.slice(entry.dataOffset + offset, entry.dataOffset + end).arrayBuffer());
+        crc = updateCrc32(crc, bytes);
+    }
+    if (((crc ^ 0xFFFFFFFF) >>> 0) !== entry.crc) {
+        throw new ComicError('BUNDLE_CRC_MISMATCH', `漫画包文件“${entry.name}”校验失败`);
+    }
+}
+
+async function parseHistoryBundle(file) {
+    if (!(file instanceof Blob) || file.size < 22 || file.size >= 0xFFFFFFFF) {
+        throw new ComicError('INVALID_BUNDLE', '漫画包为空、损坏或超过 4 GB');
+    }
+    const tailOffset = Math.max(0, file.size - 65557);
+    const tail = new Uint8Array(await file.slice(tailOffset).arrayBuffer());
+    let eocd = -1;
+    for (let index = tail.length - 22; index >= 0; index--) {
+        if (tail[index] === 0x50 && tail[index + 1] === 0x4B && tail[index + 2] === 0x05 && tail[index + 3] === 0x06) {
+            eocd = index;
+            break;
+        }
+    }
+    if (eocd < 0) throw new ComicError('INVALID_BUNDLE', '漫画包缺少 ZIP 目录');
+    const endView = new DataView(tail.buffer, tail.byteOffset + eocd);
+    if (endView.getUint16(4, true) !== 0 || endView.getUint16(6, true) !== 0) {
+        throw new ComicError('UNSUPPORTED_BUNDLE', '不支持分卷 ZIP 漫画包');
+    }
+    const recordCount = endView.getUint16(10, true);
+    const centralSize = endView.getUint32(12, true);
+    const centralOffset = endView.getUint32(16, true);
+    if (recordCount === 0xFFFF || centralSize === 0xFFFFFFFF || centralOffset === 0xFFFFFFFF) {
+        throw new ComicError('UNSUPPORTED_BUNDLE', '不支持 ZIP64 漫画包');
+    }
+    if (endView.getUint16(20, true) !== 0 || tailOffset + eocd + 22 !== file.size) {
+        throw new ComicError('UNSUPPORTED_BUNDLE', '漫画包不能包含 ZIP 注释或尾随数据');
+    }
+    if (centralOffset + centralSize > file.size) throw new ComicError('INVALID_BUNDLE', '漫画包 ZIP 目录越界');
+    const central = new Uint8Array(await file.slice(centralOffset, centralOffset + centralSize).arrayBuffer());
+    const entries = new Map();
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    let cursor = 0;
+    for (let index = 0; index < recordCount; index++) {
+        if (cursor + 46 > central.length) throw new ComicError('INVALID_BUNDLE', '漫画包 ZIP 目录不完整');
+        const view = new DataView(central.buffer, central.byteOffset + cursor);
+        if (view.getUint32(0, true) !== 0x02014B50) throw new ComicError('INVALID_BUNDLE', '漫画包 ZIP 目录签名错误');
+        const flags = view.getUint16(8, true);
+        const method = view.getUint16(10, true);
+        const crc = view.getUint32(16, true);
+        const compressedSize = view.getUint32(20, true);
+        const size = view.getUint32(24, true);
+        const nameLength = view.getUint16(28, true);
+        const extraLength = view.getUint16(30, true);
+        const commentLength = view.getUint16(32, true);
+        const disk = view.getUint16(34, true);
+        const localOffset = view.getUint32(42, true);
+        if (flags !== 0x0808 || method !== 0 || disk !== 0 || compressedSize !== size
+                || compressedSize === 0xFFFFFFFF || localOffset === 0xFFFFFFFF) {
+            throw new ComicError('UNSUPPORTED_BUNDLE', '漫画包只能使用未压缩、未加密的标准 ZIP 条目');
+        }
+        if (extraLength || commentLength) throw new ComicError('UNSUPPORTED_BUNDLE', '漫画包不能包含 ZIP64 或自定义扩展字段');
+        const recordEnd = cursor + 46 + nameLength + extraLength + commentLength;
+        if (recordEnd > central.length) throw new ComicError('INVALID_BUNDLE', '漫画包 ZIP 文件名越界');
+        const name = decoder.decode(central.subarray(cursor + 46, cursor + 46 + nameLength));
+        assertSafeBundlePath(name);
+        if (entries.has(name)) throw new ComicError('INVALID_BUNDLE', '漫画包包含重复文件名');
+        const localHeader = new Uint8Array(await file.slice(localOffset, localOffset + 30).arrayBuffer());
+        if (localHeader.length !== 30 || new DataView(localHeader.buffer).getUint32(0, true) !== 0x04034B50) {
+            throw new ComicError('INVALID_BUNDLE', '漫画包本地文件头损坏');
+        }
+        const localView = new DataView(localHeader.buffer);
+        if (localView.getUint16(6, true) !== 0x0808 || localView.getUint16(8, true) !== 0) {
+            throw new ComicError('INVALID_BUNDLE', '漫画包本地文件头与目录不一致');
+        }
+        const localNameLength = localView.getUint16(26, true);
+        const localExtraLength = localView.getUint16(28, true);
+        if (localExtraLength) throw new ComicError('UNSUPPORTED_BUNDLE', '漫画包不能包含 ZIP64 或自定义扩展字段');
+        const localNameBytes = new Uint8Array(await file.slice(localOffset + 30, localOffset + 30 + localNameLength).arrayBuffer());
+        if (decoder.decode(localNameBytes) !== name) throw new ComicError('INVALID_BUNDLE', '漫画包本地文件名与目录不一致');
+        const dataOffset = localOffset + 30 + localNameLength + localExtraLength;
+        const descriptorOffset = dataOffset + size;
+        if (descriptorOffset + 16 > centralOffset) throw new ComicError('INVALID_BUNDLE', '漫画包文件内容越界');
+        const descriptorBytes = new Uint8Array(await file.slice(descriptorOffset, descriptorOffset + 16).arrayBuffer());
+        const descriptorView = new DataView(descriptorBytes.buffer);
+        if (descriptorBytes.length !== 16 || descriptorView.getUint32(0, true) !== 0x08074B50
+                || descriptorView.getUint32(4, true) !== crc
+                || descriptorView.getUint32(8, true) !== size
+                || descriptorView.getUint32(12, true) !== size) {
+            throw new ComicError('INVALID_BUNDLE', '漫画包数据描述符损坏');
+        }
+        entries.set(name, { name, crc, size, dataOffset, localOffset, endOffset: descriptorOffset + 16 });
+        cursor = recordEnd;
+    }
+    if (cursor !== central.length) throw new ComicError('INVALID_BUNDLE', '漫画包 ZIP 目录包含多余数据');
+    const ranges = [...entries.values()].sort((left, right) => left.localOffset - right.localOffset);
+    for (let index = 1; index < ranges.length; index++) {
+        if (ranges[index].localOffset < ranges[index - 1].endOffset) {
+            throw new ComicError('INVALID_BUNDLE', '漫画包 ZIP 条目相互重叠');
+        }
+    }
+    const manifestEntry = entries.get('ecryptees-bundle.json');
+    if (!manifestEntry || manifestEntry.size > 4 * 1024 * 1024) {
+        throw new ComicError('INVALID_BUNDLE', '漫画包缺少有效的 ecryptees-bundle.json');
+    }
+    await verifyZipEntryCrc(file, manifestEntry);
+    let manifest;
+    try {
+        manifest = JSON.parse(await file.slice(manifestEntry.dataOffset, manifestEntry.dataOffset + manifestEntry.size).text());
+    } catch (error) {
+        throw new ComicError('INVALID_BUNDLE', '漫画包清单不是有效 JSON');
+    }
+    if (manifest?.format !== 'ecryptees-comic-bundle' || manifest.version !== 1 || !Array.isArray(manifest.books)) {
+        throw new ComicError('INVALID_BUNDLE', '漫画包格式或版本不受支持');
+    }
+    const books = [];
+    const seenBookIds = new Set();
+    for (const item of manifest.books) {
+        const bookId = String(item?.bookId || '').toLowerCase();
+        const path = String(item?.path || '');
+        if (!/^[a-f0-9]{32}$/.test(bookId) || path !== `books/${bookId}.ecomic` || seenBookIds.has(bookId)) {
+            throw new ComicError('INVALID_BUNDLE', '漫画包清单包含无效或重复的漫画身份');
+        }
+        const entry = entries.get(path);
+        if (!entry || entry.size !== Number(item.size)) throw new ComicError('INVALID_BUNDLE', '漫画包清单与文件大小不一致');
+        seenBookIds.add(bookId);
+        books.push({
+            bookId,
+            title: String(item.title || 'comic').slice(0, 120),
+            createdAt: Number(item.createdAt) || Date.now(),
+            entry
+        });
+    }
+    if (!books.length || entries.size !== books.length + 1) {
+        throw new ComicError('INVALID_BUNDLE', '漫画包必须只包含清单和声明的 .ecomic 文件');
+    }
+    return books;
+}
+
+async function historyImportBundle(jobId, payload) {
+    return withHistoryMutation(async () => {
+        const books = await parseHistoryBundle(payload.file);
+        const conflictPolicy = payload.conflictPolicy === 'skip' ? 'skip' : 'replace';
+        const counts = { success: 0, replaced: 0, skipped: 0, failed: 0 };
+        const failures = [];
+        for (let index = 0; index < books.length; index++) {
+            assertNotCancelled(jobId);
+            const book = books[index];
+            const existing = await getHistoryRecord(book.bookId);
+            if (existing && conflictPolicy === 'skip') {
+                counts.skipped += 1;
+            } else {
+                let importSessionId = '';
+                try {
+                    await verifyZipEntryCrc(payload.file, book.entry);
+                    const archive = new File([
+                        payload.file.slice(book.entry.dataOffset, book.entry.dataOffset + book.entry.size)
+                    ], `${book.bookId}.ecomic`, { type: 'application/vnd.ecryptees.ecomic' });
+                    const opened = await createArchiveSession(jobId, archive, payload.availableStorageBytes);
+                    importSessionId = opened.sessionId;
+                    await saveHistorySessionUnlocked(jobId, {
+                        sessionId: importSessionId,
+                        bookId: book.bookId,
+                        outputName: book.title,
+                        sourceName: `${book.title}.ecomic`,
+                        createdAt: book.createdAt,
+                        replaceMetadata: true,
+                        silent: true,
+                        parallelism: payload.parallelism,
+                        availableStorageBytes: payload.availableStorageBytes
+                    });
+                    counts.success += 1;
+                    if (existing) counts.replaced += 1;
+                } catch (error) {
+                    if (error?.name === 'AbortError' || cancelledJobs.has(jobId)) throw error;
+                    counts.failed += 1;
+                    failures.push({ bookId: book.bookId, title: book.title, message: error.message || '导入失败' });
+                } finally {
+                    if (importSessionId) sessions.delete(importSessionId);
+                }
+            }
+            post('historyBundleImportProgress', jobId, {
+                ...counts,
+                completed: index + 1,
+                total: books.length,
+                message: `已处理第 ${index + 1}/${books.length} 本漫画`
+            });
+        }
+        post('historyBundleImported', jobId, { ...counts, failures });
     });
 }
 
@@ -2035,7 +3044,7 @@ async function closeSession(payload) {
         return;
     }
     const storage = await getStorageBackend();
-    for (const name of session.pageEntries.values()) {
+    for (const name of session.pageEntries?.values?.() || []) {
         await removeEntryQuietly(storage, name);
     }
     sessions.delete(payload.sessionId);
@@ -2071,8 +3080,8 @@ async function handleComicCommand(data, sink = messageSink) {
 
     try {
         if (type === 'cleanup') {
-            await cleanupStaleEntries(payload.aggressive === true);
-            post('cleaned', jobId);
+            const invalidRecords = await cleanupStaleEntries(payload.aggressive === true);
+            post('cleaned', jobId, { invalidRecords });
         } else if (type === 'encrypt') {
             await encryptArchive(jobId, payload);
         } else if (type === 'open') {
@@ -2087,6 +3096,14 @@ async function handleComicCommand(data, sink = messageSink) {
             await historyList(jobId);
         } else if (type === 'historyOpen') {
             await historyOpen(jobId, payload);
+        } else if (type === 'historyEditOpen') {
+            await historyEditOpen(jobId, payload);
+        } else if (type === 'historyEditThumbnail') {
+            await historyEditThumbnail(jobId, payload);
+        } else if (type === 'historyEditCommit') {
+            await historyEditCommit(jobId, payload);
+        } else if (type === 'historyEditCancel') {
+            await historyEditCancel(payload);
         } else if (type === 'historySave') {
             await historySave(jobId, payload);
         } else if (type === 'historyDelete') {
@@ -2103,6 +3120,10 @@ async function handleComicCommand(data, sink = messageSink) {
             await historyArchive(jobId, payload);
         } else if (type === 'historyExportArchive') {
             await historyExportArchive(jobId, payload);
+        } else if (type === 'historyExportBundle') {
+            await historyExportBundle(jobId, payload);
+        } else if (type === 'historyImportBundle') {
+            await historyImportBundle(jobId, payload);
         } else if (type === 'releasePage') {
             await releasePage(payload);
         } else if (type === 'closeSession') {

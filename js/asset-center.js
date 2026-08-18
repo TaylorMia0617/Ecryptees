@@ -143,7 +143,13 @@
         });
     }
 
-    document.getElementById('historyGrid')?.addEventListener('click', event => dispatch('handleGridClick', event));
+    const historyGrid = document.getElementById('historyGrid');
+    historyGrid?.addEventListener('click', event => dispatch('handleGridClick', event));
+    historyGrid?.addEventListener('pointerdown', event => dispatch('handleGridPointerDown', event));
+    historyGrid?.addEventListener('pointermove', event => dispatch('handleGridPointerMove', event));
+    historyGrid?.addEventListener('pointerup', event => dispatch('handleGridPointerUp', event));
+    historyGrid?.addEventListener('pointercancel', event => dispatch('handleGridPointerCancel', event));
+    historyGrid?.addEventListener('contextmenu', event => dispatch('handleGridContextMenu', event));
     document.getElementById('historyGroupFilterSelect')?.addEventListener('change', event => dispatch('handleGroupChange', event));
     document.getElementById('historySort')?.addEventListener('change', event => dispatch('handleSortChange', event));
     document.getElementById('historySearch')?.addEventListener('input', event => dispatch('handleSearchInput', event));

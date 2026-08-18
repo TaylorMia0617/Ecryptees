@@ -15,13 +15,17 @@ import android.graphics.ImageDecoder;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.ParcelFileDescriptor;
+import android.os.StatFs;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import android.util.Base64;
 import android.util.Size;
 import android.view.ViewGroup;
 import android.view.View;
+import android.view.HapticFeedbackConstants;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.CookieManager;
@@ -44,8 +48,12 @@ import androidx.activity.OnBackPressedCallback;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.PickVisualMediaRequest;
 import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.webkit.Profile;
+import androidx.webkit.WebStorageCompat;
+import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewAssetLoader;
 import androidx.webkit.WebViewClientCompat;
+import androidx.webkit.WebViewFeature;
 
 import org.json.JSONObject;
 import org.json.JSONArray;
@@ -78,6 +86,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
@@ -85,19 +94,27 @@ import javax.crypto.spec.SecretKeySpec;
 
 public final class MainActivity extends ComponentActivity {
     private static final String APP_URL = "https://appassets.androidplatform.net/assets/index.html";
+    private static final String CAPTURE_PROFILE_NAME = "ecryptees-capture";
     private static final int REQUEST_OPEN_FILE = 1201;
     private static final int REQUEST_SAVE_FILE = 1202;
     private static final long MAX_NATIVE_IMAGE_PIXELS = 40_000_000L;
     private static final long MAX_NATIVE_INPUT_BYTES = 500L * 1024L * 1024L;
     private static final long MAX_INCOMING_ARCHIVE_BYTES = 512L * 1024L * 1024L;
+    private static final long MAX_INCOMING_BUNDLE_BYTES = 0xFFFFFFFEL;
     private static final long MAX_INCOMING_VIDEO_BYTES = 64L * 1024L * 1024L * 1024L + 4L * 1024L * 1024L;
     private static final int MAX_NATIVE_CHUNK_BYTES = 1024 * 1024;
+    private static final int MAX_RENDERED_IMAGE_CHUNK_BASE64_CHARS = 4 * ((MAX_NATIVE_CHUNK_BYTES + 2) / 3);
+    private static final int MAX_RENDERED_IMAGE_NAME_CHARS = 240;
+    private static final int MAX_RENDERED_IMAGE_MIME_CHARS = 120;
+    private static final int MAX_RENDERED_ERROR_CHARS = 500;
     private static final String HEIC_CACHE_PREFIX = "ecryptees-heic-";
     private static final String REMOTE_CACHE_PREFIX = "ecryptees-fetch-";
     private static final String RENDER_CACHE_PREFIX = "ecryptees-render-";
     private static final long MAX_REMOTE_HTML_BYTES = 5L * 1024L * 1024L;
+    private static final long CAPTURE_CLEANUP_TIMEOUT_MS = 15_000L;
     private static final String ECOMIC_MIME_TYPE = "application/vnd.ecryptees.ecomic";
     private static final String EMP4_MIME_TYPE = "application/vnd.ecryptees.emp4";
+    private static final String ZIP_MIME_TYPE = "application/zip";
     private static final String EMP4_CACHE_PREFIX = "ecryptees-emp4-";
     private static final int EMP4_HEADER_SIZE = 160;
     private static final int EMP4_AUTH_TAG_SIZE = 16;
@@ -478,13 +495,13 @@ public final class MainActivity extends ComponentActivity {
         ClipData clipData = intent.getClipData();
         if (Intent.ACTION_SEND.equals(intent.getAction())
                 && clipData != null && clipData.getItemCount() > 1) {
-            Toast.makeText(this, "一次只能打开一个 .ecomic 或 .emp4 文件", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "一次只能打开一个 .ecomic、.emp4 或 ZIP 文件", Toast.LENGTH_LONG).show();
             return;
         }
         Uri uri = getIncomingDocumentUri(intent);
         if (uri == null || !("content".equalsIgnoreCase(uri.getScheme())
                 || "file".equalsIgnoreCase(uri.getScheme()))) {
-            Toast.makeText(this, "只能打开 .ecomic 或 .emp4 文件", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "只能打开 .ecomic、.emp4 或 Ecryptees 漫画包 ZIP", Toast.LENGTH_LONG).show();
             return;
         }
         String displayName = null;
@@ -515,8 +532,9 @@ public final class MainActivity extends ComponentActivity {
         displayName = displayName == null ? "" : displayName.trim();
         String lowerName = displayName.toLowerCase(Locale.ROOT);
         boolean videoArchive = lowerName.endsWith(".emp4");
-        if (!lowerName.endsWith(".ecomic") && !videoArchive) {
-            Toast.makeText(this, "只能打开 .ecomic 或 .emp4 文件", Toast.LENGTH_LONG).show();
+        boolean comicBundle = lowerName.endsWith(".zip");
+        if (!lowerName.endsWith(".ecomic") && !videoArchive && !comicBundle) {
+            Toast.makeText(this, "只能打开 .ecomic、.emp4 或 Ecryptees 漫画包 ZIP", Toast.LENGTH_LONG).show();
             return;
         }
         try (ParcelFileDescriptor descriptor = getContentResolver().openFileDescriptor(uri, "r")) {
@@ -530,7 +548,9 @@ public final class MainActivity extends ComponentActivity {
             Toast.makeText(this, "无法读取这个加密归档", Toast.LENGTH_LONG).show();
             return;
         }
-        long maximumBytes = videoArchive ? MAX_INCOMING_VIDEO_BYTES : MAX_INCOMING_ARCHIVE_BYTES;
+        long maximumBytes = videoArchive
+                ? MAX_INCOMING_VIDEO_BYTES
+                : (comicBundle ? MAX_INCOMING_BUNDLE_BYTES : MAX_INCOMING_ARCHIVE_BYTES);
         if (size == 0 || size > maximumBytes) {
             Toast.makeText(this, "该加密归档为空或超过大小限制", Toast.LENGTH_LONG).show();
             return;
@@ -625,6 +645,9 @@ public final class MainActivity extends ComponentActivity {
         }
         if (fileName != null && fileName.toLowerCase(Locale.ROOT).endsWith(".emp4")) {
             return EMP4_MIME_TYPE;
+        }
+        if (fileName != null && fileName.toLowerCase(Locale.ROOT).endsWith(".zip")) {
+            return ZIP_MIME_TYPE;
         }
         if (mimeType != null && mimeType.contains("/")) {
             return mimeType;
@@ -734,6 +757,8 @@ public final class MainActivity extends ComponentActivity {
         private final Map<String, RenderedPageTask> renderedTasks = new ConcurrentHashMap<>();
         private final ExecutorService executor = Executors.newFixedThreadPool(2);
         private final RenderedCaptureReceiver renderedCaptureReceiver = new RenderedCaptureReceiver();
+        private final Handler mainHandler = new Handler(Looper.getMainLooper());
+        private int captureProfileCleanupCount;
 
         @JavascriptInterface
         public String beginRenderedPageCapture(String rawUrl, int requestedMaximum) {
@@ -744,7 +769,12 @@ public final class MainActivity extends ComponentActivity {
             int maximum = Math.max(1, Math.min(80, requestedMaximum));
             String token = UUID.randomUUID().toString();
             RenderedPageTask task = new RenderedPageTask(token, url, maximum);
-            renderedTasks.put(token, task);
+            synchronized (renderedTasks) {
+                if (captureProfileCleanupCount > 0 || !renderedTasks.isEmpty()) {
+                    return "";
+                }
+                renderedTasks.put(token, task);
+            }
             runOnUiThread(() -> createRenderedWebView(task));
             return token;
         }
@@ -834,6 +864,7 @@ public final class MainActivity extends ComponentActivity {
             }
             task.state = "loading";
             task.error = "";
+            task.addVisitedUrl(url);
             runOnUiThread(() -> {
                 if (renderedTasks.containsKey(token) && task.webView != null) {
                     task.webView.loadUrl(url);
@@ -873,8 +904,14 @@ public final class MainActivity extends ComponentActivity {
                 }
                 int capturedIndex = task.images.size();
                 String name = rawName == null ? "page-" + (order + 1) + ".jpg" : rawName;
+                if (name.length() > MAX_RENDERED_IMAGE_NAME_CHARS) {
+                    name = name.substring(0, MAX_RENDERED_IMAGE_NAME_CHARS);
+                }
                 name = name.replaceAll("[\\\\/:*?\"<>|\\p{Cntrl}]", "_");
-                String mime = rawMime != null && rawMime.startsWith("image/") ? rawMime : "application/octet-stream";
+                String mime = rawMime != null
+                        && rawMime.length() <= MAX_RENDERED_IMAGE_MIME_CHARS
+                        && rawMime.startsWith("image/")
+                        ? rawMime : "application/octet-stream";
                 File file = new File(getCacheDir(), RENDER_CACHE_PREFIX + token + "-" + capturedIndex + ".tmp");
                 try {
                     CapturedRenderedImage image = new CapturedRenderedImage(capturedIndex, name, mime, expectedSize, file);
@@ -898,13 +935,22 @@ public final class MainActivity extends ComponentActivity {
             if (image == null || image.output == null || encoded == null) {
                 return false;
             }
+            if (encoded.isEmpty() || encoded.length() > MAX_RENDERED_IMAGE_CHUNK_BASE64_CHARS) {
+                task.fail("动态网页图片分块超过大小限制");
+                return false;
+            }
             try {
-                byte[] bytes = Base64.decode(encoded, Base64.DEFAULT);
-                if (image.written + bytes.length > image.size) {
-                    throw new IOException("Dynamic image is larger than declared");
+                byte[] bytes = Base64.decode(encoded, Base64.NO_WRAP);
+                if (bytes.length == 0 || bytes.length > MAX_NATIVE_CHUNK_BYTES) {
+                    throw new IOException("Dynamic image chunk is outside the native limit");
                 }
-                image.output.write(bytes);
-                image.written += bytes.length;
+                synchronized (image) {
+                    if (image.output == null || bytes.length > image.size - image.written) {
+                        throw new IOException("Dynamic image is larger than declared");
+                    }
+                    image.output.write(bytes);
+                    image.written += bytes.length;
+                }
                 return true;
             } catch (Exception error) {
                 task.fail("动态网页图片写入失败");
@@ -919,18 +965,27 @@ public final class MainActivity extends ComponentActivity {
             if (image == null || image.output == null) {
                 return false;
             }
-            try {
-                image.output.flush();
-                image.output.close();
-                image.output = null;
-                if (image.written != image.size) {
-                    throw new IOException("Dynamic image is incomplete");
+            boolean complete;
+            synchronized (image) {
+                try {
+                    if (image.output == null) {
+                        return false;
+                    }
+                    image.output.flush();
+                    image.output.close();
+                    image.output = null;
+                    if (image.written != image.size) {
+                        throw new IOException("Dynamic image is incomplete");
+                    }
+                    complete = true;
+                } catch (IOException error) {
+                    complete = false;
                 }
-                return true;
-            } catch (IOException error) {
-                task.fail("动态网页图片写入不完整");
-                return false;
             }
+            if (!complete) {
+                task.fail("动态网页图片写入不完整");
+            }
+            return complete;
         }
 
         @JavascriptInterface
@@ -954,7 +1009,11 @@ public final class MainActivity extends ComponentActivity {
         public void failRenderedPage(String token, String message) {
             RenderedPageTask task = renderedTasks.get(token);
             if (task != null) {
-                task.fail(message == null || message.isEmpty() ? "动态网页分析失败" : message);
+                String safeMessage = message == null || message.isEmpty() ? "动态网页分析失败" : message;
+                if (safeMessage.length() > MAX_RENDERED_ERROR_CHARS) {
+                    safeMessage = safeMessage.substring(0, MAX_RENDERED_ERROR_CHARS);
+                }
+                task.fail(safeMessage);
             }
         }
 
@@ -1144,14 +1203,126 @@ public final class MainActivity extends ComponentActivity {
             }
         }
 
+        private void finishCaptureBrowsingDataCleanup(Runnable done) {
+            synchronized (renderedTasks) {
+                captureProfileCleanupCount = Math.max(0, captureProfileCleanupCount - 1);
+            }
+            done.run();
+        }
+
+        private void clearFallbackCaptureSites(List<String> urls, int index, Runnable done) {
+            if (index >= urls.size()) {
+                done.run();
+                return;
+            }
+            String url = urls.get(index);
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.DELETE_BROWSING_DATA)) {
+                try {
+                    WebStorageCompat.deleteBrowsingDataForSite(
+                            WebStorage.getInstance(),
+                            url,
+                            () -> clearFallbackCaptureSites(urls, index + 1, done)
+                    );
+                    return;
+                } catch (RuntimeException ignored) {
+                    // Fall through to origin-level cleanup on older providers.
+                }
+            }
+            try {
+                Uri uri = Uri.parse(url);
+                String origin = uri.getScheme() + "://" + uri.getAuthority();
+                WebStorage.getInstance().deleteOrigin(origin);
+                String cookies = CookieManager.getInstance().getCookie(url);
+                if (cookies != null) {
+                    for (String cookie : cookies.split(";")) {
+                        String[] parts = cookie.trim().split("=", 2);
+                        if (!parts[0].isEmpty()) {
+                            CookieManager.getInstance().setCookie(
+                                    url,
+                                    parts[0] + "=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/; Secure"
+                            );
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+                // Continue clearing every other visited origin.
+            }
+            clearFallbackCaptureSites(urls, index + 1, done);
+        }
+
+        private void clearRenderedBrowsingData(RenderedPageTask task, Runnable done) {
+            synchronized (renderedTasks) {
+                captureProfileCleanupCount += 1;
+            }
+            AtomicBoolean finished = new AtomicBoolean(false);
+            Runnable[] timeoutHolder = new Runnable[1];
+            Runnable completed = () -> {
+                if (!finished.compareAndSet(false, true)) {
+                    return;
+                }
+                mainHandler.removeCallbacks(timeoutHolder[0]);
+                finishCaptureBrowsingDataCleanup(done);
+            };
+            timeoutHolder[0] = () -> {
+                if (!finished.compareAndSet(false, true)) {
+                    return;
+                }
+                synchronized (task) {
+                    task.browsingDataCleanupStarted = true;
+                }
+                finishCaptureBrowsingDataCleanup(() -> { });
+                task.fail("动态网页隐私数据清理超时，请重试");
+            };
+            mainHandler.postDelayed(timeoutHolder[0], CAPTURE_CLEANUP_TIMEOUT_MS);
+            Profile profile = task.captureProfile;
+            if (profile != null && WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
+                if (WebViewFeature.isFeatureSupported(WebViewFeature.DELETE_BROWSING_DATA)) {
+                    try {
+                        WebStorageCompat.deleteBrowsingData(profile.getWebStorage(), completed);
+                        return;
+                    } catch (RuntimeException ignored) {
+                        // Fall back to the profile-specific legacy APIs.
+                    }
+                }
+                try {
+                    profile.getWebStorage().deleteAllData();
+                    profile.getCookieManager().removeAllCookies(ignored -> completed.run());
+                } catch (RuntimeException ignored) {
+                    completed.run();
+                }
+                return;
+            }
+            List<String> urls;
+            synchronized (task) {
+                urls = new ArrayList<>(task.visitedUrls);
+            }
+            clearFallbackCaptureSites(urls, 0, () -> {
+                try {
+                    CookieManager.getInstance().removeAllCookies(ignored -> {
+                        CookieManager.getInstance().flush();
+                        completed.run();
+                    });
+                } catch (RuntimeException ignored) {
+                    completed.run();
+                }
+            });
+        }
+
         @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
         private void createRenderedWebView(RenderedPageTask task) {
             if (!renderedTasks.containsKey(task.token) || isFinishing() || isDestroyed()) {
                 task.fail("应用已经关闭");
                 return;
             }
-            CookieManager.getInstance().removeAllCookies(null);
             WebView rendered = new WebView(MainActivity.this);
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
+                try {
+                    WebViewCompat.setProfile(rendered, CAPTURE_PROFILE_NAME);
+                    task.captureProfile = WebViewCompat.getProfile(rendered);
+                } catch (RuntimeException ignored) {
+                    task.captureProfile = null;
+                }
+            }
             task.webView = rendered;
             rendered.setAlpha(0.01f);
             rendered.setClickable(false);
@@ -1174,12 +1345,17 @@ public final class MainActivity extends ComponentActivity {
             settings.setGeolocationEnabled(false);
             settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
             settings.setUserAgentString(settings.getUserAgentString() + " EcrypteesCapture/1.0");
-            CookieManager.getInstance().setAcceptThirdPartyCookies(rendered, false);
+            CookieManager cookieManager = task.captureProfile != null
+                    && WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)
+                    ? task.captureProfile.getCookieManager()
+                    : CookieManager.getInstance();
+            cookieManager.setAcceptThirdPartyCookies(rendered, false);
             rendered.addJavascriptInterface(renderedCaptureReceiver, "AndroidRenderedCapture");
             rendered.setWebViewClient(new WebViewClientCompat() {
                 @Override
                 public void onPageStarted(@NonNull WebView view, @NonNull String url, Bitmap favicon) {
                     super.onPageStarted(view, url, favicon);
+                    task.addVisitedUrl(url);
                     if ("capturing".equals(task.state)) {
                         task.state = "loading";
                     }
@@ -1204,6 +1380,7 @@ public final class MainActivity extends ComponentActivity {
                 @Override
                 public void onPageFinished(@NonNull WebView view, @NonNull String url) {
                     super.onPageFinished(view, url);
+                    task.addVisitedUrl(url);
                     if (!renderedTasks.containsKey(task.token) || !"loading".equals(task.state)) {
                         return;
                     }
@@ -1220,12 +1397,17 @@ public final class MainActivity extends ComponentActivity {
                     return true;
                 }
             });
-            rendered.loadUrl(task.initialUrl);
-            rendered.postDelayed(() -> {
-                if ("loading".equals(task.state) || "capturing".equals(task.state)) {
-                    task.fail("动态网页等待图片超时");
+            clearRenderedBrowsingData(task, () -> {
+                if (!renderedTasks.containsKey(task.token) || task.webView != rendered) {
+                    return;
                 }
-            }, 240_000);
+                rendered.loadUrl(task.initialUrl);
+                rendered.postDelayed(() -> {
+                    if ("loading".equals(task.state) || "capturing".equals(task.state)) {
+                        task.fail("动态网页等待图片超时");
+                    }
+                }, 240_000);
+            });
         }
 
         private void injectRenderedCapture(RenderedPageTask task) {
@@ -1257,21 +1439,18 @@ public final class MainActivity extends ComponentActivity {
                 task.webView = null;
                 if (rendered != null) {
                     rendered.stopLoading();
-                    rendered.loadUrl("about:blank");
                     rendered.clearHistory();
-                    rendered.clearCache(true);
                     rendered.removeJavascriptInterface("AndroidRenderedCapture");
                     rootView.removeView(rendered);
                     rendered.destroy();
                 }
-                try {
-                    Uri uri = Uri.parse(task.finalUrl.isEmpty() ? task.initialUrl : task.finalUrl);
-                    String origin = uri.getScheme() + "://" + uri.getAuthority();
-                    WebStorage.getInstance().deleteOrigin(origin);
-                } catch (Exception ignored) {
-                    // Ephemeral WebView cleanup is best-effort.
+                synchronized (task) {
+                    if (task.browsingDataCleanupStarted) {
+                        return;
+                    }
+                    task.browsingDataCleanupStarted = true;
                 }
-                CookieManager.getInstance().removeAllCookies(null);
+                clearRenderedBrowsingData(task, () -> { });
             });
         }
 
@@ -1303,6 +1482,10 @@ public final class MainActivity extends ComponentActivity {
 
         void shutdown() {
             abortAll();
+            synchronized (renderedTasks) {
+                captureProfileCleanupCount = 0;
+            }
+            mainHandler.removeCallbacksAndMessages(null);
             executor.shutdownNow();
         }
 
@@ -1312,17 +1495,27 @@ public final class MainActivity extends ComponentActivity {
             final int maximum;
             final List<RenderedPageEntry> entries = new ArrayList<>();
             final List<CapturedRenderedImage> images = new ArrayList<>();
+            final List<String> visitedUrls = new ArrayList<>();
             volatile String state = "loading";
             volatile String error = "";
             volatile String finalUrl = "";
             volatile WebView webView;
+            volatile Profile captureProfile;
             volatile int redirects;
             long totalBytes;
+            boolean browsingDataCleanupStarted;
 
             RenderedPageTask(String token, String initialUrl, int maximum) {
                 this.token = token;
                 this.initialUrl = initialUrl;
                 this.maximum = maximum;
+                visitedUrls.add(initialUrl);
+            }
+
+            synchronized void addVisitedUrl(String url) {
+                if (url != null && !url.isEmpty() && !visitedUrls.contains(url)) {
+                    visitedUrls.add(url);
+                }
             }
 
             synchronized CapturedRenderedImage findImage(int index) {
@@ -1330,12 +1523,19 @@ public final class MainActivity extends ComponentActivity {
             }
 
             void fail(String message) {
-                if ("ready".equals(state) || "cancelled".equals(state)) {
+                if ("ready".equals(state) || "cancelled".equals(state) || "error".equals(state)) {
                     return;
                 }
                 error = message;
                 state = "error";
                 destroyRenderedWebView(this);
+                synchronized (this) {
+                    for (CapturedRenderedImage image : images) {
+                        image.cleanup();
+                    }
+                    images.clear();
+                    entries.clear();
+                }
             }
 
             void cancelAndCleanup() {
@@ -1427,7 +1627,7 @@ public final class MainActivity extends ComponentActivity {
                 this.file = file;
             }
 
-            void cleanup() {
+            synchronized void cleanup() {
                 try {
                     if (output != null) {
                         output.close();
@@ -1514,6 +1714,24 @@ public final class MainActivity extends ComponentActivity {
         private final Map<String, Emp4PlaybackSession> emp4Playbacks = new ConcurrentHashMap<>();
         private final ExecutorService heicExecutor = Executors.newFixedThreadPool(2);
         private final Semaphore fullSizeDecodeSlot = new Semaphore(1, true);
+
+        @JavascriptInterface
+        public double getAvailableStorageBytes() {
+            try {
+                return (double) new StatFs(getApplicationInfo().dataDir).getAvailableBytes();
+            } catch (IllegalArgumentException | SecurityException error) {
+                return -1;
+            }
+        }
+
+        @JavascriptInterface
+        public void performSelectionHaptic() {
+            runOnUiThread(() -> {
+                if (webView != null) {
+                    webView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+                }
+            });
+        }
 
         @JavascriptInterface
         public void setVideoPlaybackActive(boolean active) {

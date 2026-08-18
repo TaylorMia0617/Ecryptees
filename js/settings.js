@@ -4,7 +4,7 @@
     const LOCK_STORAGE_KEY = 'ecryptees-app-lock-v1';
     const LOCK_VERSION = 1;
     const LOCK_ITERATIONS = 210000;
-    const VERSION_FALLBACK = Object.freeze({ versionName: '1.1.5', versionCode: 23 });
+    const VERSION_FALLBACK = Object.freeze({ versionName: '1.1.8', versionCode: 26 });
     const nativeBridge = root.AndroidFileBridge || null;
     const desktopStorage = root.EcrypteesDesktopStorage || null;
     const desktopNetwork = root.EcrypteesDesktopNetwork || null;

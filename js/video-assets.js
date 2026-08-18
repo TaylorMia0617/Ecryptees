@@ -7,6 +7,8 @@
     const FOLDER_STORE = 'folders';
     const MEMBERSHIP_STORE = 'memberships';
     const FILE_PREFIX = 'ecryptees-video-asset-';
+    const METADATA_SUFFIX = '.json';
+    const METADATA_SCHEMA_VERSION = 1;
     const EXPORT_PREFIX = 'ecryptees-video-export-';
     const INCOMING_PREFIX = 'ecryptees-temp-incoming-';
     const CONTENT_ID_PATTERN = /^sha256-tree-v1:[a-f0-9]{64}$/;
@@ -69,6 +71,12 @@
         return `${FILE_PREFIX}${id}.emp4`;
     }
 
+    function metadataFileName(assetId) {
+        const id = String(assetId || '').replace(/[^a-z0-9-]/gi, '');
+        if (!id) throw new Error('视频资产 ID 无效');
+        return `${FILE_PREFIX}${id}${METADATA_SUFFIX}`;
+    }
+
     function normalizeContentId(value, required = false) {
         const contentId = String(value || '').toLocaleLowerCase();
         if (!contentId && !required) return '';
@@ -79,6 +87,48 @@
     async function getRoot() {
         if (!navigator.storage?.getDirectory) throw new Error('当前环境不支持视频资产存储');
         return navigator.storage.getDirectory();
+    }
+
+    async function readMetadataSidecar(storageRoot, assetId) {
+        try {
+            const handle = await storageRoot.getFileHandle(metadataFileName(assetId));
+            const file = await handle.getFile();
+            if (file.size > 256 * 1024) return null;
+            const parsed = JSON.parse(await file.text());
+            if (parsed?.schemaVersion !== METADATA_SCHEMA_VERSION || parsed?.asset?.assetId !== assetId) return null;
+            return createAssetRecord(parsed.asset);
+        } catch (error) {
+            if (error?.name !== 'NotFoundError' && !(error instanceof SyntaxError)) {
+                console.warn('视频恢复信息无效，改用原始 MP4 重建索引。', error);
+            }
+            return null;
+        }
+    }
+
+    async function writeMetadataSidecar(asset) {
+        if (desktopStorage) return;
+        const storageRoot = await getRoot();
+        const handle = await storageRoot.getFileHandle(metadataFileName(asset.assetId), { create: true });
+        const writable = await handle.createWritable();
+        try {
+            await writable.write(JSON.stringify({
+                schemaVersion: METADATA_SCHEMA_VERSION,
+                asset: createAssetRecord(asset)
+            }));
+            await writable.close();
+        } catch (error) {
+            await writable.abort().catch(() => {});
+            throw error;
+        }
+    }
+
+    async function removeMetadataSidecar(assetId) {
+        if (desktopStorage) return;
+        try {
+            await (await getRoot()).removeEntry(metadataFileName(assetId));
+        } catch (error) {
+            if (error?.name !== 'NotFoundError') throw error;
+        }
     }
 
     async function getVideoAssetFile(assetOrId) {
@@ -147,6 +197,8 @@
         if (desktopStorage) {
             const file = await (await (await getRoot()).getFileHandle(asset.opfsName)).getFile();
             await desktopStorage.saveAsset('video', asset.assetId, file, asset);
+        } else {
+            await writeMetadataSidecar(asset);
         }
         database = await openDatabase();
         try {
@@ -250,6 +302,8 @@
     async function updateVideoAsset(assetId, changes) {
         let database = await openDatabase();
         let asset;
+        const recoveryMetadataChanged = Object.prototype.hasOwnProperty.call(changes || {}, 'title')
+            || Object.prototype.hasOwnProperty.call(changes || {}, 'contentId');
         try {
             asset = await requestToPromise(database.transaction(ASSET_STORE, 'readonly')
                 .objectStore(ASSET_STORE).get(String(assetId || '')));
@@ -274,6 +328,7 @@
             }
             asset.updatedAt = Date.now();
             if (desktopStorage) await desktopStorage.updateAssetMetadata('video', asset.assetId, asset);
+            else if (recoveryMetadataChanged) await writeMetadataSidecar(asset);
         } finally {
             database.close();
         }
@@ -336,18 +391,69 @@
         if (desktopStorage) {
             const disk = await desktopStorage.listAssets('video');
             const available = new Set(disk.filter(item => item.available).map(item => item.assetId));
-            return { ...state, missingIds: state.assets.filter(asset => !available.has(asset.assetId)).map(asset => asset.assetId) };
+            return {
+                ...state,
+                missingIds: state.assets.filter(asset => !available.has(asset.assetId)).map(asset => asset.assetId),
+                recoveredIds: []
+            };
+        }
+        const storageRoot = await getRoot();
+        const indexedIds = new Set(state.assets.map(asset => asset.assetId));
+        const rawFiles = new Map();
+        for await (const [name, handle] of storageRoot.entries()) {
+            const match = handle.kind === 'file'
+                ? /^ecryptees-video-asset-([a-z0-9-]+)\.mp4$/i.exec(name)
+                : null;
+            if (!match) continue;
+            try {
+                if (assetFileName(match[1]) === name) rawFiles.set(match[1], handle);
+            } catch (error) {
+                // Ignore unrelated files that only happen to share the prefix.
+            }
         }
         const missingIds = [];
         for (const asset of state.assets) {
-            try {
-                await (await (await getRoot()).getFileHandle(asset.opfsName)).getFile();
-            } catch (error) {
-                if (error?.name === 'NotFoundError') missingIds.push(asset.assetId);
-                else throw error;
+            if (!rawFiles.has(asset.assetId)) {
+                missingIds.push(asset.assetId);
+                continue;
+            }
+            if (!await readMetadataSidecar(storageRoot, asset.assetId)) {
+                await writeMetadataSidecar(asset);
             }
         }
-        return { ...state, missingIds };
+        const recovered = [];
+        for (const [assetId, handle] of rawFiles) {
+            if (indexedIds.has(assetId)) continue;
+            const file = await handle.getFile();
+            if (!file.size) continue;
+            const sidecar = await readMetadataSidecar(storageRoot, assetId);
+            recovered.push(createAssetRecord({
+                ...(sidecar || {}),
+                assetId,
+                opfsName: assetFileName(assetId),
+                fileSize: file.size,
+                title: sidecar?.title || '恢复的视频',
+                fileName: sidecar?.fileName || `recovered-${assetId}.mp4`,
+                originalName: sidecar?.originalName || `recovered-${assetId}.mp4`,
+                createdAt: sidecar?.createdAt || file.lastModified,
+                updatedAt: sidecar?.updatedAt || file.lastModified,
+                fileAvailable: true
+            }));
+        }
+        if (recovered.length) {
+            const database = await openDatabase();
+            try {
+                const transaction = database.transaction(ASSET_STORE, 'readwrite');
+                const assets = transaction.objectStore(ASSET_STORE);
+                recovered.forEach(asset => assets.put(asset));
+                await transactionToPromise(transaction);
+            } finally {
+                database.close();
+            }
+            for (const asset of recovered) await writeMetadataSidecar(asset);
+        }
+        const auditedState = recovered.length ? await readRawState() : state;
+        return { ...auditedState, missingIds, recoveredIds: recovered.map(asset => asset.assetId) };
     }
 
     async function deleteVideoAsset(assetId) {
@@ -355,6 +461,7 @@
         if (!asset) return;
         if (desktopStorage) await desktopStorage.trashAsset('video', asset.assetId);
         await removeStoredFile(asset.opfsName);
+        await removeMetadataSidecar(asset.assetId);
         const database = await openDatabase();
         try {
             const transaction = database.transaction([ASSET_STORE, MEMBERSHIP_STORE], 'readwrite');
@@ -451,6 +558,7 @@
             for (const asset of state.assets) await desktopStorage.trashAsset('video', asset.assetId);
         }
         for (const asset of state.assets) await removeStoredFile(asset.opfsName);
+        for (const asset of state.assets) await removeMetadataSidecar(asset.assetId);
         const database = await openDatabase();
         try {
             const transaction = database.transaction([ASSET_STORE, MEMBERSHIP_STORE], 'readwrite');
@@ -471,6 +579,7 @@
         createId,
         assetFileName,
         legacyAssetFileName,
+        metadataFileName,
         commitVideoAsset,
         saveVideoAsset,
         listVideoAssets,

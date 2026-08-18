@@ -4,7 +4,8 @@
     const store = root.EcrypteesImageAssets;
     const core = root.Ecryptees?.core;
     const assetCenter = root.EcrypteesAssetCenter;
-    if (!store || !core || !assetCenter) {
+    const assetStorage = root.EcrypteesAssetStorage;
+    if (!store || !core || !assetCenter || !assetStorage) {
         return;
     }
 
@@ -63,9 +64,7 @@
 
     async function updateStorage() {
         try {
-            const estimate = await navigator.storage?.estimate?.();
-            if (!estimate) return;
-            document.getElementById('historyStorageSummary').textContent = `已使用 ${utils.formatBytes(estimate.usage || 0)} · 剩余 ${utils.formatBytes(Math.max(0, (estimate.quota || 0) - (estimate.usage || 0)))}`;
+            await assetStorage.updateStorageSummary(document.getElementById('historyStorageSummary'));
         } catch (error) {
             // Storage estimates are optional.
         }

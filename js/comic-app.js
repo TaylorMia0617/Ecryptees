@@ -7,7 +7,8 @@
     const readerCore = root.Ecryptees && root.Ecryptees.reader;
     const webImportCore = root.Ecryptees && root.Ecryptees.webImport;
     const assetCenter = root.EcrypteesAssetCenter;
-    if (!core || !comic || !historyCore || !readerCore || !webImportCore || !assetCenter) {
+    const assetStorage = root.EcrypteesAssetStorage;
+    if (!core || !comic || !historyCore || !readerCore || !webImportCore || !assetCenter || !assetStorage) {
         throw new Error('Ecryptees core modules must load before the comic controller.');
     }
 
@@ -31,6 +32,10 @@
     const readerPageNumber = document.getElementById('comicReaderPageNumber');
     const historyGrid = document.getElementById('historyGrid');
     const historyStatus = document.getElementById('historyStatus');
+    const HISTORY_LONG_PRESS_MS = 450;
+    const HISTORY_LONG_PRESS_MOVE_PX = 10;
+    const HISTORY_CLICK_SUPPRESSION_MS = 1000;
+    const HISTORY_STARTUP_CLEANUP_TIMEOUT_MS = 15 * 1000;
     const isAndroidRuntime = !!root.AndroidFileBridge || /EcrypteesAndroid\//.test(root.navigator.userAgent);
     const isDesktopRuntime = !!desktopStorage;
     const nativeNetwork = networkAdapter;
@@ -88,6 +93,23 @@
     let readerOrderPointerTargetId = '';
     let selectedHistoryGroup = 'all';
     let activeHistoryMenuBookId = '';
+    let historySelectionMode = false;
+    let historyPressState = null;
+    let historySelectionSuppressClick = '';
+    let historySelectionSuppressTimer = 0;
+    let historySheetGesture = null;
+    let editingHistoryBookId = '';
+    let comicEditorDeletedPages = new Set();
+    let comicEditorSessionId = '';
+    let comicEditorPages = [];
+    let comicEditorAddedItems = [];
+    let comicEditorWebCandidates = [];
+    let comicEditorAbortController = null;
+    let comicEditorThumbnailObserver = null;
+    let comicEditorBusy = false;
+    const comicEditorThumbnailJobs = new Map();
+    const comicEditorThumbnailUrls = new Map();
+    let selectedBundleFile = null;
     let folderAssignmentBookId = '';
     let libraryDirectoryHandle = null;
     let directoryPermissionGranted = false;
@@ -102,6 +124,13 @@
     let readerRestoreProgress = null;
     let readerMemoryBytes = 0;
     let recoveringWorker = false;
+    let historyStorageReady = false;
+    let workerCleanupJobId = '';
+    let workerCleanupWatchdog = 0;
+    let historyListJobId = '';
+    let historyRefreshPending = false;
+    let pendingWorkerReopenBookId = '';
+    let pendingIncomingArchive = null;
     let webImportCandidates = [];
     let webImportFinalUrl = '';
     let webImportRenderedToken = '';
@@ -111,14 +140,24 @@
     let savedComicBookId = '';
     const activeRemoteFetchTokens = new Set();
     const historyCoverUrls = new Map();
+    const selectedHistoryBookIds = new Set();
+    const historyStorageWaiters = [];
     const readerCoverUrls = new Map();
     const directoryMetadataTasks = new Map();
     const pageJobs = new Map();
     const outputState = {
         archive: { url: '', opfsName: '', name: '', releaseTimer: 0 },
+        bundle: { url: '', opfsName: '', name: '', releaseTimer: 0 },
         historyArchive: { url: '', opfsName: '', name: '', releaseTimer: 0 },
         longExport: { url: '', opfsName: '', name: '', releaseTimer: 0 }
     };
+
+    root.EcrypteesComicStorage = Object.freeze({
+        whenReady() {
+            if (historyStorageReady) return Promise.resolve();
+            return new Promise(resolve => historyStorageWaiters.push(resolve));
+        }
+    });
 
     function isHeifMime(mime) {
         return mime === 'image/heic' || mime === 'image/heif';
@@ -153,10 +192,13 @@
 
     function setBusy(type = '') {
         activeJobType = type;
-        const busy = !!type;
+        const jobBusy = !!type;
+        const busy = jobBusy || !historyStorageReady;
         const previewingWebImages = type === 'webPreview';
         comicFilesInput.disabled = busy || !runtimeSupported || items.length >= format.MAX_PAGES;
         archiveInput.disabled = busy || !runtimeSupported;
+        document.getElementById('comicBundleImportButton').disabled = busy || !runtimeSupported || !selectedBundleFile;
+        document.getElementById('comicBundleConflictPolicy').disabled = busy;
         document.getElementById('comicArchiveName').disabled = busy || !runtimeSupported;
         document.getElementById('localComicSourceButton').disabled = busy;
         document.getElementById('webComicSourceButton').disabled = busy;
@@ -176,7 +218,7 @@
         encryptButton.textContent = type === 'encrypt' ? '正在加密并加入资产…' : '加密并加入资产';
         document.getElementById('clearComicFilesButton').disabled = busy || items.length === 0;
         document.getElementById('openComicButton').disabled = busy || !runtimeSupported || !selectedArchive;
-        document.getElementById('cancelComicButton').hidden = !busy;
+        document.getElementById('cancelComicButton').hidden = !jobBusy;
         if (assetCenter.isActive('comic')) {
             document.getElementById('clearHistoryButton').disabled = busy || historyBooks.length === 0;
         }
@@ -1101,6 +1143,184 @@
         renderReaderNavigation();
     }
 
+    function getSelectedHistoryBooks() {
+        return historyBooks.filter(book => selectedHistoryBookIds.has(book.bookId));
+    }
+
+    function updateHistorySelectionUi() {
+        const panel = document.getElementById('historyPanel');
+        const bar = document.getElementById('historySelectionBar');
+        const exportBar = document.getElementById('historyBundleExportBar');
+        const selected = getSelectedHistoryBooks();
+        const visible = getHistoryBooksForView(selectedHistoryGroup, true);
+        const visibleSelected = visible.filter(book => selectedHistoryBookIds.has(book.bookId)).length;
+        const active = historySelectionMode && historyBooks.length > 0;
+        panel.classList.toggle('history-selection-active', active);
+        bar.hidden = !active;
+        exportBar.hidden = !active;
+        document.getElementById('historySelectionCount').textContent = `已选 ${selected.length} 本`;
+        document.getElementById('historySelectionHint').textContent = selected.length
+            ? '轻点漫画继续选择，导出不会修改书架'
+            : '请选择至少一本漫画';
+        const selectAllButton = document.getElementById('historySelectionAllButton');
+        const allVisibleSelected = visible.length > 0 && visibleSelected === visible.length;
+        document.body.classList.toggle('comic-selection-mode', active);
+        selectAllButton.textContent = allVisibleSelected ? '取消全选' : '全选';
+        selectAllButton.disabled = visible.length === 0;
+        const exportButton = document.getElementById('historyBundleExportButton');
+        exportButton.disabled = selected.length === 0;
+        exportButton.querySelector('strong').textContent = `导出 ${selected.length} 本为 ZIP`;
+        document.getElementById('historyBundleExportSize').textContent = `约 ${formatBytes(selected.reduce((sum, book) => sum + book.totalSize, 0))}`;
+    }
+
+    function exitHistorySelection(render = true) {
+        historySelectionMode = false;
+        historySelectionSuppressClick = '';
+        root.clearTimeout(historySelectionSuppressTimer);
+        historySelectionSuppressTimer = 0;
+        selectedHistoryBookIds.clear();
+        if (render && assetCenter.isActive('comic')) {
+            renderHistory();
+        } else {
+            updateHistorySelectionUi();
+        }
+    }
+
+    function enterHistorySelection(bookId) {
+        const book = historyBooks.find(item => item.bookId === bookId);
+        if (!book || activeJobType) {
+            return;
+        }
+        historySelectionMode = true;
+        selectedHistoryBookIds.add(bookId);
+        try {
+            if (root.AndroidFileBridge?.performSelectionHaptic) {
+                root.AndroidFileBridge.performSelectionHaptic();
+            } else {
+                root.navigator.vibrate?.(18);
+            }
+        } catch (error) {
+            // Haptic feedback is optional; selection must still complete.
+        }
+        renderHistory();
+    }
+
+    function suppressHistoryContextMenu(event) {
+        if (event.target.closest('.history-card')) {
+            event.preventDefault();
+        }
+    }
+
+    function toggleHistorySelection(bookId) {
+        if (!historySelectionMode || !historyBooks.some(book => book.bookId === bookId)) {
+            return;
+        }
+        if (selectedHistoryBookIds.has(bookId)) {
+            selectedHistoryBookIds.delete(bookId);
+        } else {
+            selectedHistoryBookIds.add(bookId);
+        }
+        updateHistorySelectionCard(bookId);
+        updateHistorySelectionUi();
+    }
+
+    function toggleAllVisibleHistoryBooks() {
+        const visible = getHistoryBooksForView(selectedHistoryGroup, true);
+        const allSelected = visible.length > 0 && visible.every(book => selectedHistoryBookIds.has(book.bookId));
+        for (const book of visible) {
+            if (allSelected) selectedHistoryBookIds.delete(book.bookId);
+            else selectedHistoryBookIds.add(book.bookId);
+            updateHistorySelectionCard(book.bookId);
+        }
+        updateHistorySelectionUi();
+    }
+
+    function updateHistorySelectionCard(bookId) {
+        const card = historyGrid.querySelector(`.history-card[data-book-id="${bookId}"]`);
+        const book = historyBooks.find(item => item.bookId === bookId);
+        if (!card || !book) return;
+        const selected = selectedHistoryBookIds.has(bookId);
+        card.dataset.selected = String(selected);
+        const mark = card.querySelector('.history-card-selection-mark');
+        if (mark) mark.hidden = !historySelectionMode;
+        const openButton = card.querySelector('.history-card-open');
+        if (openButton) {
+            openButton.setAttribute('aria-label', historySelectionMode
+                ? `${selected ? '取消选择' : '选择'}《${book.title}》`
+                : `阅读《${book.title}》`);
+        }
+    }
+
+    function suppressNextHistoryClick(bookId) {
+        historySelectionSuppressClick = bookId;
+        root.clearTimeout(historySelectionSuppressTimer);
+        historySelectionSuppressTimer = root.setTimeout(() => {
+            historySelectionSuppressClick = '';
+            historySelectionSuppressTimer = 0;
+        }, HISTORY_CLICK_SUPPRESSION_MS);
+    }
+
+    function cancelHistoryPress() {
+        if (!historyPressState) return;
+        root.clearTimeout(historyPressState.timer);
+        historyPressState.card.dataset.pressing = 'false';
+        try {
+            if (historyGrid.hasPointerCapture?.(historyPressState.pointerId)) {
+                historyGrid.releasePointerCapture(historyPressState.pointerId);
+            }
+        } catch (error) {
+            // Pointer capture can already be released by a native scroll cancellation.
+        }
+        historyPressState = null;
+    }
+
+    function startHistoryPress(event) {
+        if (!event.isPrimary || event.button !== 0 || historySelectionMode || activeJobType) return;
+        if (event.target.closest('.history-menu-button')) return;
+        const card = event.target.closest('.history-card');
+        if (!card?.dataset.bookId) return;
+        cancelHistoryPress();
+        const state = {
+            pointerId: event.pointerId,
+            bookId: card.dataset.bookId,
+            card,
+            startX: event.clientX,
+            startY: event.clientY,
+            timer: 0
+        };
+        try {
+            historyGrid.setPointerCapture?.(event.pointerId);
+        } catch (error) {
+            // Synthetic tests and older WebViews may not expose an active capturable pointer.
+        }
+        card.dataset.pressing = 'true';
+        state.timer = root.setTimeout(() => {
+            if (historyPressState !== state) return;
+            suppressNextHistoryClick(state.bookId);
+            historyPressState = null;
+            card.dataset.pressing = 'false';
+            enterHistorySelection(state.bookId);
+        }, HISTORY_LONG_PRESS_MS);
+        historyPressState = state;
+    }
+
+    function moveHistoryPress(event) {
+        if (!historyPressState || historyPressState.pointerId !== event.pointerId) return;
+        const distance = Math.hypot(
+            event.clientX - historyPressState.startX,
+            event.clientY - historyPressState.startY
+        );
+        if (distance > HISTORY_LONG_PRESS_MOVE_PX) {
+            cancelHistoryPress();
+        }
+    }
+
+    function finishHistoryPress(event) {
+        if (historyPressState?.pointerId === event.pointerId) {
+            cancelHistoryPress();
+        }
+    }
+
     function renderHistory() {
         if (!assetCenter.isActive('comic')) {
             return;
@@ -1113,10 +1333,25 @@
         document.getElementById('historyEmptyTitle').textContent = '漫画资产还是空的';
         document.getElementById('historyEmptyDescription').textContent = '加密或解密 `.ecomic` 后会自动加入漫画资产。';
         document.getElementById('historyGoToComicButton').textContent = '前往漫画模式';
+        const availableBookIds = new Set(historyBooks.map(book => book.bookId));
+        for (const bookId of selectedHistoryBookIds) {
+            if (!availableBookIds.has(bookId)) selectedHistoryBookIds.delete(bookId);
+        }
+        if (!historyBooks.length) historySelectionMode = false;
         for (const book of books) {
             const card = document.createElement('article');
             card.className = 'history-card';
             card.dataset.bookId = book.bookId;
+            card.dataset.selected = String(selectedHistoryBookIds.has(book.bookId));
+            card.dataset.pressing = 'false';
+            const openButton = document.createElement('button');
+            openButton.type = 'button';
+            openButton.className = 'history-card-open';
+            openButton.dataset.historyAction = 'open';
+            openButton.dataset.bookId = book.bookId;
+            openButton.setAttribute('aria-label', historySelectionMode
+                ? `${selectedHistoryBookIds.has(book.bookId) ? '取消选择' : '选择'}《${book.title}》`
+                : `阅读《${book.title}》`);
             const cover = document.createElement('img');
             cover.className = 'history-cover';
             cover.alt = `${book.title} 封面`;
@@ -1124,9 +1359,19 @@
                 const url = URL.createObjectURL(new Blob([book.coverFile], { type: book.coverMime || 'image/jpeg' }));
                 historyCoverUrls.set(book.bookId, url);
                 cover.src = url;
+                openButton.append(cover);
             } else {
-                cover.hidden = true;
+                const placeholder = document.createElement('span');
+                placeholder.className = 'history-cover-placeholder';
+                placeholder.setAttribute('aria-hidden', 'true');
+                openButton.append(placeholder);
             }
+            const selectionMark = document.createElement('span');
+            selectionMark.className = 'history-card-selection-mark';
+            selectionMark.textContent = '✓';
+            selectionMark.hidden = !historySelectionMode;
+            selectionMark.setAttribute('aria-hidden', 'true');
+            openButton.append(selectionMark);
             const body = document.createElement('div');
             body.className = 'history-card-body';
             const cardHeader = document.createElement('div');
@@ -1141,20 +1386,13 @@
             cardHeader.append(title, headerTools);
             const meta = document.createElement('p');
             meta.className = 'history-card-meta';
-            meta.textContent = `${book.pageCount} 页 · ${formatBytes(book.totalSize)}${book.archiveFile ? ' · 独立目录' : ''}`;
-            const time = document.createElement('p');
-            time.className = 'history-card-time';
-            time.textContent = `最近：${formatHistoryDate(book.lastOpenedAt || book.updatedAt)}`;
-            const actions = document.createElement('div');
-            actions.className = 'history-card-actions';
-            actions.append(
-                createHistoryButton('阅读', 'open', book.bookId, 'history-open'),
-                createHistoryButton('导出 .ecomic', 'exportArchive', book.bookId),
-                createHistoryButton('导出长图', 'exportLong', book.bookId),
-                createHistoryButton('删除', 'delete', book.bookId, 'secondary-button history-delete')
-            );
-            body.append(cardHeader, meta, time, actions);
-            card.append(cover, body);
+            meta.textContent = `${book.pageCount} 页 · ${formatBytes(book.totalSize)}${book.archiveFile ? ' · 独立目录' : ''}${book.fileAvailable === false ? ' · 原页缺失' : ''}`;
+            if (book.fileAvailable === false) {
+                openButton.title = '漫画原始页面缺失，请重新导入原归档';
+                openButton.setAttribute('aria-disabled', 'true');
+            }
+            body.append(cardHeader, meta);
+            card.append(openButton, body);
             historyGrid.append(card);
         }
         if (historyBooks.length && !books.length) {
@@ -1162,6 +1400,7 @@
         } else if (historyStatus.textContent === '没有符合搜索条件的漫画。') {
             setHistoryStatus('');
         }
+        updateHistorySelectionUi();
         setBusy(activeJobType);
         if (readerDrawerOpen) {
             renderReaderNavigation();
@@ -1401,14 +1640,59 @@
         }
     }
 
+    function showHistorySheetView(view) {
+        const views = {
+            menu: 'historyBookMenuView',
+            rename: 'historyMenuRenameForm',
+            group: 'historyGroupForm',
+            delete: 'historyMenuDeleteConfirm'
+        };
+        for (const [name, id] of Object.entries(views)) {
+            document.getElementById(id).hidden = name !== view;
+        }
+        const book = historyBooks.find(item => item.bookId === activeHistoryMenuBookId);
+        const heading = document.getElementById('historyBookMenuTitle');
+        if (view === 'rename') heading.textContent = '修改名称';
+        else if (view === 'group') heading.textContent = '添加至分组';
+        else if (view === 'delete') heading.textContent = '删除漫画';
+        else heading.textContent = book?.title || '漫画';
+        const dialog = document.getElementById('historyBookMenuDialog');
+        if (dialog.open) {
+            root.setTimeout(() => {
+                const visibleView = document.getElementById(views[view]);
+                visibleView?.querySelector('input, select, button:not([disabled])')?.focus({ preventScroll: true });
+            }, 0);
+        }
+    }
+
+    function closeHistoryActionSheet() {
+        closeHistoryDialog(document.getElementById('historyBookMenuDialog'));
+        showHistorySheetView('menu');
+        activeHistoryMenuBookId = '';
+    }
+
     function openHistoryBookMenu(bookId) {
         const book = historyBooks.find(item => item.bookId === bookId);
         if (!book || activeJobType) {
             return;
         }
         activeHistoryMenuBookId = bookId;
-        document.getElementById('historyBookMenuTitle').textContent = book.title;
-        document.getElementById('historyBookMenuDialog').showModal();
+        showHistorySheetView('menu');
+        const editButton = document.getElementById('historyMenuEditButton');
+        const editUnsupported = book.directoryOnly || isDesktopRuntime;
+        editButton.dataset.unsupported = String(editUnsupported);
+        editButton.querySelector('span:last-child').textContent = editUnsupported
+            ? '编辑漫画 · 当前版本暂不支持'
+            : '编辑漫画';
+        editButton.title = editUnsupported ? '当前版本暂不支持编辑独立目录漫画' : '';
+        const sourceMissing = book.fileAvailable === false;
+        document.getElementById('historyMenuExportArchiveButton').disabled = sourceMissing;
+        document.getElementById('historyMenuExportLongButton').disabled = sourceMissing;
+        const dialog = document.getElementById('historyBookMenuDialog');
+        if (!dialog.open) dialog.showModal();
+        root.setTimeout(() => {
+            document.getElementById('historyMenuRenameButton').focus({ preventScroll: true });
+        }, 0);
     }
 
     function openHistoryFolderDialog(bookId = '') {
@@ -1442,16 +1726,533 @@
             select.append(option);
         }
         select.value = historyGroupMemberships.get(bookId) || '';
-        document.getElementById('historyGroupDialogTitle').textContent = `添加分组 · ${book.title}`;
-        document.getElementById('historyGroupDialog').showModal();
+        showHistorySheetView('group');
+    }
+
+    function comicEditorActiveAddedItems() {
+        return comicEditorAddedItems.filter(item => !item.removed);
+    }
+
+    function comicEditorFinalPageCount() {
+        return comicEditorPages.length - comicEditorDeletedPages.size + comicEditorActiveAddedItems().length;
+    }
+
+    function comicEditorFinalBytes() {
+        const retainedBytes = comicEditorPages.reduce((sum, page, index) => (
+            comicEditorDeletedPages.has(index) ? sum : sum + page.size
+        ), 0);
+        return retainedBytes + comicEditorActiveAddedItems().reduce((sum, item) => sum + item.file.size, 0);
+    }
+
+    function setComicEditorBusy(busy, message = '') {
+        comicEditorBusy = busy;
+        for (const id of ['comicEditorCancelButton', 'comicEditorSaveButton', 'comicEditorSaveChangesButton',
+            'comicEditorFetchButton', 'comicEditorWebAppend', 'comicEditorWebClear', 'comicEditorWebToggleAll']) {
+            const element = document.getElementById(id);
+            if (element) element.disabled = busy;
+        }
+        document.getElementById('comicEditorUrlInput').disabled = busy;
+        document.getElementById('comicEditorLocalFiles').disabled = busy;
+        if (message) document.getElementById('comicEditorUrlStatus').textContent = message;
+    }
+
+    function releaseComicEditorThumbnails() {
+        comicEditorThumbnailObserver?.disconnect();
+        comicEditorThumbnailObserver = null;
+        for (const jobId of comicEditorThumbnailJobs.keys()) {
+            worker?.postMessage({ type: 'cancel', jobId });
+        }
+        comicEditorThumbnailJobs.clear();
+        for (const url of comicEditorThumbnailUrls.values()) URL.revokeObjectURL(url);
+        comicEditorThumbnailUrls.clear();
+    }
+
+    function clearComicEditorWebCandidates() {
+        comicEditorAbortController?.abort();
+        comicEditorAbortController = null;
+        comicEditorWebCandidates.forEach(releasePreparedCandidate);
+        comicEditorWebCandidates = [];
+        webImportFinalUrl = '';
+        document.getElementById('comicEditorWebList').replaceChildren();
+        document.getElementById('comicEditorWebPreview').hidden = true;
+        releaseRenderedPageCapture();
+    }
+
+    function cleanupComicEditorState(sendCancel = true) {
+        clearComicEditorWebCandidates();
+        releaseComicEditorThumbnails();
+        comicEditorAddedItems.forEach(revokeItem);
+        comicEditorAddedItems = [];
+        comicEditorPages = [];
+        comicEditorDeletedPages.clear();
+        if (sendCancel && comicEditorSessionId) {
+            worker?.postMessage({
+                type: 'historyEditCancel',
+                jobId: nextJobId('history-edit-cancel'),
+                payload: { sessionId: comicEditorSessionId }
+            });
+        }
+        comicEditorSessionId = '';
+        editingHistoryBookId = '';
+        comicEditorBusy = false;
+        document.getElementById('comicEditorLocalFiles').value = '';
+    }
+
+    function updateComicEditorState() {
+        const deleted = comicEditorDeletedPages.size;
+        const added = comicEditorActiveAddedItems().length;
+        const remaining = comicEditorFinalPageCount();
+        const overLimit = remaining > format.MAX_PAGES || comicEditorFinalBytes() > format.MAX_TOTAL_BYTES;
+        document.getElementById('comicEditorPageCount').textContent = String(remaining);
+        document.getElementById('comicEditorChangeSummary').textContent = deleted || added
+            ? (overLimit
+                ? `将删除 ${deleted} 页，新增 ${added} 页 · 超过整本格式容量，请删减后保存`
+                : `将删除 ${deleted} 页，新增 ${added} 页 · 尚未写入资产`)
+            : '尚未修改页面';
+        for (const row of document.querySelectorAll('.comic-editor-page-row')) {
+            const kind = row.dataset.pageKind;
+            const index = Number(row.dataset.pageIndex);
+            const marked = kind === 'original'
+                ? comicEditorDeletedPages.has(index)
+                : !!comicEditorAddedItems[index]?.removed;
+            row.dataset.deleted = String(marked);
+            const button = row.querySelector('.comic-editor-page-delete');
+            if (marked) {
+                button.textContent = '撤销';
+            } else {
+                const icon = document.createElement('img');
+                icon.src = 'assets/material-delete-outline.svg';
+                icon.alt = '';
+                button.replaceChildren(icon);
+            }
+            button.setAttribute('aria-label', marked ? `撤销移除第 ${Number(row.dataset.displayIndex)} 页` : `标记移除第 ${Number(row.dataset.displayIndex)} 页`);
+        }
+        const confirm = document.getElementById('comicEditorSaveConfirm');
+        if (!deleted && !added && !confirm.hidden) confirm.hidden = true;
+        document.getElementById('comicEditorSaveChangesButton').hidden = !confirm.hidden;
+        document.getElementById('comicEditorSaveButton').disabled = comicEditorBusy || overLimit || (!deleted && !added);
+        document.getElementById('comicEditorSaveChangesButton').disabled = comicEditorBusy || overLimit || (!deleted && !added);
+    }
+
+    function observeComicEditorThumbnail(image, index) {
+        if (!comicEditorSessionId || [...comicEditorThumbnailJobs.values()].includes(index)) return;
+        if (!comicEditorThumbnailObserver) {
+            comicEditorThumbnailObserver = new IntersectionObserver(entries => {
+                for (const entry of entries) {
+                    if (!entry.isIntersecting) continue;
+                    comicEditorThumbnailObserver.unobserve(entry.target);
+                    const pageIndex = Number(entry.target.dataset.thumbnailIndex);
+                    const jobId = nextJobId('history-edit-thumb');
+                    comicEditorThumbnailJobs.set(jobId, pageIndex);
+                    worker.postMessage({
+                        type: 'historyEditThumbnail',
+                        jobId,
+                        payload: { sessionId: comicEditorSessionId, index: pageIndex }
+                    });
+                }
+            }, { root: document.querySelector('.comic-editor-content'), rootMargin: '240px 0px' });
+        }
+        image.dataset.thumbnailIndex = String(index);
+        comicEditorThumbnailObserver.observe(image);
+    }
+
+    function createComicEditorRow(page, kind, index, displayIndex) {
+        const row = document.createElement('li');
+        row.className = 'comic-editor-page-row';
+        row.dataset.pageKind = kind;
+        row.dataset.pageIndex = String(index);
+        row.dataset.displayIndex = String(displayIndex);
+        row.dataset.deleted = String(kind === 'original'
+            ? comicEditorDeletedPages.has(index)
+            : !!page.removed);
+        const thumbnail = document.createElement('img');
+        thumbnail.className = 'comic-editor-page-thumb';
+        thumbnail.alt = `第 ${displayIndex} 页缩略图`;
+        thumbnail.decoding = 'async';
+        if (kind === 'added') {
+            thumbnail.src = page.url;
+        } else {
+            const loadedUrl = comicEditorThumbnailUrls.get(index);
+            if (loadedUrl) thumbnail.src = loadedUrl;
+            else {
+                thumbnail.alt = '';
+                thumbnail.dataset.loading = 'true';
+                observeComicEditorThumbnail(thumbnail, index);
+            }
+        }
+        const copy = document.createElement('div');
+        copy.className = 'comic-editor-page-copy';
+        const title = document.createElement('strong');
+        title.textContent = `第 ${displayIndex} 页`;
+        if (kind === 'added') {
+            const badge = document.createElement('small');
+            badge.className = 'comic-editor-added-badge';
+            badge.textContent = '新增';
+            title.append(' ', badge);
+        }
+        const meta = document.createElement('span');
+        meta.textContent = formatBytes(page.size || page.file?.size || 0);
+        copy.append(title, meta);
+        const deleteButton = document.createElement('button');
+        deleteButton.type = 'button';
+        deleteButton.className = 'comic-editor-page-delete';
+        deleteButton.dataset.editorAction = 'toggleDelete';
+        deleteButton.dataset.pageKind = kind;
+        deleteButton.dataset.pageIndex = String(index);
+        if (row.dataset.deleted === 'true') {
+            deleteButton.textContent = '撤销';
+        } else {
+            const icon = document.createElement('img');
+            icon.src = 'assets/material-delete-outline.svg';
+            icon.alt = '';
+            deleteButton.append(icon);
+        }
+        row.append(thumbnail, copy, deleteButton);
+        return row;
+    }
+
+    function renderComicEditorPages() {
+        const list = document.getElementById('comicEditorPageList');
+        comicEditorThumbnailObserver?.disconnect();
+        comicEditorThumbnailObserver = null;
+        list.replaceChildren();
+        let displayIndex = 0;
+        comicEditorPages.forEach((page, index) => {
+            displayIndex += 1;
+            list.append(createComicEditorRow(page, 'original', index, displayIndex));
+        });
+        comicEditorAddedItems.forEach((item, index) => {
+            displayIndex += 1;
+            list.append(createComicEditorRow(item, 'added', index, displayIndex));
+        });
+        updateComicEditorState();
+    }
+
+    function openComicEditor(bookId) {
+        const book = historyBooks.find(item => item.bookId === bookId);
+        if (!book || activeJobType) return;
+        if (book.directoryOnly || isDesktopRuntime) {
+            setHistoryStatus('当前版本暂不支持编辑独立目录漫画。', 'info');
+            return;
+        }
+        editingHistoryBookId = bookId;
+        startJob('historyEditOpen', '正在打开漫画编辑器…', { bookId });
+    }
+
+    function closeComicEditor(checkChanges = true) {
+        const changed = comicEditorDeletedPages.size || comicEditorActiveAddedItems().length;
+        if (comicEditorBusy) return;
+        if (checkChanges && changed
+                && !root.confirm('放弃尚未保存的页面修改？漫画资产不会发生变化。')) {
+            return;
+        }
+        closeHistoryDialog(document.getElementById('comicEditorDialog'));
+        document.getElementById('comicEditorPageList').replaceChildren();
+        document.getElementById('comicEditorSaveConfirm').hidden = true;
+        cleanupComicEditorState(true);
+    }
+
+    function toggleComicEditorPage(kind, index) {
+        if (!Number.isInteger(index) || comicEditorBusy) return;
+        const currentlyRemoved = kind === 'original'
+            ? comicEditorDeletedPages.has(index)
+            : !!comicEditorAddedItems[index]?.removed;
+        if (!currentlyRemoved && comicEditorFinalPageCount() <= 1) {
+            document.getElementById('comicEditorUrlStatus').textContent = '漫画至少需要保留 1 页，最后一页不能标记删除';
+            return;
+        }
+        if (kind === 'original') {
+            if (currentlyRemoved) comicEditorDeletedPages.delete(index);
+            else comicEditorDeletedPages.add(index);
+        } else if (comicEditorAddedItems[index]) {
+            comicEditorAddedItems[index].removed = !currentlyRemoved;
+        }
+        updateComicEditorState();
+    }
+
+    function requestComicEditorSave() {
+        const deleted = comicEditorDeletedPages.size;
+        const added = comicEditorActiveAddedItems().length;
+        if (comicEditorFinalPageCount() > format.MAX_PAGES || comicEditorFinalBytes() > format.MAX_TOTAL_BYTES) {
+            document.getElementById('comicEditorUrlStatus').textContent = `当前编辑结果超过整本 ${format.MAX_PAGES} 页 / 500 MiB 的 .ecomic v1 容量，请删除部分页面后保存`;
+            return;
+        }
+        if (!deleted && !added) {
+            document.getElementById('comicEditorUrlStatus').textContent = '尚未修改页面';
+            return;
+        }
+        const confirm = document.getElementById('comicEditorSaveConfirm');
+        confirm.hidden = false;
+        document.getElementById('comicEditorConfirmSummary').textContent = `确认删除 ${deleted} 页、新增 ${added} 页并保存？`;
+        document.getElementById('comicEditorSaveChangesButton').hidden = true;
+        confirm.querySelector('button')?.focus();
+    }
+
+    function commitComicEditor() {
+        if (!comicEditorSessionId || comicEditorBusy) return;
+        const retainedIndexes = comicEditorPages
+            .map((page, index) => comicEditorDeletedPages.has(index) ? -1 : index)
+            .filter(index => index >= 0);
+        const newFiles = comicEditorActiveAddedItems().map(item => item.file);
+        setComicEditorBusy(true, '正在写入新的页面版本；完成前原漫画保持不变…');
+        document.getElementById('comicEditorSaveConfirm').hidden = true;
+        startJob('historyEditCommit', '正在原子保存漫画页面…', {
+            sessionId: comicEditorSessionId,
+            retainedIndexes,
+            newFiles
+        });
+    }
+
+    function selectedComicEditorWebCandidates() {
+        return comicEditorWebCandidates.filter(candidate => candidate.selected && !candidate.duplicate);
+    }
+
+    function renderComicEditorWebCandidates() {
+        const preview = document.getElementById('comicEditorWebPreview');
+        const list = document.getElementById('comicEditorWebList');
+        list.replaceChildren();
+        if (!comicEditorWebCandidates.length) {
+            preview.hidden = true;
+            return;
+        }
+        preview.hidden = false;
+        comicEditorWebCandidates.forEach((candidate, index) => {
+            const row = document.createElement('li');
+            row.dataset.error = String(!!candidate.error);
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.checked = candidate.selected;
+            checkbox.disabled = candidate.duplicate || candidate.loading || comicEditorBusy;
+            checkbox.setAttribute('aria-label', `选择网页第 ${index + 1} 页`);
+            checkbox.addEventListener('change', () => {
+                candidate.selected = checkbox.checked;
+                if (!candidate.selected && candidate.prepared) releasePreparedCandidate(candidate);
+                renderComicEditorWebCandidates();
+                if (candidate.selected && !candidate.prepared && !comicEditorBusy) {
+                    comicEditorAbortController = new AbortController();
+                    setComicEditorBusy(true, '正在加载新增勾选的页面预览…');
+                    renderComicEditorWebCandidates();
+                    prepareComicEditorWebCandidates(comicEditorAbortController.signal).finally(() => {
+                        comicEditorAbortController = null;
+                        setComicEditorBusy(false);
+                        updateComicEditorState();
+                        renderComicEditorWebCandidates();
+                    });
+                }
+            });
+            const image = document.createElement('img');
+            image.alt = `网页第 ${index + 1} 页预览`;
+            image.loading = 'lazy';
+            if (candidate.prepared?.url) image.src = candidate.prepared.url;
+            const copy = document.createElement('span');
+            copy.textContent = candidate.error
+                ? `第 ${index + 1} 页 · ${candidate.error}`
+                : (candidate.loading ? `第 ${index + 1} 页 · 正在加载…` : `第 ${index + 1} 页${candidate.duplicate ? ' · 重复，已跳过' : ''}`);
+            row.append(checkbox, image, copy);
+            list.append(row);
+        });
+        const selected = selectedComicEditorWebCandidates();
+        document.getElementById('comicEditorWebSummary').textContent = `发现 ${comicEditorWebCandidates.length} 张 · 已选 ${selected.length} 张`;
+        document.getElementById('comicEditorWebAppend').disabled = comicEditorBusy
+            || !selected.length
+            || selected.some(candidate => !candidate.prepared);
+        document.getElementById('comicEditorWebToggleAll').textContent = selected.length === comicEditorWebCandidates.filter(candidate => !candidate.duplicate).length
+            ? '取消全选'
+            : '全选';
+    }
+
+    async function prepareComicEditorWebCandidates(signal) {
+        const selected = selectedComicEditorWebCandidates();
+        const retainedBytes = comicEditorPages.reduce((sum, page, index) => (
+            comicEditorDeletedPages.has(index) ? sum : sum + page.size
+        ), 0);
+        const addedBytes = comicEditorActiveAddedItems().reduce((sum, item) => sum + item.file.size, 0);
+        const preparedBytes = selected.reduce((sum, candidate) => sum + (candidate.prepared?.file.size || 0), 0);
+        const budget = { bytes: preparedBytes, limit: format.MAX_TOTAL_BYTES - retainedBytes - addedBytes };
+        const usedNames = new Set([
+            ...comicEditorPages.map(page => page.name.toLowerCase()),
+            ...comicEditorActiveAddedItems().map(item => item.file.name.toLowerCase()),
+            ...selected.filter(candidate => candidate.prepared).map(candidate => candidate.prepared.file.name.toLowerCase())
+        ]);
+        let cursor = 0;
+        async function lane() {
+            while (!signal.aborted) {
+                const laneIndex = cursor++;
+                if (laneIndex >= selected.length) return;
+                const candidate = selected[laneIndex];
+                if (candidate.prepared) continue;
+                candidate.loading = true;
+                candidate.error = '';
+                renderComicEditorWebCandidates();
+                try {
+                    candidate.prepared = await downloadWebCandidate(candidate, candidate.originalIndex, signal, budget, usedNames);
+                } catch (error) {
+                    candidate.error = error.name === 'AbortError' ? '已取消' : (error.message || '预览失败');
+                } finally {
+                    candidate.loading = false;
+                    renderComicEditorWebCandidates();
+                }
+            }
+        }
+        await Promise.all(Array.from({ length: Math.min(2, selected.length) }, lane));
+    }
+
+    async function analyzeComicEditorUrl() {
+        if (comicEditorBusy || activeJobType) return;
+        const input = document.getElementById('comicEditorUrlInput');
+        const rawUrl = input.value.trim();
+        const url = webImportCore.normalizeHttpsUrl(rawUrl, rawUrl);
+        if (!url) {
+            input.setAttribute('aria-invalid', 'true');
+            input.focus();
+            document.getElementById('comicEditorUrlStatus').textContent = '请输入有效的 HTTPS 漫画网页地址';
+            return;
+        }
+        input.removeAttribute('aria-invalid');
+        clearComicEditorWebCandidates();
+        comicEditorAbortController = new AbortController();
+        setComicEditorBusy(true, '正在读取网页并查找漫画页面…');
+        try {
+            const result = await fetchHtmlForImport(url, comicEditorAbortController.signal);
+            webImportFinalUrl = result.finalUrl;
+            const elementCandidates = webImportCore.extractImageCandidates(result.html, result.finalUrl);
+            const embeddedCandidates = webImportCore.extractEmbeddedImageCandidates(result.html, result.finalUrl);
+            let extracted = webImportCore.uniqueImageCandidates(
+                webImportCore.selectBestCandidateSet(elementCandidates, embeddedCandidates)
+            );
+            const availablePages = format.MAX_PAGES - comicEditorFinalPageCount();
+            if (availablePages <= 0) throw new Error(`漫画最多包含 ${format.MAX_PAGES} 页`);
+            const capturePlan = webImportCore.planRenderedPageCapture(extracted, result.html, result.finalUrl);
+            if (capturePlan.required) {
+                try {
+                    const captured = await captureRenderedPage(
+                        capturePlan.url,
+                        availablePages,
+                        comicEditorAbortController.signal,
+                        result.requiresInteractiveVerification === true
+                    );
+                    const rendered = webImportCore.uniqueImageCandidates((captured.images || []).map((image, index) => ({
+                        url: image.sourceUrl || `${captured.finalUrl || result.finalUrl}#dynamic-page-${index + 1}`,
+                        duplicateOf: -1,
+                        capturedIndex: Number.isInteger(image.capturedIndex) ? image.capturedIndex : -1,
+                        capturedName: String(image.name || `page-${index + 1}.jpg`),
+                        capturedMime: String(image.mime || ''),
+                        capturedSize: Number(image.size) || 0
+                    })));
+                    if (rendered.length && (capturePlan.preferRendered || rendered.length > extracted.length)) extracted = rendered;
+                } catch (captureError) {
+                    if (!extracted.length || captureError.name === 'AbortError') throw captureError;
+                }
+            }
+            if (!extracted.length) throw new Error('网页中没有找到可导入的漫画图片');
+            let selectedCount = 0;
+            comicEditorWebCandidates = extracted.map((candidate, index) => {
+                const duplicate = candidate.duplicateOf >= 0;
+                const selected = !duplicate && selectedCount < availablePages;
+                if (selected) selectedCount += 1;
+                return {
+                    id: nextJobId('editor-web'),
+                    url: candidate.url,
+                    transform: webImportCore.resolve18ComicTransform(result.finalUrl, candidate.url, result.html),
+                    capturedIndex: Number.isInteger(candidate.capturedIndex) ? candidate.capturedIndex : -1,
+                    capturedName: candidate.capturedName || '',
+                    capturedMime: candidate.capturedMime || '',
+                    capturedSize: candidate.capturedSize || 0,
+                    duplicate,
+                    selected,
+                    prepared: null,
+                    loading: false,
+                    error: '',
+                    originalIndex: index
+                };
+            });
+            renderComicEditorWebCandidates();
+            document.getElementById('comicEditorUrlStatus').textContent = `已找到 ${comicEditorWebCandidates.length} 张，正在生成预览…`;
+            await prepareComicEditorWebCandidates(comicEditorAbortController.signal);
+            const failed = selectedComicEditorWebCandidates().filter(candidate => !candidate.prepared).length;
+            document.getElementById('comicEditorUrlStatus').textContent = failed
+                ? `${failed} 张加载失败；取消勾选后仍可追加其他页面`
+                : '预览已就绪；确认勾选后追加到漫画末尾';
+        } catch (error) {
+            document.getElementById('comicEditorUrlStatus').textContent = error.name === 'AbortError'
+                ? '网页获取已取消'
+                : appendNetworkDiagnostic(error.message || '网页获取失败', error.diagnostics);
+        } finally {
+            comicEditorAbortController = null;
+            setComicEditorBusy(false);
+            updateComicEditorState();
+            renderComicEditorWebCandidates();
+        }
+    }
+
+    function appendComicEditorWebCandidates() {
+        const selected = selectedComicEditorWebCandidates();
+        if (!selected.length || selected.some(candidate => !candidate.prepared)) return;
+        const appended = selected.map(candidate => {
+            const item = candidate.prepared;
+            candidate.prepared = null;
+            item.removed = false;
+            return item;
+        });
+        comicEditorAddedItems.push(...appended);
+        comicEditorWebCandidates.forEach(releasePreparedCandidate);
+        comicEditorWebCandidates = [];
+        document.getElementById('comicEditorWebPreview').hidden = true;
+        releaseRenderedPageCapture();
+        renderComicEditorPages();
+        document.getElementById('comicEditorUrlStatus').textContent = `已把 ${appended.length} 张页面追加到末尾；保存前原漫画保持不变`;
+    }
+
+    async function appendComicEditorLocalFiles() {
+        const input = document.getElementById('comicEditorLocalFiles');
+        const files = Array.from(input.files || []);
+        if (!files.length || comicEditorBusy || activeJobType) return;
+        const prepared = new Array(files.length);
+        setComicEditorBusy(true, `正在准备 ${files.length} 张本地图片…`);
+        try {
+            let cursor = 0;
+            let firstError = null;
+            async function lane() {
+                while (!firstError) {
+                    const index = cursor++;
+                    if (index >= files.length) return;
+                    try {
+                        const detected = await validateSelectedFile(files[index]);
+                        prepared[index] = await prepareComicItem(files[index], detected);
+                        prepared[index].removed = false;
+                    } catch (error) {
+                        firstError = error;
+                    }
+                }
+            }
+            await Promise.all(Array.from({ length: Math.min(files.length, getComicParallelism()) }, lane));
+            if (firstError) throw firstError;
+            comicEditorAddedItems.push(...prepared);
+            renderComicEditorPages();
+            document.getElementById('comicEditorUrlStatus').textContent = `已按选择顺序追加 ${prepared.length} 张本地图片；保存前原漫画保持不变`;
+        } catch (error) {
+            prepared.filter(Boolean).forEach(revokeItem);
+            document.getElementById('comicEditorUrlStatus').textContent = error.message || '本地图片追加失败';
+        } finally {
+            input.value = '';
+            setComicEditorBusy(false);
+            updateComicEditorState();
+        }
     }
 
     function requestHistoryList() {
-        if (!worker) {
+        if (!worker || !historyStorageReady) {
+            historyRefreshPending = true;
             return;
         }
-        worker.postMessage({ type: 'historyList', jobId: nextJobId('history-list') });
-        worker.postMessage({ type: 'historyStorage', jobId: nextJobId('history-storage') });
+        if (historyListJobId) {
+            historyRefreshPending = true;
+            return;
+        }
+        historyRefreshPending = false;
+        historyListJobId = nextJobId('history-list');
+        worker.postMessage({ type: 'historyList', jobId: historyListJobId });
+        assetStorage.updateStorageSummary(document.getElementById('historyStorageSummary')).catch(() => {});
     }
 
     function setComicSortOptions() {
@@ -2967,7 +3768,11 @@
         worker.postMessage({
             type,
             jobId: activeJobId,
-            payload: { ...payload, parallelism: getComicParallelism() }
+            payload: {
+                ...payload,
+                parallelism: getComicParallelism(),
+                availableStorageBytes: assetStorage.getNativeAvailableBytes()
+            }
         });
     }
 
@@ -3011,6 +3816,8 @@
     }
 
     function selectArchiveFile(file, temporaryEntryName = '') {
+        document.getElementById('comicBundleImportSummary').hidden = true;
+        selectedBundleFile = null;
         if (sessionId) {
             closeReaderSession();
         }
@@ -3023,7 +3830,7 @@
         if (!/\.ecomic$/i.test(file.name)) {
             archiveInput.value = '';
             document.getElementById('comicArchiveMeta').textContent = '文件格式无效';
-            setStatus('请选择 .ecomic 漫画归档', 'error');
+            setStatus('请选择 .ecomic 漫画归档或 Ecryptees 漫画包 ZIP', 'error');
             setBusy(activeJobType);
             if (temporaryEntryName) {
                 worker.postMessage({
@@ -3044,7 +3851,34 @@
     }
 
     function handleArchiveSelected() {
-        selectArchiveFile(archiveInput.files && archiveInput.files[0]);
+        const file = archiveInput.files && archiveInput.files[0];
+        if (file && /\.zip$/i.test(file.name)) {
+            selectBundleFile(file);
+            return;
+        }
+        selectArchiveFile(file);
+    }
+
+    function selectBundleFile(file, temporaryEntryName = '') {
+        if (sessionId) closeReaderSession();
+        releaseSelectedArchiveTemp();
+        selectedArchive = null;
+        selectedBundleFile = file;
+        selectedArchiveTempName = temporaryEntryName;
+        document.getElementById('comicArchiveMeta').textContent = `${file.name} · ${formatBytes(file.size)}`;
+        document.getElementById('comicBundleFileName').textContent = file.name;
+        document.getElementById('comicBundleImportProgress').value = 0;
+        document.getElementById('comicBundleImportState').textContent = '等待验证清单、CRC 与漫画身份认证';
+        document.getElementById('comicBundleSuccessCount').textContent = '0';
+        document.getElementById('comicBundleReplaceCount').textContent = '0';
+        document.getElementById('comicBundleSkippedCount').textContent = '0';
+        document.getElementById('comicBundleFailedCount').textContent = '0';
+        document.getElementById('comicBundleFailureList').replaceChildren();
+        document.getElementById('comicBundleFailureList').hidden = true;
+        document.getElementById('comicBundleImportSummary').hidden = false;
+        resetProgress();
+        setStatus('已识别 Ecryptees 漫画包 ZIP；点击“导入漫画包”后会逐本验证并写入。', 'info');
+        setBusy(activeJobType);
     }
 
     function closeReaderSession(saveProgress = true, keepDialogOpen = false) {
@@ -3110,6 +3944,10 @@
         if (!book) {
             return;
         }
+        if (book.fileAvailable === false && !book.archiveFile) {
+            setHistoryStatus('漫画原始页面已缺失，请重新导入原 .ecomic 归档进行修复。', 'error');
+            return;
+        }
         if (keepReaderOpen) {
             setReaderDrawerOpen(false, false);
         }
@@ -3133,7 +3971,7 @@
                 return;
             }
         }
-        if (book.directoryOnly && book.archiveFile) {
+        if ((book.directoryOnly || book.fileAvailable === false) && book.archiveFile) {
             openingDirectoryBookId = bookId;
             startJob('open', '正在从独立漫画目录打开漫画…', { file: book.archiveFile });
             return;
@@ -3260,16 +4098,12 @@
         });
     }
 
-    async function renameHistoryBook(bookId) {
+    async function saveHistoryBookTitle(bookId, value) {
         const book = historyBooks.find(item => item.bookId === bookId);
         if (!book || activeJobType) {
             return;
         }
-        const input = root.prompt('修改漫画标题', book.title);
-        if (input === null) {
-            return;
-        }
-        const title = input.trim().slice(0, 120);
+        const title = String(value || '').trim().slice(0, 120);
         if (!title) {
             setHistoryStatus('标题不能为空。', 'error');
             return;
@@ -3293,7 +4127,7 @@
         startJob('historyRename', '正在修改漫画标题…', { bookId, title });
     }
 
-    async function requestDeleteHistoryBook(bookId) {
+    async function requestDeleteHistoryBook(bookId, primaryConfirmed = false) {
         if (!bookId || activeJobType) {
             return;
         }
@@ -3304,7 +4138,7 @@
         const cached = browserHistoryBooks.some(item => item.bookId === bookId);
         const external = directoryBooks.some(item => item.bookId === bookId);
         if (!cached && external) {
-            if (!root.confirm(`确定删除独立漫画目录中的《${book.title}》吗？这会删除其中的 .ecomic、PNG 和封面文件，无法撤销。`)) {
+            if (!primaryConfirmed && !root.confirm(`确定删除独立漫画目录中的《${book.title}》吗？这会删除其中的 .ecomic、PNG 和封面文件，无法撤销。`)) {
                 return;
             }
             try {
@@ -3324,7 +4158,7 @@
             : isAndroidRuntime
             ? `确定从应用资产删除《${book.title}》吗？原始页面、封面、元数据和阅读进度都会被删除，无法撤销。`
             : `确定从浏览器资产移除《${book.title}》吗？`;
-        if (!root.confirm(deletePrompt)) {
+        if (!primaryConfirmed && !root.confirm(deletePrompt)) {
             return;
         }
         const deleteExternal = isDesktopRuntime
@@ -3750,19 +4584,127 @@
             }
             return;
         }
+        if (message.type === 'cleaned' && message.jobId === workerCleanupJobId) {
+            workerCleanupJobId = '';
+            finishHistoryStorageStartup();
+            return;
+        }
         if (message.type === 'history') {
+            if (message.jobId === historyListJobId) historyListJobId = '';
             browserHistoryBooks = Array.isArray(message.books) ? message.books : [];
             mergeHistorySources();
+            const invalidCount = Array.isArray(message.invalidRecords) ? message.invalidRecords.length : 0;
+            const missingCount = browserHistoryBooks.filter(book => book.fileAvailable === false).length;
+            if (invalidCount || missingCount) {
+                const parts = [];
+                if (missingCount) parts.push(`${missingCount} 本漫画原页缺失`);
+                if (invalidCount) parts.push(`${invalidCount} 条漫画元数据损坏`);
+                setHistoryStatus(`${parts.join('，')}；已保留现有数据，请重新导入对应 .ecomic 修复。`, 'error');
+            }
+            if (historyRefreshPending) root.setTimeout(requestHistoryList, 0);
             return;
         }
         if (message.type === 'historyStorage') {
-            const usage = Number(message.usage);
-            const quota = Number(message.quota);
-            const used = Number.isFinite(usage) && usage >= 0 ? formatBytes(usage) : '未知';
-            const remaining = Number.isFinite(quota) && quota > 0 && Number.isFinite(usage)
-                ? formatBytes(Math.max(0, quota - usage))
-                : '未知';
-            document.getElementById('historyStorageSummary').textContent = `已使用 ${used} · 剩余 ${remaining}`;
+            assetStorage.updateStorageSummary(document.getElementById('historyStorageSummary')).catch(() => {});
+            return;
+        }
+        if (message.type === 'historyEditThumbnail' && comicEditorThumbnailJobs.has(message.jobId)) {
+            const index = comicEditorThumbnailJobs.get(message.jobId);
+            comicEditorThumbnailJobs.delete(message.jobId);
+            if (message.sessionId !== comicEditorSessionId) return;
+            const previousUrl = comicEditorThumbnailUrls.get(index);
+            if (previousUrl) URL.revokeObjectURL(previousUrl);
+            const url = URL.createObjectURL(new Blob([message.file], { type: 'image/jpeg' }));
+            comicEditorThumbnailUrls.set(index, url);
+            const image = document.querySelector(`.comic-editor-page-thumb[data-thumbnail-index="${index}"]`);
+            if (image) {
+                image.src = url;
+                image.alt = `第 ${index + 1} 页缩略图`;
+                image.dataset.loading = 'false';
+            }
+            return;
+        }
+        if (message.type === 'historyEditOpened' && message.jobId === activeJobId) {
+            activeJobId = '';
+            setBusy('');
+            comicEditorSessionId = message.sessionId;
+            comicEditorPages = Array.isArray(message.pages) ? message.pages : [];
+            comicEditorAddedItems = [];
+            comicEditorDeletedPages = new Set();
+            document.getElementById('comicEditorUrlInput').value = '';
+            document.getElementById('comicEditorUrlInput').removeAttribute('aria-invalid');
+            document.getElementById('comicEditorUrlStatus').textContent = '新页面会在预览勾选后自动添加到末尾';
+            document.getElementById('comicEditorSaveConfirm').hidden = true;
+            document.getElementById('comicEditorTitle').textContent = '编辑漫画';
+            renderComicEditorPages();
+            const dialog = document.getElementById('comicEditorDialog');
+            if (!dialog.open) dialog.showModal();
+            setHistoryStatus('编辑会话已打开；保存前不会修改漫画资产。');
+            return;
+        }
+        if (message.type === 'historyEditCommitted' && message.jobId === activeJobId) {
+            const removed = Number(message.removed) || 0;
+            const added = Number(message.added) || 0;
+            activeJobId = '';
+            setBusy('');
+            closeHistoryDialog(document.getElementById('comicEditorDialog'));
+            document.getElementById('comicEditorPageList').replaceChildren();
+            cleanupComicEditorState(false);
+            setHistoryStatus(`漫画页面已保存：删除 ${removed} 页，新增 ${added} 页。`, 'success');
+            requestHistoryList();
+            return;
+        }
+        if (message.type === 'historyBundleReady' && message.jobId === activeJobId) {
+            activeJobId = '';
+            setBusy('');
+            downloadOutput('bundle', message, 'ecryptees-comics.zip');
+            setHistoryStatus(`已生成 ${message.count} 本漫画的 ZIP，正在打开保存位置…`, 'success');
+            exitHistorySelection();
+            return;
+        }
+        if (message.type === 'historyBundleImportProgress' && message.jobId === activeJobId) {
+            const total = Math.max(1, Number(message.total) || 1);
+            const completed = Number(message.completed) || 0;
+            document.getElementById('comicBundleImportProgress').value = Math.round(completed / total * 100);
+            document.getElementById('comicBundleImportState').textContent = message.message || `正在导入第 ${completed}/${total} 本`;
+            document.getElementById('comicBundleSuccessCount').textContent = String(message.success || 0);
+            document.getElementById('comicBundleReplaceCount').textContent = String(message.replaced || 0);
+            document.getElementById('comicBundleSkippedCount').textContent = String(message.skipped || 0);
+            document.getElementById('comicBundleFailedCount').textContent = String(message.failed || 0);
+            const failureList = document.getElementById('comicBundleFailureList');
+            failureList.replaceChildren();
+            for (const failure of Array.isArray(message.failures) ? message.failures : []) {
+                const item = document.createElement('li');
+                item.textContent = `《${failure.title || failure.bookId || '未命名漫画'}》：${failure.message || '导入失败'}`;
+                failureList.append(item);
+            }
+            failureList.hidden = !failureList.childElementCount;
+            return;
+        }
+        if (message.type === 'historyBundleImported' && message.jobId === activeJobId) {
+            activeJobId = '';
+            setBusy('');
+            document.getElementById('comicBundleImportProgress').value = 100;
+            document.getElementById('comicBundleImportState').textContent = message.failed
+                ? `导入完成；${message.failed} 本失败，可查看状态后重新导入`
+                : '漫画包已全部导入完成';
+            document.getElementById('comicBundleSuccessCount').textContent = String(message.success || 0);
+            document.getElementById('comicBundleReplaceCount').textContent = String(message.replaced || 0);
+            document.getElementById('comicBundleSkippedCount').textContent = String(message.skipped || 0);
+            document.getElementById('comicBundleFailedCount').textContent = String(message.failed || 0);
+            const failureList = document.getElementById('comicBundleFailureList');
+            failureList.replaceChildren();
+            for (const failure of Array.isArray(message.failures) ? message.failures : []) {
+                const item = document.createElement('li');
+                item.textContent = `《${failure.title || failure.bookId || '未命名漫画'}》：${failure.message || '导入失败'}`;
+                failureList.append(item);
+            }
+            failureList.hidden = !failureList.childElementCount;
+            setStatus(`漫画包导入完成：成功 ${message.success || 0}，替换 ${message.replaced || 0}，跳过 ${message.skipped || 0}，失败 ${message.failed || 0}。`, message.failed ? 'error' : 'success');
+            selectedBundleFile = null;
+            archiveInput.value = '';
+            releaseSelectedArchiveTemp();
+            requestHistoryList();
             return;
         }
         if (message.type === 'historyArchiveReady' && message.jobId === activeJobId) {
@@ -4005,6 +4947,21 @@
             return;
         }
         if (message.type === 'error') {
+            if (message.jobId === workerCleanupJobId) {
+                workerCleanupJobId = '';
+                finishHistoryStorageStartup(message.message || '漫画资产清理失败，已跳过清理');
+                return;
+            }
+            if (message.jobId === historyListJobId) {
+                historyListJobId = '';
+                setHistoryStatus(message.message || '漫画资产列表刷新失败', 'error');
+                if (historyRefreshPending) root.setTimeout(requestHistoryList, 0);
+                return;
+            }
+            if (comicEditorThumbnailJobs.has(message.jobId)) {
+                comicEditorThumbnailJobs.delete(message.jobId);
+                return;
+            }
             if (pageJobs.has(message.jobId)) {
                 const index = pageJobs.get(message.jobId);
                 pageJobs.delete(message.jobId);
@@ -4042,6 +4999,18 @@
                     setHistoryStatus(`导出长图失败：${message.message || '未知错误'}`, 'error');
                 } else if (failedType === 'historySave') {
                     setHistoryStatus(`加入资产失败：${message.message || '未知错误'}`, 'error');
+                } else if (failedType === 'historyEditOpen') {
+                    cleanupComicEditorState(false);
+                    setHistoryStatus(`打开漫画编辑器失败：${message.message || '未知错误'}`, 'error');
+                } else if (failedType === 'historyEditCommit') {
+                    setComicEditorBusy(false, `保存失败：${message.message || '未知错误'}；原漫画未改变`);
+                    updateComicEditorState();
+                    setHistoryStatus(`漫画页面保存失败：${message.message || '未知错误'}；原漫画未改变。`, 'error');
+                } else if (failedType === 'historyExportBundle') {
+                    setHistoryStatus(`导出漫画包失败：${message.message || '未知错误'}`, 'error');
+                } else if (failedType === 'historyImportBundle') {
+                    document.getElementById('comicBundleImportState').textContent = `导入失败：${message.message || '未知错误'}`;
+                    setStatus(`漫画包导入失败：${message.message || '未知错误'}`, 'error');
                 }
                 if (failedType === 'open' || failedType === 'historySave') {
                     releaseSelectedArchiveTemp();
@@ -4077,7 +5046,38 @@
         return new root.Ecryptees.LocalComicWorker();
     }
 
-    function startWorker(reopenBookId = '', aggressiveCleanup = false) {
+    function finishHistoryStorageStartup(warning = '') {
+        if (historyStorageReady) {
+            return;
+        }
+        root.clearTimeout(workerCleanupWatchdog);
+        workerCleanupWatchdog = 0;
+        historyStorageReady = true;
+        for (const resolve of historyStorageWaiters.splice(0)) resolve();
+        setBusy(activeJobType);
+        if (warning) {
+            setHistoryStatus(warning, 'error');
+        }
+        requestHistoryList();
+        const reopenBookId = pendingWorkerReopenBookId;
+        pendingWorkerReopenBookId = '';
+        if (reopenBookId) {
+            root.setTimeout(() => openHistoryBook(reopenBookId, false), 0);
+        }
+        const incoming = pendingIncomingArchive;
+        pendingIncomingArchive = null;
+        if (incoming) {
+            root.setTimeout(() => handleIncomingArchive(incoming), 0);
+        }
+    }
+
+    function startWorker(reopenBookId = '', aggressiveCleanup = false, skipCleanup = false) {
+        root.clearTimeout(workerCleanupWatchdog);
+        workerCleanupWatchdog = 0;
+        historyStorageReady = false;
+        historyListJobId = '';
+        historyRefreshPending = true;
+        pendingWorkerReopenBookId = reopenBookId;
         worker = createComicWorker();
         worker.addEventListener('message', handleWorkerMessage);
         worker.addEventListener('error', () => {
@@ -4106,15 +5106,26 @@
                 recoveringWorker = false;
             }, 100);
         });
-        worker.postMessage({
-            type: 'cleanup',
-            jobId: nextJobId('cleanup'),
-            payload: { aggressive: aggressiveCleanup }
-        });
-        requestHistoryList();
-        if (reopenBookId) {
-            root.setTimeout(() => openHistoryBook(reopenBookId, false), 0);
+        if (skipCleanup) {
+            workerCleanupJobId = '';
+            finishHistoryStorageStartup('漫画资产清理等待超时；已安全跳过删除，稍后重启应用可重试。');
+        } else {
+            workerCleanupJobId = nextJobId('cleanup');
+            const cleanupJobId = workerCleanupJobId;
+            worker.postMessage({
+                type: 'cleanup',
+                jobId: cleanupJobId,
+                payload: { aggressive: aggressiveCleanup }
+            });
+            workerCleanupWatchdog = root.setTimeout(() => {
+                if (historyStorageReady || workerCleanupJobId !== cleanupJobId) return;
+                const reopenAfterTimeout = pendingWorkerReopenBookId;
+                workerCleanupJobId = '';
+                worker?.terminate();
+                startWorker(reopenAfterTimeout, false, true);
+            }, HISTORY_STARTUP_CLEANUP_TIMEOUT_MS);
         }
+        setBusy(activeJobType);
     }
 
     function initialize() {
@@ -4402,6 +5413,18 @@
         }
     }, { passive: true });
     function handleHistoryGridClick(event) {
+        const card = event.target.closest('.history-card');
+        const cardBookId = card?.dataset.bookId || '';
+        if (historySelectionSuppressClick && historySelectionSuppressClick === cardBookId) {
+            historySelectionSuppressClick = '';
+            root.clearTimeout(historySelectionSuppressTimer);
+            historySelectionSuppressTimer = 0;
+            return;
+        }
+        if (historySelectionMode && cardBookId) {
+            toggleHistorySelection(cardBookId);
+            return;
+        }
         const button = event.target.closest('button[data-history-action]');
         if (!button) {
             return;
@@ -4427,9 +5450,19 @@
 
     assetCenter.register('comic', {
         activate: activateComicAssets,
+        deactivate() {
+            exitHistorySelection(false);
+            closeHistoryActionSheet();
+            if (document.getElementById('comicEditorDialog').open) closeComicEditor(false);
+        },
         render: renderHistory,
         refresh: requestHistoryList,
         handleGridClick: handleHistoryGridClick,
+        handleGridPointerDown: startHistoryPress,
+        handleGridPointerMove: moveHistoryPress,
+        handleGridPointerUp: finishHistoryPress,
+        handleGridPointerCancel: finishHistoryPress,
+        handleGridContextMenu: suppressHistoryContextMenu,
         handleGroupChange(event) {
             selectedHistoryGroup = event.currentTarget.value;
             document.getElementById('historyViewMenu').open = false;
@@ -4456,20 +5489,57 @@
             document.getElementById('comicTab').click();
         }
     });
-    document.getElementById('historyMenuCancelButton').addEventListener('click', () => {
-        closeHistoryDialog(document.getElementById('historyBookMenuDialog'));
-        activeHistoryMenuBookId = '';
+    for (const id of ['historyBookMenuCancelButton', 'historyBookMenuCloseButton']) {
+        document.getElementById(id).addEventListener('click', closeHistoryActionSheet);
+    }
+    document.getElementById('historyBookMenuDialog').addEventListener('cancel', event => {
+        event.preventDefault();
+        closeHistoryActionSheet();
+    });
+    document.getElementById('historyBookMenuDialog').addEventListener('click', event => {
+        if (event.target === event.currentTarget) closeHistoryActionSheet();
     });
     document.getElementById('historyMenuRenameButton').addEventListener('click', () => {
+        const book = historyBooks.find(item => item.bookId === activeHistoryMenuBookId);
+        if (!book) return;
+        const input = document.getElementById('historyMenuRenameInput');
+        input.value = book.title;
+        showHistorySheetView('rename');
+        input.focus();
+        input.select();
+    });
+    document.getElementById('historyMenuRenameCancelButton').addEventListener('click', () => showHistorySheetView('menu'));
+    document.getElementById('historyMenuRenameForm').addEventListener('submit', async event => {
+        event.preventDefault();
         const bookId = activeHistoryMenuBookId;
-        closeHistoryDialog(document.getElementById('historyBookMenuDialog'));
-        activeHistoryMenuBookId = '';
-        renameHistoryBook(bookId);
+        const title = document.getElementById('historyMenuRenameInput').value;
+        await saveHistoryBookTitle(bookId, title);
+        closeHistoryActionSheet();
     });
     document.getElementById('historyMenuGroupButton').addEventListener('click', () => {
+        openHistoryGroupDialog(activeHistoryMenuBookId);
+    });
+    document.getElementById('historyMenuEditButton').addEventListener('click', () => {
         const bookId = activeHistoryMenuBookId;
-        closeHistoryDialog(document.getElementById('historyBookMenuDialog'));
-        openHistoryGroupDialog(bookId);
+        closeHistoryActionSheet();
+        openComicEditor(bookId);
+    });
+    document.getElementById('historyMenuExportArchiveButton').addEventListener('click', () => {
+        const bookId = activeHistoryMenuBookId;
+        closeHistoryActionSheet();
+        exportHistoryArchive(bookId);
+    });
+    document.getElementById('historyMenuExportLongButton').addEventListener('click', () => {
+        const bookId = activeHistoryMenuBookId;
+        closeHistoryActionSheet();
+        exportHistoryLongImage(bookId);
+    });
+    document.getElementById('historyMenuDeleteButton').addEventListener('click', () => showHistorySheetView('delete'));
+    document.getElementById('historyMenuDeleteCancelButton').addEventListener('click', () => showHistorySheetView('menu'));
+    document.getElementById('historyMenuDeleteConfirmButton').addEventListener('click', () => {
+        const bookId = activeHistoryMenuBookId;
+        closeHistoryActionSheet();
+        requestDeleteHistoryBook(bookId);
     });
     document.getElementById('historyFolderCancelButton').addEventListener('click', () => {
         closeHistoryDialog(document.getElementById('historyFolderDialog'));
@@ -4494,13 +5564,11 @@
         }
     });
     document.getElementById('historyGroupCancelButton').addEventListener('click', () => {
-        closeHistoryDialog(document.getElementById('historyGroupDialog'));
-        activeHistoryMenuBookId = '';
+        showHistorySheetView('menu');
     });
     document.getElementById('historyGroupCreateFolderButton').addEventListener('click', () => {
         const bookId = activeHistoryMenuBookId;
-        closeHistoryDialog(document.getElementById('historyGroupDialog'));
-        activeHistoryMenuBookId = '';
+        closeHistoryActionSheet();
         openHistoryFolderDialog(bookId);
     });
     document.getElementById('historyGroupForm').addEventListener('submit', async event => {
@@ -4509,13 +5577,90 @@
         const groupId = document.getElementById('historyGroupSelect').value;
         try {
             await setHistoryBookGroup(bookId, groupId);
-            closeHistoryDialog(document.getElementById('historyGroupDialog'));
-            activeHistoryMenuBookId = '';
+            closeHistoryActionSheet();
             const groupName = historyGroups.find(group => group.groupId === groupId)?.name || '未分组';
             setHistoryStatus(`《${historyBooks.find(book => book.bookId === bookId)?.title || '漫画'}》已移至“${groupName}”。`, 'success');
         } catch (groupError) {
             setHistoryStatus(groupError.message || '漫画分组保存失败。', 'error');
         }
+    });
+    const historyActionSheet = document.getElementById('historyBookActionSheet');
+    historyActionSheet.addEventListener('pointerdown', event => {
+        if (!event.target.closest('.video-sheet-drag-handle')) return;
+        historySheetGesture = { pointerId: event.pointerId, startY: event.clientY, lastY: event.clientY };
+        historyActionSheet.setPointerCapture?.(event.pointerId);
+    });
+    historyActionSheet.addEventListener('pointermove', event => {
+        if (!historySheetGesture || historySheetGesture.pointerId !== event.pointerId) return;
+        historySheetGesture.lastY = event.clientY;
+    });
+    historyActionSheet.addEventListener('pointerup', event => {
+        if (!historySheetGesture || historySheetGesture.pointerId !== event.pointerId) return;
+        const distance = historySheetGesture.lastY - historySheetGesture.startY;
+        historySheetGesture = null;
+        if (distance > 64) closeHistoryActionSheet();
+    });
+    historyActionSheet.addEventListener('pointercancel', () => { historySheetGesture = null; });
+    document.getElementById('historySelectionCancelButton').addEventListener('click', () => exitHistorySelection());
+    document.getElementById('historySelectionAllButton').addEventListener('click', toggleAllVisibleHistoryBooks);
+    document.getElementById('historyBundleExportButton').addEventListener('click', () => {
+        const selected = getSelectedHistoryBooks();
+        if (!selected.length) return;
+        startJob('historyExportBundle', `正在串行打包 ${selected.length} 本漫画…`, {
+            bookIds: selected.map(book => book.bookId)
+        });
+    });
+    document.getElementById('comicEditorPageList').addEventListener('click', event => {
+        const button = event.target.closest('button[data-editor-action="toggleDelete"]');
+        if (button) toggleComicEditorPage(button.dataset.pageKind, Number(button.dataset.pageIndex));
+    });
+    document.getElementById('comicEditorFetchButton').addEventListener('click', analyzeComicEditorUrl);
+    document.getElementById('comicEditorLocalFiles').addEventListener('change', appendComicEditorLocalFiles);
+    document.getElementById('comicEditorWebAppend').addEventListener('click', appendComicEditorWebCandidates);
+    document.getElementById('comicEditorWebClear').addEventListener('click', () => {
+        clearComicEditorWebCandidates();
+        document.getElementById('comicEditorUrlStatus').textContent = '网页预览已清除；漫画页面没有变化';
+    });
+    document.getElementById('comicEditorWebToggleAll').addEventListener('click', () => {
+        const selectable = comicEditorWebCandidates.filter(candidate => !candidate.duplicate);
+        const selectAll = selectable.some(candidate => !candidate.selected);
+        for (const candidate of selectable) {
+            candidate.selected = selectAll;
+            if (!selectAll) releasePreparedCandidate(candidate);
+        }
+        renderComicEditorWebCandidates();
+        if (selectAll && !comicEditorBusy) {
+            comicEditorAbortController = new AbortController();
+            setComicEditorBusy(true, '正在加载新增勾选的页面预览…');
+            prepareComicEditorWebCandidates(comicEditorAbortController.signal).finally(() => {
+                comicEditorAbortController = null;
+                setComicEditorBusy(false);
+                updateComicEditorState();
+                renderComicEditorWebCandidates();
+            });
+        }
+    });
+    document.getElementById('comicEditorCancelButton').addEventListener('click', () => closeComicEditor(true));
+    document.getElementById('comicEditorDialog').addEventListener('cancel', event => {
+        event.preventDefault();
+        closeComicEditor(true);
+    });
+    for (const id of ['comicEditorSaveButton', 'comicEditorSaveChangesButton']) {
+        document.getElementById(id).addEventListener('click', requestComicEditorSave);
+    }
+    document.getElementById('comicEditorConfirmCancelButton').addEventListener('click', () => {
+        document.getElementById('comicEditorSaveConfirm').hidden = true;
+        const saveButton = document.getElementById('comicEditorSaveChangesButton');
+        saveButton.hidden = false;
+        saveButton.focus({ preventScroll: true });
+    });
+    document.getElementById('comicEditorConfirmButton').addEventListener('click', commitComicEditor);
+    document.getElementById('comicBundleImportButton').addEventListener('click', () => {
+        if (!selectedBundleFile || activeJobType) return;
+        startJob('historyImportBundle', '正在验证并导入漫画包…', {
+            file: selectedBundleFile,
+            conflictPolicy: document.getElementById('comicBundleConflictPolicy').value
+        });
     });
     document.getElementById('selectHistoryDirectoryButton').addEventListener('click', connectLibraryDirectory);
     document.getElementById('migrateHistoryButton').addEventListener('click', migrateCurrentShelf);
@@ -4532,8 +5677,7 @@
             }
         }
     });
-    document.addEventListener('ecryptees-open-archive', event => {
-        const detail = event.detail || {};
+    function handleIncomingArchive(detail = {}) {
         const file = detail.file;
         const temporaryEntryName = String(detail.opfsName || '');
         if (!(file instanceof Blob) || !temporaryEntryName) {
@@ -4545,16 +5689,37 @@
                 jobId: nextJobId('release-busy-incoming'),
                 payload: { opfsName: temporaryEntryName }
             });
-            setStatus('当前任务正在处理，请稍后重新打开 .ecomic。', 'error');
+            setStatus('当前任务正在处理，请稍后重新打开漫画归档。', 'error');
             return;
         }
         archiveInput.value = '';
         document.getElementById('comicTab').click();
         setComicSourceMode('archive');
+        if (/\.zip$/i.test(file.name)) {
+            selectBundleFile(file, temporaryEntryName);
+            return;
+        }
         if (selectArchiveFile(file, temporaryEntryName)) {
             setStatus(`正在打开 ${file.name}…`);
             openComic();
         }
+    }
+
+    document.addEventListener('ecryptees-open-archive', event => {
+        const detail = event.detail || {};
+        if (!historyStorageReady) {
+            if (pendingIncomingArchive?.opfsName && pendingIncomingArchive.opfsName !== detail.opfsName) {
+                worker?.postMessage({
+                    type: 'releaseOutput',
+                    jobId: nextJobId('release-replaced-incoming'),
+                    payload: { opfsName: pendingIncomingArchive.opfsName }
+                });
+            }
+            pendingIncomingArchive = detail;
+            setStatus('正在检查漫画资产，完成后会自动打开外部归档…');
+            return;
+        }
+        handleIncomingArchive(detail);
     });
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'hidden') {

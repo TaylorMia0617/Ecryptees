@@ -74,6 +74,10 @@ test('video worker keeps archive conversion bounded while assets store original 
     assert.match(assets, /DATABASE_VERSION = 3/);
     assert.match(assets, /byContentId/);
     assert.match(assets, /playbackPosition/);
+    assert.match(assets, /METADATA_SCHEMA_VERSION = 1/);
+    assert.match(assets, /writeMetadataSidecar/);
+    assert.match(assets, /recoveredIds/);
+    assert.match(assets, /恢复的视频/);
     assert.doesNotMatch(worker, /PBKDF|KEY_MODE_PASSWORD|password/i);
     assert.doesNotMatch(videoCore, /PBKDF|KEY_MODE_PASSWORD|password/i);
 });
@@ -103,6 +107,9 @@ test('Android accepts .emp4 and exposes native AES-GCM Range playback', () => {
     assert.match(activity, /Content-Range/);
     assert.match(activity, /releaseAllEmp4Playbacks/);
     assert.match(activity, /setVideoPlaybackActive/);
+    assert.match(activity, /new StatFs\(getApplicationInfo\(\)\.dataDir\)\.getAvailableBytes\(\)/);
+    assert.match(activity, /performSelectionHaptic/);
+    assert.match(activity, /HapticFeedbackConstants\.LONG_PRESS/);
     assert.match(activity, /onShowCustomView/);
     assert.match(bridge, /EcrypteesAndroidVideo/);
     assert.match(bridge, /ecryptees-open-video-archive/);

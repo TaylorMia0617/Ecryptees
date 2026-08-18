@@ -16,8 +16,8 @@ android {
         applicationId 'com.ecryptees.offline'
         minSdk 26
         targetSdk 36
-        versionCode 23
-        versionName '1.1.5'
+        versionCode 26
+        versionName '1.1.8'
     }
 
     buildTypes {
